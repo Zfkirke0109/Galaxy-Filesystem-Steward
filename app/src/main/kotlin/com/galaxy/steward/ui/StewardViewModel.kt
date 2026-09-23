@@ -28,6 +28,7 @@ import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.diagnostics.LogcatExporter
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.work.AuditWorker
 import com.galaxy.steward.work.KeepAlive
@@ -90,6 +91,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     /** App data (per-app storage, caches, Android/data|obb|media) and Termux. */
     val apps: AppsController = app.apps
     val termux: TermuxController = app.termux
+    val logcat: LogcatExporter = app.logcat
 
     private val session = app.session
     private val scope = app.appScope

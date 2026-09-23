@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -35,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +52,8 @@ import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.organize.KeywordRule
 import com.galaxy.steward.data.SettingsStore
+import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.shizuku.ShizukuStatus
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.UiState
 import com.galaxy.steward.ui.components.SectionHeader
@@ -58,7 +62,9 @@ import com.galaxy.steward.ui.components.SectionHeader
 fun SettingsScreen(vm: StewardViewModel, state: UiState) {
     val settings by vm.settings.collectAsState()
     val prefs by vm.preferences.collectAsState()
+    val shizuku by vm.apps.shizuku.status.collectAsState()
     val context = LocalContext.current
+    LaunchedEffect(Unit) { vm.apps.shizuku.refresh() }
     var ruleDialog by remember { mutableStateOf(false) }
     var protectDialog by remember { mutableStateOf(false) }
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -145,8 +151,8 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
             }
             item {
                 Hint(
-                    "Always protected: Android/data, obb and media, projects and Git repositories, keys and credentials, and the " +
-                        "steward's own quarantine. Pin more folders to keep them exactly as they are.",
+                    "Always protected: Android/data, obb and media, projects and Git repositories, keys and credentials, the " +
+                        "steward's own quarantine, and saved logcat exports. Pin more folders to keep them exactly as they are.",
                 )
             }
             items(settings.protectedFolders, key = { it }) { folder ->
@@ -168,6 +174,9 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 item { SwitchRow("Match wallpaper colours", "Use Material You dynamic colour.", prefs.dynamicColor) { vm.setDynamicColor(it) } }
             }
+
+            item { SectionHeader("Diagnostics") }
+            item { LogcatExportRow(vm.logcat, wholeDevice = shizuku == ShizukuStatus.READY) }
 
             item { SectionHeader("About") }
             item {
@@ -194,6 +203,55 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
             protectDialog = false
             vm.updateSettings { it.copy(protectedFolders = (it.protectedFolders + folder).distinct()) }
         }
+    }
+}
+
+/** Saves the log to Documents/Galaxy Steward LogCat and offers to share it. */
+@Composable
+private fun LogcatExportRow(exporter: LogcatExporter, wholeDevice: Boolean) {
+    val state by exporter.state.collectAsState()
+    val context = LocalContext.current
+    val small = MaterialTheme.typography.bodySmall
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Export logcat", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (wholeDevice) {
+                        "Saves the whole device log to ${SafetyPolicy.LOGCAT_DIR}."
+                    } else {
+                        "Saves Galaxy Steward's own log to ${SafetyPolicy.LOGCAT_DIR}. Connect Shizuku on the Apps tab to save the whole device log."
+                    },
+                    style = small,
+                    color = muted,
+                )
+            }
+            FilledTonalButton(onClick = exporter::export, enabled = !state.running) { Text(if (state.running) "Saving…" else "Export") }
+        }
+        if (state.running) {
+            Text(if (state.bytesWritten > 0) "${state.bytesWritten.humanBytes()} saved so far…" else "Reading the log…", style = small, color = muted)
+        }
+        state.saved?.let { saved ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Saved ${saved.file.name} (${saved.bytes.humanBytes()}, ${if (saved.wholeDevice) "whole device" else "own log only"})",
+                    Modifier.weight(1f),
+                    style = small,
+                )
+                TextButton(onClick = { context.startActivity(exporter.shareIntent(saved.file)) }) { Text("Share") }
+            }
+            // Shizuku was connected but couldn't read the log: say why.
+            if (wholeDevice && !saved.wholeDevice && saved.note != null) Text(saved.note, style = small, color = MaterialTheme.colorScheme.error)
+        }
+        state.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error) }
+        Text(
+            "Android keeps only the latest part of the log, so export right after something goes wrong (Developer options > " +
+                "Logger buffer sizes keeps more). The whole device log can include names and file paths from other apps, so " +
+                "share it only with people you trust.",
+            style = small,
+            color = muted,
+        )
     }
 }
 

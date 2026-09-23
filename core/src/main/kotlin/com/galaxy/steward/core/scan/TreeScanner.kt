@@ -32,7 +32,7 @@ class TreeScanner(
     private val protectedRel: Set<String> = settings.protectedFolders
         .map { it.trim().trim('/') }
         .filter { it.isNotEmpty() }
-        .toSet()
+        .toSet() + SafetyPolicy.LOGCAT_DIR
 
     suspend fun scan(listener: Listener? = null): StorageTree {
         val rootDir = Paths.get(rootPath)

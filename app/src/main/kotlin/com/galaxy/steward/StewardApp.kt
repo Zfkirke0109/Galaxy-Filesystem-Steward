@@ -7,6 +7,7 @@ import com.galaxy.steward.apps.AppsController
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.data.AndroidEnvironment
 import com.galaxy.steward.data.SettingsStore
+import com.galaxy.steward.diagnostics.LogcatExporter
 import com.galaxy.steward.shizuku.ShizukuBridge
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.ui.StewardSession
@@ -31,6 +32,10 @@ class StewardApp : Application() {
     lateinit var termux: TermuxController
         private set
 
+    /** Saves the device log to Documents/Galaxy Steward LogCat (Settings > Diagnostics). */
+    lateinit var logcat: LogcatExporter
+        private set
+
     /**
      * Scans and runs belong to the process, not to a screen: they keep going (inside a foreground service) when
      * you switch apps or close the window, and the next screen picks up their state from [session].
@@ -45,8 +50,10 @@ class StewardApp : Application() {
         settings = SettingsStore(this)
         environment = AndroidEnvironment(this)
         journals = JournalStore(File(filesDir, "journals"))
-        apps = AppsController(this, journals, ShizukuBridge(this), appScope)
+        val shizuku = ShizukuBridge(this)
+        apps = AppsController(this, journals, shizuku, appScope)
         termux = TermuxController(this, journals, appScope)
+        logcat = LogcatExporter(this, shizuku, appScope)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(AUDIT_CHANNEL, getString(R.string.audit_channel_name), NotificationManager.IMPORTANCE_LOW).apply {

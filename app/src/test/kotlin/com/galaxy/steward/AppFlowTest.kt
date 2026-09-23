@@ -1,7 +1,10 @@
 package com.galaxy.steward
 
 import android.app.AppOpsManager
+import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Environment
 import android.os.Looper
 import androidx.compose.ui.test.hasAnyAncestor
@@ -14,11 +17,13 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.galaxy.steward.core.DAY_MS
+import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.appdata.AppJunkKind
 import com.galaxy.steward.ui.MainActivity
 import com.galaxy.steward.ui.Outcome
@@ -225,6 +230,29 @@ class AppFlowTest {
         shot("12-storage-map")
         compose.onNodeWithText("Settings").performClick()
         shot("13-settings")
+
+        // Settings > Diagnostics: without Shizuku the export holds the app's own log, saved under Documents.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Export logcat"))
+        compose.onNodeWithText("Export").performClick()
+        awaitState("logcat export", vm) { vm.logcat.state.value.let { !it.running && (it.saved != null || it.error != null) } }
+        val saved = vm.logcat.state.value.saved ?: error("logcat export failed: ${vm.logcat.state.value.error}")
+        assertEquals(File(root, SafetyPolicy.LOGCAT_DIR).path, saved.file.parent)
+        assertTrue(saved.file.name.matches(Regex("""logcat-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.txt""")))
+        assertFalse(saved.wholeDevice)
+        val log = saved.file.readText()
+        assertTrue(log.startsWith("Galaxy Steward "))
+        assertTrue(log.contains("Contents: Galaxy Steward's own log lines only"))
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Share"))
+        shot("13b-logcat-export")
+        // Share hands the file to other apps through the FileProvider, which serves exactly this folder.
+        compose.onNodeWithText("Share").performClick()
+        val chooser = shadowOf(ApplicationProvider.getApplicationContext<Application>()).nextStartedActivity
+        assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+        val send = IntentCompat.getParcelableExtra(chooser, Intent.EXTRA_INTENT, Intent::class.java)!!
+        val uri = IntentCompat.getParcelableExtra(send, Intent.EXTRA_STREAM, Uri::class.java)!!
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertEquals("${context.packageName}.files", uri.authority)
+        context.contentResolver.openInputStream(uri)!!.use { assertEquals(log, it.readBytes().decodeToString()) }
 
         // Apps tab: without Shizuku the app folders scan covers Android/media in-process.
         compose.onNodeWithText("Apps").performClick()

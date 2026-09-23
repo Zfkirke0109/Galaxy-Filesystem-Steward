@@ -24,6 +24,17 @@ class OrganizeJunkOptimizeTest {
 
     private fun ScanReport.moveFor(fs: TestFs, rel: String) = organize.firstOrNull { it.source == fs.path(rel) }
 
+    /** Every path the plan would move, delete, quarantine or remove, whether or not it is selected by default. */
+    private fun ScanReport.touchedPaths(): List<String> = allItems().flatMap { item -> item.operations }.map { op ->
+        when (op) {
+            is com.galaxy.steward.core.plan.MoveFileOp -> op.src
+            is com.galaxy.steward.core.plan.MoveDirOp -> op.src
+            is com.galaxy.steward.core.plan.DeleteDuplicateOp -> op.path
+            is com.galaxy.steward.core.plan.QuarantineOp -> op.path
+            is com.galaxy.steward.core.plan.RemoveEmptyDirOp -> op.path
+        }
+    }
+
     @Test
     fun downloadInboxIsFiledSemantically() = runTest {
         TestFs().use { fs ->
@@ -246,21 +257,33 @@ class OrganizeJunkOptimizeTest {
             fs.ageDirectories()
             val report = scan(fs, settings)
 
-            val touched = report.allItems().flatMap { item -> item.operations }.map { op ->
-                when (op) {
-                    is com.galaxy.steward.core.plan.MoveFileOp -> op.src
-                    is com.galaxy.steward.core.plan.MoveDirOp -> op.src
-                    is com.galaxy.steward.core.plan.DeleteDuplicateOp -> op.path
-                    is com.galaxy.steward.core.plan.QuarantineOp -> op.path
-                    is com.galaxy.steward.core.plan.RemoveEmptyDirOp -> op.path
-                }
-            }
+            val touched = report.touchedPaths()
             for (protected in listOf("Download/QQ-Localization", "Download/Forensics", "Download/lib-dump", "Download/Projects")) {
                 assertTrue("$protected must not be changed", touched.none { it.startsWith(fs.path(protected)) })
             }
             // The identical jadx sources are still recognised, but no copy is offered for removal.
             assertTrue(report.duplicates.isEmpty() || report.duplicates.all { it.removals.isEmpty() })
             assertTrue(report.insights.any { it.title.startsWith("Left in place") && it.detail.contains("source code") })
+        }
+    }
+
+    @Test
+    fun logcatExportsAreNeverTouched() = runTest {
+        TestFs().use { fs ->
+            val export = "${SafetyPolicy.LOGCAT_DIR}/logcat-2026-01-01_10-00-00.txt"
+            fs.random(export, 5000, 7)
+            // The same log downloaded again, an empty leftover and an empty sub-folder: all normally cleaned up.
+            fs.random("Download/logcat-2026-01-01_10-00-00.txt", 5000, 7)
+            fs.text("${SafetyPolicy.LOGCAT_DIR}/empty.txt", "")
+            fs.dir("${SafetyPolicy.LOGCAT_DIR}/old")
+            fs.ageDirectories()
+            val report = scan(fs)
+
+            assertTrue(report.touchedPaths().none { it.startsWith(fs.path(SafetyPolicy.LOGCAT_DIR)) })
+            // The export can still be the copy that's kept.
+            val group = report.duplicates.single()
+            assertEquals(fs.path(export), group.keeper.path)
+            assertEquals(listOf(fs.path("Download/logcat-2026-01-01_10-00-00.txt")), group.removals.map { it.path })
         }
     }
 

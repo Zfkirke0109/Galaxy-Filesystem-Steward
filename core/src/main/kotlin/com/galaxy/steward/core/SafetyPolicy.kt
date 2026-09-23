@@ -12,6 +12,9 @@ object SafetyPolicy {
     const val STEWARD_DIR = ".StorageSteward"
     const val QUARANTINE_DIR = "Quarantine"
 
+    /** Where the app saves logcat exports. Treated like a pinned folder: never moved, deduplicated or cleaned. */
+    const val LOGCAT_DIR = "Documents/Galaxy Steward LogCat"
+
     /** Top-level folders Android itself creates; never offered for empty-folder cleanup. */
     val STANDARD_TOP_DIRS = setOf(
         "Alarms", "Android", "Audiobooks", "DCIM", "Documents", "Download", "Movies", "Music",
