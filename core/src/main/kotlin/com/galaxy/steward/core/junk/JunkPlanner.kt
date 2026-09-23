@@ -77,7 +77,7 @@ class JunkPlanner(
         val cutoff = now - DAY_MS
         fun emptyEligible(d: DirNode): Boolean =
             !d.isRoot && d.totalFiles == 0 && !d.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) && d.zone.removable &&
-                !d.hidden && !(d.depth == 1 && d.name in SafetyPolicy.STANDARD_TOP_DIRS) && d.mtime < cutoff
+                !d.hidden && !(d.depth == 1 && SafetyPolicy.isKeptTopDir(d.name)) && d.mtime < cutoff
 
         fun visit(d: DirNode, insideHidden: Boolean) {
             val hidden = insideHidden || d.hidden

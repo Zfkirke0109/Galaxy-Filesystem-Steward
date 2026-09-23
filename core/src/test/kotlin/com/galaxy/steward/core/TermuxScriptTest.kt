@@ -151,6 +151,23 @@ class TermuxScriptTest {
     }
 
     @Test
+    fun largeFilesAndFoldersComeFromOneWalk() {
+        // Real (non-sparse) data: the audit sizes everything of 50 MiB or more in a single du pass.
+        val big = File(home, "models/llama.gguf")
+        big.parentFile.mkdirs()
+        big.outputStream().use { out ->
+            val chunk = ByteArray(1 shl 20) { (it % 7).toByte() }
+            repeat(51) { out.write(chunk) }
+        }
+        val report = audit()
+        assertEquals(listOf(big.path), report.largeFiles.map { it.path })
+        assertEquals(51L * 1024 * 1024, report.largeFiles.single().size)
+        assertTrue(report.largeFiles.single().mtime > 0)
+        assertTrue(report.usage.any { it.path == File(home, "models").path && it.bytes >= 51L * 1024 * 1024 })
+        assertTrue(report.totalBytes >= 51L * 1024 * 1024)
+    }
+
+    @Test
     fun refusesToRunOutsideTermux() {
         val elsewhere = Files.createTempDirectory("not-termux").toFile()
         try {

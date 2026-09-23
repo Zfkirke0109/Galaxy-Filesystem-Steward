@@ -300,7 +300,9 @@ class AppsController(
     companion object {
         const val KIND_FOLDERS = AppDataExecutor.KIND
         const val KIND_CACHE = "appcache"
-        private const val CLEAR_TIMEOUT_MS = 15_000L
+        // The clear itself is asynchronous in the package manager; on Samsung the shell call then waits for a callback
+        // that never comes (every call hit a 15 s timeout on a real S23), so don't wait long for it.
+        private const val CLEAR_TIMEOUT_MS = 6_000L
         private const val POLL_MS = 5_000L
         private const val VERIFY_WINDOW_MS = 45_000L
 

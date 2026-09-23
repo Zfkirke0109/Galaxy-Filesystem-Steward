@@ -32,7 +32,7 @@ tuned for Galaxy devices such as the S23 series.
 | **Folder merges** | Folders that share most of their content, e.g. `Download/Trip` and `Pictures/Trip`. | Moves the files that are unique into the kept folder and removes the verified duplicates. |
 | **Clutter** | Abandoned partial downloads, old `/log` dumps, empty folder trees, gallery trash, `.thumbnails` caches, zero-byte files, APKs for apps already installed, and folders left behind by apps you've uninstalled. | Quarantined, so you can restore them until the quarantine is emptied (manually or after a retention period). Empty folders are removed. |
 | **Smart organize** | Treats `Download` as an inbox. Every file and folder gets a permanent home based on its name, type and content: finance, travel, health, device firmware, diagnostics, APKs, archives, e-books, AI models, ROMs, backups, and more. | Moves files with no overwriting: identical files at the destination are deduplicated, and different files with the same name get a hash suffix. Folders move as a unit. Wrapper folders like `Documents/Documents` are dissolved. |
-| **Optimize** | Nested duplicate-name folders (`X/X/...` left by extracted archives), very large flat folders, very deep paths, and low free space. | Collapses the redundant levels and sorts huge folders into year (or month) buckets. The rest is reported as advice. |
+| **Optimize** | Nested duplicate-name folders (`X/X/...` left by extracted archives), very large flat folders, very deep paths, and low free space. | Collapses the redundant levels and sorts huge photo and video folders into year (or month) buckets. The rest is reported as advice. |
 | **Storage map** | Folder-by-folder breakdown with size bars, largest files, a breakdown by file type, and the ownership zone of each folder. | Read only. |
 | **History** | Every run, with what it freed, moved, deduplicated or quarantined. | **Undo** replays the journal backwards and checks each step before reverting it. Quarantine can be emptied per run or all at once. |
 | **Weekly audit** | Optional read-only scan while the phone charges. | Sends a notification saying how much space you could reclaim. It never changes files, except emptying quarantines that are past their retention period. |
@@ -87,8 +87,9 @@ App-data rules carried over from the Termux steward's strict v18 policy:
 - **Only regenerable data is deleted**: cache folders, logs, crash dumps and temp files older than a set age. The app
   never deletes offline media, downloads, saves, databases (LevelDB/RocksDB write-ahead logs are recognised), or
   anything with a credential-like name. The same is true of app data in `/data/data`, which would sign you out.
-- **Cache clears are checked against live storage statistics.** Apps are stopped first unless you turn that off.
-  System apps, Google Play services, Samsung apps, messaging, Termux and Shizuku are never stopped.
+- **Cache clears are checked against live storage statistics.** You can have each app stopped first, which clears a
+  little more. It's off by default, because a stopped app gets no notifications until you open it again. System apps,
+  Google Play services, Samsung apps, messengers, mail and social apps, Termux and Shizuku are never stopped.
 - A folder only counts as a **leftover** when Android doesn't know its package at all. Apps removed with "keep data"
   and archived apps count as installed. If the package list looks unreliable, nothing is reported as a leftover.
 
@@ -118,7 +119,13 @@ operation runs:
   pick up the new layout without keeping Android's media service busy for minutes.
 - **Source trees keep their shape.** Folders inside `src`, `smali*`, `java`, `node_modules` and similar trees, or
   containing code, are never flattened: `com/acme/model/model` is a package path, not a redundant wrapper.
-  apktool output (`apktool.yml`) counts as a project.
+  Decompiled apps are treated like projects: apktool output (`apktool.yml`, `smali*`), jadx output (`sources` next to
+  `resources`) and unpacked APKs (`classes.dex` next to `AndroidManifest.xml`). So are two kinds of folder below the
+  top level: development folders (`Download/Projects`, `Documents/src`, `jadx`, `decompiled`, and so on), and folders
+  with at least 50 code files that make up at least half of their files. None of these are moved, date-sorted or
+  deduplicated, though they can serve as the kept copy.
+- **Only photo and video dumps are sorted into date folders.** Preset libraries, datasets, music and documents are
+  found by name, so a huge flat folder of those is reported but never split up by date.
 
 ## Install
 

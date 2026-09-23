@@ -56,7 +56,7 @@ class StewardHelperService : IStewardHelper.Stub {
         }
         // On Samsung Android 16 this call clears the cache but its completion callback can hang (observed by the
         // Termux steward), so success is judged by the app from live storage stats, never from the exit code.
-        val code = exec(listOf("/system/bin/cmd", "package", "clear", "--user", user, "--cache-only", packageName), timeoutMs.coerceIn(5_000, 60_000))
+        val code = exec(listOf("/system/bin/cmd", "package", "clear", "--user", user, "--cache-only", packageName), timeoutMs.coerceIn(3_000, 60_000))
         return "exit=$code"
     }
 

@@ -168,11 +168,16 @@ class OptimizePlanner(
     private fun bucketCandidate(dir: DirNode): OptimizeItem? {
         if (!dir.managed || dir.depth < 2 || dir.hidden) return null
         if (dir.zone != Zone.USER_MANAGED && dir.zone != Zone.MEDIA_LIBRARY) return null
+        if (insideCodeTree(dir) || dir.insideFlagged(NodeFlags.CODE_TREE)) return null
         val movable = dir.files.filter {
             !it.hidden && it.mtime <= recentCutoff && !SafetyPolicy.isCredentialName(it.name) &&
                 !SafetyPolicy.isInProgressDownload(it.name) && !SafetyPolicy.isMarkerFile(it.name)
         }
         if (movable.size <= settings.flatDirThreshold / 2) return null
+        // Only photo and video dumps (camera rolls, screenshots, chat media) are sorted by date. Libraries of presets,
+        // datasets, music or documents are found by name, and date folders would scatter them.
+        val photosAndVideos = movable.count { it.kind == FileKind.IMAGE || it.kind == FileKind.VIDEO }
+        if (photosAndVideos * 10 < movable.size * 8) return null
         val zone = ZoneId.systemDefault()
         val years = movable.groupingBy { Instant.ofEpochMilli(it.mtime).atZone(zone).year }.eachCount()
         val monthly = years.values.any { it > settings.flatDirThreshold }

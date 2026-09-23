@@ -17,6 +17,12 @@ object SafetyPolicy {
         "Alarms", "Android", "Audiobooks", "DCIM", "Documents", "Download", "Movies", "Music",
         "Notifications", "Pictures", "Podcasts", "Recordings", "Ringtones",
     )
+    /** Top-level folders the system writes into (Samsung's dumpstate logs); never removed even when empty. */
+    val SYSTEM_TOP_DIRS = setOf("log")
+
+    /** Top-level folders an empty-folder clean-up must keep. */
+    fun isKeptTopDir(name: String): Boolean = name in STANDARD_TOP_DIRS || name in SYSTEM_TOP_DIRS
+
     val MEDIA_TOP_DIRS = setOf(
         "DCIM", "Pictures", "Movies", "Music", "Recordings", "Audiobooks", "Podcasts", "Ringtones", "Alarms", "Notifications",
     )
@@ -79,6 +85,32 @@ object SafetyPolicy {
     }
 
     fun isCodeTreeDir(name: String): Boolean = CODE_TREE_DIR.matches(name)
+
+    private val SMALI_DIR = Regex("""^smali(_classes\d+)?$""")
+
+    /**
+     * Folder names that hold development work. Below the top level (`Download/Projects`, `Documents/src`) the whole
+     * folder is treated like a project: never moved, bucketed or deduplicated, though it can serve as the kept copy.
+     */
+    private val DEV_CONTAINERS = setOf(
+        "projects", "workspace", "workspaces", "repos", "repositories", "git", "github", "gitlab",
+        "src", "source", "sources", "code", "decompiled", "jadx", "apktool", "smali",
+    )
+
+    fun isDevContainerName(name: String): Boolean = name.trim().lowercase() in DEV_CONTAINERS
+
+    /**
+     * Decompiled apps from a directory listing: apktool output (smali, smali_classesN), jadx output (sources next to
+     * resources), or an unpacked APK (classes.dex next to AndroidManifest.xml). Their folder names are Java packages.
+     */
+    fun isDecompiledAppRoot(childNames: Collection<String>): Boolean {
+        if (childNames.any { SMALI_DIR.matches(it) }) return true
+        if ("sources" in childNames && "resources" in childNames) return true
+        return "classes.dex" in childNames && "AndroidManifest.xml" in childNames
+    }
+
+    /** A subtree this code-heavy is source code, whatever it is called (at least 50 code files and half of all files). */
+    fun isCodeDominated(codeFiles: Int, totalFiles: Int): Boolean = codeFiles >= 50 && codeFiles * 2 >= totalFiles
 
     /** Names containing record separators would corrupt TSV journals, so the steward never touches them. */
     fun isUnsafeName(name: String): Boolean = name.any { it == '\t' || it == '\n' || it == '\r' || it == '\u0000' }

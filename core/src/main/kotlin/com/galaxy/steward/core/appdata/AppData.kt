@@ -101,6 +101,12 @@ object AppPolicy {
         "com.sec.android.app.shealth", "com.android.managedprovisioning",
         // Stopping these would end your terminal sessions or the Shizuku bridge the steward is talking through.
         "com.termux", "moe.shizuku.privileged.api",
+        // A stopped app gets no push messages until you open it again, so messengers and mail are never stopped.
+        "com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram",
+        "org.thoughtcrime.securesms", "com.facebook.orca", "com.facebook.mlite", "com.discord", "com.Slack",
+        "com.microsoft.teams", "com.google.android.gm", "com.microsoft.office.outlook", "com.google.android.apps.googlevoice",
+        "com.viber.voip", "jp.naver.line.android", "com.tencent.mm", "com.snapchat.android", "com.instagram.android",
+        "us.zoom.videomeetings", "com.skype.raider", "ch.protonmail.android", "com.google.android.apps.dynamite",
     )
 
     private val PACKAGE = Regex("""^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$""")

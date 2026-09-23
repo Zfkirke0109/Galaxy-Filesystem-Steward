@@ -392,7 +392,7 @@ class ActionExecutor(
         if (!guard.exists(p)) return Outcome(Status.NOOP)
         if (!guard.isRealDirectory(p)) return skip("Not a folder")
         val rel = guard.relative(path)
-        if (!rel.contains('/') && rel in SafetyPolicy.STANDARD_TOP_DIRS) return skip("Standard Android folder")
+        if (!rel.contains('/') && SafetyPolicy.isKeptTopDir(rel)) return skip("Standard Android folder")
         val empty = Files.newDirectoryStream(p).use { !it.iterator().hasNext() }
         if (!empty) return skip("Folder is not empty")
         val mtime = try {

@@ -57,7 +57,8 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
     var sort by rememberSaveable { mutableStateOf(AppSort.TOTAL) }
     var showSystem by rememberSaveable { mutableStateOf(false) }
-    var stopFirst by rememberSaveable { mutableStateOf(true) }
+    // Off by default: a force-stopped app receives no notifications until it is opened again.
+    var stopFirst by rememberSaveable { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<List<AppStorageRow>?>(null) }
     val canClear = shizuku == ShizukuStatus.READY
 
@@ -116,7 +117,9 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             item {
                 Column {
                     ToggleLine("Show system apps", showSystem) { showSystem = it }
-                    if (canClear) ToggleLine("Stop each app before clearing its cache (more thorough)", stopFirst) { stopFirst = it }
+                    if (canClear) {
+                        ToggleLine("Stop each app first (more thorough; stopped apps stay silent until you open them)", stopFirst) { stopFirst = it }
+                    }
                 }
             }
             // Hundreds of apps: one lazy row each rather than one big card.
@@ -146,7 +149,7 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             title = "Clear ${list.size.plural("app cache", "app caches")}?",
             lines = listOfNotNull(
                 "Frees about ${list.sumOf { it.cacheBytes }.humanBytes()} - each app rebuilds what it needs",
-                if (stopFirst) "Each app is stopped first and starts again when you open it" else null,
+                if (stopFirst) "Each app is stopped first and shows no notifications until you open it again (messengers and mail are never stopped)" else null,
                 "App data, accounts, downloads and settings are not touched",
             ),
             confirmLabel = "Clear",

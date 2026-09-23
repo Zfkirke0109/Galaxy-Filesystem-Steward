@@ -226,6 +226,58 @@ class OrganizeJunkOptimizeTest {
     }
 
     @Test
+    fun decompiledAppsAndSourceTreesAreKeptAsTheyAre() = runTest {
+        TestFs().use { fs ->
+            val settings = testSettings.copy(flatDirThreshold = 10)
+            // Seen on a real phone: month folders were created inside these trees and duplicates were removed from them.
+            val smali = "Download/QQ-Localization/extracted/qq_src/smali_classes19/com/tencent/mapsdk/internal"
+            repeat(12) { fs.text("$smali/C$it.smali", ".class public Lcom/tencent/mapsdk/internal/C$it;") }
+            val jadxA = "Download/Forensics/analysis/shizuku-v13.8.0.apk/jadx"
+            val jadxB = "Download/Forensics/analysis/installed_shizuku_base.apk/jadx"
+            for (base in listOf(jadxA, jadxB)) {
+                repeat(12) { fs.text("$base/sources/rikka/shizuku/S$it.java", "class S$it { /* identical in both analyses */ }") }
+                fs.text("$base/resources/AndroidManifest.xml", "<manifest/>")
+            }
+            // A plain source dump without any markers: mostly code files.
+            repeat(60) { fs.text("Download/lib-dump/pkg/M$it.py", "print($it)") }
+            fs.text("Download/lib-dump/notes.pdf", "notes")
+            // A folder named like a workspace is treated as development work.
+            fs.text("Download/Projects/tool/readme.txt", "readme")
+            fs.ageDirectories()
+            val report = scan(fs, settings)
+
+            val touched = report.allItems().flatMap { item -> item.operations }.map { op ->
+                when (op) {
+                    is com.galaxy.steward.core.plan.MoveFileOp -> op.src
+                    is com.galaxy.steward.core.plan.MoveDirOp -> op.src
+                    is com.galaxy.steward.core.plan.DeleteDuplicateOp -> op.path
+                    is com.galaxy.steward.core.plan.QuarantineOp -> op.path
+                    is com.galaxy.steward.core.plan.RemoveEmptyDirOp -> op.path
+                }
+            }
+            for (protected in listOf("Download/QQ-Localization", "Download/Forensics", "Download/lib-dump", "Download/Projects")) {
+                assertTrue("$protected must not be changed", touched.none { it.startsWith(fs.path(protected)) })
+            }
+            // The identical jadx sources are still recognised, but no copy is offered for removal.
+            assertTrue(report.duplicates.isEmpty() || report.duplicates.all { it.removals.isEmpty() })
+            assertTrue(report.insights.any { it.title.startsWith("Left in place") && it.detail.contains("source code") })
+        }
+    }
+
+    @Test
+    fun onlyPhotoAndVideoDumpsAreBucketedByDate() = runTest {
+        TestFs().use { fs ->
+            val settings = testSettings.copy(flatDirThreshold = 10)
+            repeat(12) { fs.random("Documents/Archives/ViPER4Android-Presets/Full/Kernel/Preset $it.irs", 64, 100 + it) }
+            repeat(12) { fs.random("Music/Imported/Track $it.mp3", 64, 200 + it) }
+            repeat(12) { fs.random("Download/Twitter dump/VID_$it.mp4", 64, 300 + it) }
+            fs.ageDirectories()
+            val buckets = scan(fs, settings).optimize.filter { it.kind == OptimizeKind.BUCKET_FLAT_DIR }.map { it.path }
+            assertEquals(listOf(fs.path("Download/Twitter dump")), buckets)
+        }
+    }
+
+    @Test
     fun oversizedFlatFolderIsBucketedByYear() = runTest {
         TestFs().use { fs ->
             val settings = testSettings.copy(flatDirThreshold = 10)

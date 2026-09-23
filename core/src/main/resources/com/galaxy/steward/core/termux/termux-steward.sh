@@ -260,20 +260,45 @@ repo_of() {
 
 # ---------------------------------------------------------------- audit
 
+# Sizes (KiB) of everything of 50 MiB or more below the Termux files folder, from one walk. Earlier versions walked
+# the whole tree four or five times (du per level, per distro, then find for large files): about six minutes on a
+# real phone with proot distributions installed.
+declare -A BIG=()
+load_sizes() {
+  local k p
+  while IFS=$'\t' read -r k p; do
+    has_controls "$p" || BIG["$p"]="$k"
+  done < <(du -x -a -k -t 50M -- "$FILES" 2>/dev/null)
+}
+
+# Bytes used by a folder: from the one-walk map, or measured directly when it is smaller than the threshold.
+size_of() {
+  local k="${BIG[$1]:-}"
+  [ -n "$k" ] || k="$(du -x -sk -- "$1" 2>/dev/null | awk '{print $1+0; exit}')"
+  echo "$(( ${k:-0} * 1024 ))"
+}
+
 audit() {
-  local id info p root mode m bytes files d name active=0 r s k count=0 repo art
+  local id info p root mode m bytes files d name active=0 r s k count=0 repo art rest
   proot_running && active=1
   emit V 1 "$HOME" "$PREFIX" "$active"
+  load_sizes
 
-  # Where the space goes (report only).
-  k="$(du -sk -- "$FILES" 2>/dev/null | awk '{print $1+0; exit}')"
-  emit U "$(( ${k:-0} * 1024 ))" "$FILES"
-  [ -d "$APPDIR/cache" ] && k="$(du -sk -- "$APPDIR/cache" 2>/dev/null | awk '{print $1+0; exit}')" && emit U "$(( ${k:-0} * 1024 ))" "$APPDIR/cache"
-  du -x -k -d 1 -- "$HOME" 2>/dev/null | sort -nr | head -n 25 | while IFS=$'\t' read -r k p; do
-    has_controls "$p" || emit U "$(( ${k:-0} * 1024 ))" "$p"
-  done
-  du -x -k -d 1 -- "$PREFIX" 2>/dev/null | sort -nr | head -n 12 | while IFS=$'\t' read -r k p; do
-    has_controls "$p" || emit U "$(( ${k:-0} * 1024 ))" "$p"
+  # Where the space goes (report only): the whole folder, then the largest folders one level into home and usr.
+  emit U "$(size_of "$FILES")" "$FILES"
+  [ -d "$APPDIR/cache" ] && emit U "$(size_of "$APPDIR/cache")" "$APPDIR/cache"
+  for p in "${!BIG[@]}"; do
+    case "$p" in
+      "$HOME"|"$PREFIX") ;;
+      "$HOME"/*|"$PREFIX"/*)
+        rest="${p#"$HOME"/}"; [ "$rest" = "$p" ] && rest="${p#"$PREFIX"/}"
+        case "$rest" in */*) continue ;; esac
+        ;;
+      *) continue ;;
+    esac
+    [ -d "$p" ] && [ ! -L "$p" ] && printf '%s\t%s\n' "${BIG[$p]}" "$p"
+  done | sort -t "$(printf '\t')" -k1,1nr | head -n 30 | while IFS=$'\t' read -r k p; do
+    emit U "$(( ${k:-0} * 1024 ))" "$p"
   done
 
   for id in $FIXED_IDS; do
@@ -302,8 +327,7 @@ audit() {
   # proot distributions: inventory, and caches of inactive ones.
   while IFS= read -r -d '' r; do
     rootfs_allowed "$r" || continue
-    k="$(du -sk -- "$r" 2>/dev/null | awk '{print $1+0; exit}')"
-    emit R "$(( ${k:-0} * 1024 ))" "$active" "$r"
+    emit R "$(size_of "$r")" "$active" "$r"
     [ "$active" = 1 ] && continue
     for s in $PROOT_PKG_CACHES; do
       dir_beneath "$r/$s" "$r" || continue
@@ -347,11 +371,12 @@ audit() {
     emit W "git is not installed, so project build outputs were not checked"
   fi
 
-  # Largest files anywhere in Termux (report only).
-  find "$FILES" -xdev \( -path "$HOME/storage" \) -prune -o -type f -size +50M -printf '%s\t%T@\t%p\n' 2>/dev/null \
-    | sort -t "$(printf '\t')" -k1,1nr | head -n 30 | while IFS=$'\t' read -r s k p; do
-      has_controls "$p" || emit L "$s" "${k%.*}" "$p"
-    done
+  # Largest files anywhere in Termux (report only), from the same walk.
+  for p in "${!BIG[@]}"; do
+    [ -f "$p" ] && [ ! -L "$p" ] && printf '%s\t%s\n' "${BIG[$p]}" "$p"
+  done | sort -t "$(printf '\t')" -k1,1nr | head -n 30 | while IFS=$'\t' read -r k p; do
+    emit L "$(stat -c %s -- "$p" 2>/dev/null || echo $(( k * 1024 )))" "$(stat -c %Y -- "$p" 2>/dev/null || echo 0)" "$p"
+  done
 
   finish ok
 }

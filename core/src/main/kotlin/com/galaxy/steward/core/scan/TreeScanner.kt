@@ -3,6 +3,7 @@ package com.galaxy.steward.core.scan
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.model.DirNode
+import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
@@ -52,10 +53,12 @@ class TreeScanner(
                 node.flags = node.flags or NodeFlags.UNREADABLE
                 continue
             }
-            if (!node.isRoot && SafetyPolicy.isProjectRoot(entries.map { it.first })) {
+            val names = entries.map { it.first }
+            if (!node.isRoot && SafetyPolicy.isProjectRoot(names)) {
                 node.flags = node.flags or NodeFlags.PROJECT_ROOT
                 if (node.zone.removable) node.zone = Zone.PATH_SENSITIVE
             }
+            if (!node.isRoot && SafetyPolicy.isDecompiledAppRoot(names)) markCodeTree(node)
             for ((name, attrs) in entries) {
                 if (SafetyPolicy.isUnsafeName(name)) {
                     node.flags = node.flags or NodeFlags.HAS_UNSAFE_NAME
@@ -91,7 +94,35 @@ class TreeScanner(
         }
         listener?.onProgress(dirs, files, bytes, "")
         aggregate(root)
+        if (markCodeDominated(root)) aggregateFlags(root)
         return StorageTree(root)
+    }
+
+    /** Source code and decompiled apps behave like projects: kept as they are, never restructured. */
+    private fun markCodeTree(node: DirNode) {
+        node.flags = node.flags or NodeFlags.CODE_TREE
+        if (node.zone.removable) node.zone = Zone.PATH_SENSITIVE
+    }
+
+    /**
+     * Folders whose content is mostly code are marked after the walk, once their composition is known. Only folders
+     * below the top level qualify, so one big source dump never freezes all of Download. Returns true if any changed.
+     */
+    private fun markCodeDominated(root: DirNode): Boolean {
+        var changed = false
+        val stack = ArrayDeque<DirNode>()
+        stack.addLast(root)
+        while (stack.isNotEmpty()) {
+            val node = stack.removeLast()
+            if (node.depth >= 2 && node.zone.removable && SafetyPolicy.isCodeDominated(node.codeFiles, node.totalFiles)) {
+                markCodeTree(node)
+                node.walkDirs { if (it.zone.removable) it.zone = Zone.PATH_SENSITIVE }
+                changed = true
+                continue
+            }
+            node.dirs.forEach(stack::addLast)
+        }
+        return changed
     }
 
     private fun listEntries(dir: Path): List<Pair<String, BasicFileAttributes>>? = try {
@@ -127,6 +158,7 @@ class TreeScanner(
             child.flags = child.flags or NodeFlags.GIT_DIR
             if (child.zone.removable) child.zone = Zone.PATH_SENSITIVE
         }
+        if (child.depth >= 2 && SafetyPolicy.isDevContainerName(child.name)) markCodeTree(child)
         if (child.zone != Zone.APP_OWNED && child.zone != Zone.STEWARD && child.relPath in protectedRel) {
             child.zone = Zone.USER_PROTECTED
         }
@@ -139,16 +171,34 @@ class TreeScanner(
         for (i in order.indices.reversed()) {
             val node = order[i]
             var total = 0L
-            for (f in node.files) total += f.size
+            var code = 0
+            for (f in node.files) {
+                total += f.size
+                if (f.kind == FileKind.CODE) code++
+            }
             var count = node.files.size
             var sub = node.flags
             for (d in node.dirs) {
                 total += d.totalBytes
                 count += d.totalFiles
+                code += d.codeFiles
                 sub = sub or d.subtreeFlags
             }
             node.totalBytes = total
             node.totalFiles = count
+            node.codeFiles = code
+            node.subtreeFlags = sub
+        }
+    }
+
+    /** Recomputes subtree flags only (after flags were added once sizes were known). */
+    private fun aggregateFlags(root: DirNode) {
+        val order = ArrayList<DirNode>()
+        root.walkDirs { order.add(it) }
+        for (i in order.indices.reversed()) {
+            val node = order[i]
+            var sub = node.flags
+            for (d in node.dirs) sub = sub or d.subtreeFlags
             node.subtreeFlags = sub
         }
     }

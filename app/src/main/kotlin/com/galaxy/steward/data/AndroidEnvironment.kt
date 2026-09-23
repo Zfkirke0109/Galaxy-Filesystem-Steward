@@ -6,6 +6,8 @@ import android.os.Build
 import androidx.core.content.pm.PackageInfoCompat
 import com.galaxy.steward.core.ApkInfo
 import com.galaxy.steward.core.DeviceEnvironment
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /** Device facts for the engine: a folder-safe model label and package-manager lookups. */
 class AndroidEnvironment(context: Context) : DeviceEnvironment {
@@ -27,8 +29,24 @@ class AndroidEnvironment(context: Context) : DeviceEnvironment {
         null
     }
 
+    /**
+     * Parsed APKs by path, valid while size and modification time are unchanged. Parsing a large installer costs
+     * seconds, and every scan used to parse the same APKs again (seen repeatedly in the phone logs).
+     */
+    private val apkCache = ConcurrentHashMap<String, Pair<String, ApkInfo?>>()
+
+    override fun apkInfo(path: String): ApkInfo? {
+        val file = File(path)
+        val stamp = "${file.length()}:${file.lastModified()}"
+        apkCache[path]?.takeIf { it.first == stamp }?.let { return it.second }
+        val info = parseApk(path)
+        if (apkCache.size > 2_000) apkCache.clear()
+        apkCache[path] = stamp to info
+        return info
+    }
+
     @Suppress("DEPRECATION")
-    override fun apkInfo(path: String): ApkInfo? = try {
+    private fun parseApk(path: String): ApkInfo? = try {
         pm.getPackageArchiveInfo(path, 0)?.let {
             ApkInfo(it.packageName, PackageInfoCompat.getLongVersionCode(it), it.versionName)
         }

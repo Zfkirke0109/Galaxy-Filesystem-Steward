@@ -143,7 +143,7 @@ class OrganizePlanner(
     private fun planFolder(dir: DirNode, allowReview: Boolean) {
         if (dir.hidden) return
         if (dir.zone == Zone.PATH_SENSITIVE) {
-            leftInPlace(dir, "is a project or Git repository")
+            leftInPlace(dir, if (dir.insideFlagged(NodeFlags.CODE_TREE)) "holds source code or a decompiled app" else "is a project or Git repository")
             return
         }
         // Empty folders belong to the clutter cleanup, not to filing.
@@ -202,6 +202,7 @@ class OrganizePlanner(
         if (dir.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) {
             val why = when {
                 dir.subtreeHas(NodeFlags.PROJECT_ROOT or NodeFlags.GIT_DIR) -> "contains a project or Git repository"
+                dir.subtreeHas(NodeFlags.CODE_TREE) -> "contains source code or a decompiled app"
                 dir.subtreeHas(NodeFlags.HAS_CREDENTIAL) -> "contains keys or credentials"
                 dir.subtreeHas(NodeFlags.HAS_SYMLINK) -> "contains symbolic links"
                 else -> "contains unreadable or special entries"
