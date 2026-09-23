@@ -28,19 +28,26 @@ normalize() { tr -d ': \t\r\n' | tr 'A-F' 'a-f'; }
 [ -f "$apk" ] || fail "APK missing" "$apk was not built"
 sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 [ -n "$sdk" ] || fail "No Android SDK" "ANDROID_HOME is not set"
-tools=$(find "$sdk/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+tools=$(printf '%s\n' "$sdk"/build-tools/*/ | sort -V | tail -n 1)
+tools=${tools%/}
 [ -x "$tools/apksigner" ] && [ -x "$tools/aapt2" ] || fail "No build tools" "apksigner or aapt2 not found in $sdk/build-tools"
 
 # apksigner exits non-zero when any signature is invalid.
 certs=$("$tools/apksigner" verify --verbose --print-certs "$apk") || fail "Invalid signature" "apksigner could not verify $apk"
 grep -q '^Number of signers: 1$' <<<"$certs" || fail "Unexpected signers" "the APK must have exactly one signer"
 grep -Eq '^Verified using v(2|3) scheme .*: true$' <<<"$certs" || fail "Old signature scheme" "the APK has no v2 or v3 signature"
-dn=$(sed -n 's/^Signer #1 certificate DN: //p' <<<"$certs")
-cert_sha=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"$certs" | normalize)
-[ ${#cert_sha} -eq 64 ] || fail "No certificate" "could not read the signing certificate's SHA-256 digest"
+# Up to build-tools 36 the lines read "Signer #1 certificate ...", from 37 "V2 Signer: certificate ..." (one set per
+# scheme). Every one of them must name the same certificate.
+signer='^(Signer #[0-9]+|V[0-9.]+ Signer:) certificate'
+dns=$(sed -nE "s/$signer DN: //p" <<<"$certs" | sort -u)
+cert_shas=$(sed -nE "s/$signer SHA-256 digest: //p" <<<"$certs" | tr -d ': \t\r' | tr 'A-F' 'a-f' | sort -u)
+[ -n "$cert_shas" ] || fail "No certificate" "could not read the signing certificate's SHA-256 digest"
+[ "$(wc -l <<<"$cert_shas")" -eq 1 ] || fail "Several certificates" "the APK's signatures name more than one certificate"
+cert_sha=$cert_shas
+[[ "$cert_sha" =~ ^[0-9a-f]{64}$ ]] || fail "No certificate" "could not read the signing certificate's SHA-256 digest"
 
 debug_key=false
-case "$dn" in *"CN=Android Debug"*) debug_key=true ;; esac
+case "$dns" in *"CN=Android Debug"*) debug_key=true ;; esac
 
 if [ "${RELEASE_SIGNED:-false}" = true ]; then
     [ "$debug_key" = false ] || fail "Debug certificate" "the build had the release key but the APK is signed with a debug certificate"
