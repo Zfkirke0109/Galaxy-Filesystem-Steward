@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- orbit -->
+    <path
+        android:pathData="M54,26a28,28 0,1 1,0 56a28,28 0,1 1,0 -56z"
+        android:strokeColor="#669D8CFF"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000" />
+    <!-- folder -->
+    <path
+        android:fillColor="#FF7C6CF2"
+        android:pathData="M38,40h10l3,3h19a2,2 0,0 1,2 2v23a2,2 0,0 1,-2 2h-32a2,2 0,0 1,-2 -2v-26a2,2 0,0 1,2 -2z" />
+    <path
+        android:fillColor="#FF9D8CFF"
+        android:pathData="M36,48h36v20a2,2 0,0 1,-2 2h-32a2,2 0,0 1,-2 -2z" />
+    <!-- sorted lines -->
+    <path
+        android:pathData="M43,55h22M43,60h16M43,65h10"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.5" />
+    <!-- star -->
+    <path
+        android:fillColor="#FF3DD6C6"
+        android:pathData="M74,24l2.4,6.1l6.1,2.4l-6.1,2.4l-2.4,6.1l-2.4,-6.1l-6.1,-2.4l6.1,-2.4z" />
+</vector>

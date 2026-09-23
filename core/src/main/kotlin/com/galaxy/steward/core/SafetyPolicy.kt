@@ -1,0 +1,102 @@
+package com.galaxy.steward.core
+
+import com.galaxy.steward.core.model.FileKind
+import com.galaxy.steward.core.model.Zone
+
+/**
+ * Hard safety rules ported from the Koa Termux steward (v18.x). Everything here is deliberately conservative:
+ * credential-like files, project roots, Git trees, symlinks, app-owned storage and the steward's own quarantine
+ * are never moved or removed, whatever mode or rule asks for it.
+ */
+object SafetyPolicy {
+    const val STEWARD_DIR = ".StorageSteward"
+    const val QUARANTINE_DIR = "Quarantine"
+
+    /** Top-level folders Android itself creates; never offered for empty-folder cleanup. */
+    val STANDARD_TOP_DIRS = setOf(
+        "Alarms", "Android", "Audiobooks", "DCIM", "Documents", "Download", "Movies", "Music",
+        "Notifications", "Pictures", "Podcasts", "Recordings", "Ringtones",
+    )
+    val MEDIA_TOP_DIRS = setOf(
+        "DCIM", "Pictures", "Movies", "Music", "Recordings", "Audiobooks", "Podcasts", "Ringtones", "Alarms", "Notifications",
+    )
+    val MANAGED_TOP_DIRS = setOf("Download", "Documents")
+    const val MANAGED_MEDIA_SUBDIR = "Imported"
+
+    private val PROJECT_MARKERS = setOf(
+        ".git", "settings.gradle", "settings.gradle.kts", "gradlew", "gradlew.bat", "build.gradle", "build.gradle.kts",
+        "pyproject.toml", "setup.py", "Cargo.toml", "go.mod", "pom.xml", "CMakeLists.txt", "Makefile", ".project",
+    )
+
+    private val CREDENTIAL_EXT = setOf(
+        "jks", "keystore", "p12", "pfx", "pem", "key", "crt", "cer", "der", "kdbx", "kdb", "ovpn",
+        "mobileconfig", "mobileprovision", "gpg", "pgp", "asc", "ppk",
+    )
+    private val CREDENTIAL_EXACT = setOf(".env", "credentials", "secrets", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "wallet.dat")
+    private val CREDENTIAL_PREFIX = listOf(".env.", "credentials.", "secrets.", "id_rsa.", "id_ed25519.", "id_ecdsa.", "id_dsa.")
+    private val CREDENTIAL_WORDS = listOf(
+        "credential", "secret", "recovery-code", "recovery_code", "recovery code", "private-key", "private_key",
+        "private key", "license-key", "license_key", "backup-codes", "backup_codes", "backup codes", "wallet", "passwords",
+    )
+
+    private val GENERIC_WRAPPERS = setOf(
+        "documents", "document", "download", "downloads", "organized", "files", "file", "misc", "miscellaneous",
+        "other", "others", "automatic", "new folder", "untitled folder", "folder", "inbox", "received", "received files",
+        "quick share", "nearby share", "bluetooth", "shared", "sharing", "media", "temp", "tmp",
+    )
+
+    private val IN_PROGRESS_EXT = setOf("crdownload", "part", "partial", "download", "tmp", "temp", "opdownload")
+    private val MARKER_NAMES = setOf(".nomedia", ".gitkeep", ".keep", ".placeholder")
+    private val COPY_MARKER = Regex("""(?i)(\s?\(\d+\)$|[\s_-]+copy(\s?\(?\d+\)?)?$|^copy of\s|\s-\s?copy$)""")
+
+    fun isCredentialName(name: String): Boolean {
+        val lower = name.lowercase()
+        if (lower in CREDENTIAL_EXACT) return true
+        if (CREDENTIAL_PREFIX.any { lower.startsWith(it) }) return true
+        if (FileKind.extensionOf(lower) in CREDENTIAL_EXT) return true
+        return CREDENTIAL_WORDS.any { lower.contains(it) }
+    }
+
+    fun isProjectMarker(name: String): Boolean = name in PROJECT_MARKERS
+
+    /**
+     * Project-root detection from a directory listing, as in the Termux planner: explicit build/VCS markers, or
+     * package.json / AndroidManifest.xml next to source folders.
+     */
+    fun isProjectRoot(childNames: Collection<String>): Boolean {
+        if (childNames.any { it in PROJECT_MARKERS }) return true
+        if ("package.json" in childNames && ("src" in childNames || "node_modules" in childNames)) return true
+        if ("AndroidManifest.xml" in childNames && ("src" in childNames || "res" in childNames)) return true
+        return false
+    }
+
+    /** Names containing record separators would corrupt TSV journals, so the steward never touches them. */
+    fun isUnsafeName(name: String): Boolean = name.any { it == '\t' || it == '\n' || it == '\r' || it == '\u0000' }
+
+    fun isGenericWrapperName(name: String): Boolean = name.trim().lowercase() in GENERIC_WRAPPERS
+
+    /** Wrappers that are redundant *inside Documents* (Documents/Documents, Documents/Download, ...). */
+    fun isDocumentsWrapperName(name: String): Boolean =
+        name.trim().lowercase() in setOf("documents", "document", "download", "downloads", "organized", "new folder", "untitled folder")
+
+    fun isInProgressDownload(name: String): Boolean = FileKind.extensionOf(name) in IN_PROGRESS_EXT
+
+    fun isMarkerFile(name: String): Boolean = name.lowercase() in MARKER_NAMES
+
+    fun stemOf(name: String): String {
+        val dot = name.lastIndexOf('.')
+        return if (dot <= 0) name else name.substring(0, dot)
+    }
+
+    /** "IMG_1234 (1).jpg", "report - Copy.pdf", "Copy of notes.txt" - copies a human or app made by accident. */
+    fun hasCopyMarker(name: String): Boolean = COPY_MARKER.containsMatchIn(stemOf(name))
+
+    /** Zone of a top-level folder directly under the storage root. */
+    fun topLevelZone(name: String): Zone = when {
+        name == "Android" -> Zone.APP_OWNED
+        name == STEWARD_DIR -> Zone.STEWARD
+        name in MEDIA_TOP_DIRS -> Zone.MEDIA_LIBRARY
+        name in MANAGED_TOP_DIRS -> Zone.USER_MANAGED
+        else -> Zone.OTHER_SHARED
+    }
+}
