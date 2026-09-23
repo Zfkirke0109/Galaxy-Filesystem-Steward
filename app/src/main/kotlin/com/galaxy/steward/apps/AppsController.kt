@@ -11,6 +11,7 @@ import com.galaxy.steward.core.appdata.AppDataHelper
 import com.galaxy.steward.core.appdata.AppDataReport
 import com.galaxy.steward.core.appdata.AppDataScanner
 import com.galaxy.steward.core.appdata.AppDataWire
+import com.galaxy.steward.core.appdata.AppFolderListing
 import com.galaxy.steward.core.appdata.AppJunkItem
 import com.galaxy.steward.core.appdata.AppPolicy
 import com.galaxy.steward.core.appdata.AppScanOptions
@@ -28,6 +29,7 @@ import com.galaxy.steward.shizuku.ShizukuBridge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -56,6 +58,18 @@ data class AppsState(
     val labels: Map<String, String> = emptyMap(),
 )
 
+/**
+ * The app folder browser: the folder being shown (or loaded), its listing, and the entries you picked (by path).
+ * [path] is null on the list of apps.
+ */
+data class BrowserState(
+    val path: String? = null,
+    val listing: AppFolderListing? = null,
+    val loading: Boolean = false,
+    val error: String? = null,
+    val selected: Set<String> = emptySet(),
+)
+
 /** Result of a cache-only clear run, judged from live storage statistics before and after. */
 data class CacheClearResult(val runId: String, val verified: Map<String, Long>, val unchanged: List<String>) {
     val freed: Long get() = verified.values.sum()
@@ -75,6 +89,10 @@ class AppsController(
     val state: StateFlow<AppsState> = _state.asStateFlow()
 
     private val ownPackage = context.packageName
+
+    private val _browser = MutableStateFlow(BrowserState())
+    val browser: StateFlow<BrowserState> = _browser.asStateFlow()
+    private var browseJob: Job? = null
 
     /** Without Shizuku only Android/media is reachable on Android 11+; older versions reach every area. */
     private fun reachableAreas(): Set<AppArea> = when {
@@ -288,6 +306,77 @@ class AppsController(
             it.copy(folders = it.folders?.without(summary.completedItemIds), folderSelected = it.folderSelected - summary.completedItemIds)
         }
         return summary
+    }
+
+    // ------------------------------------------------------------------ app folder browser
+
+    /** Opens a folder inside `Android/{data,obb,media}/<package>` in the browser. */
+    fun openFolder(path: String) {
+        browseJob?.cancel()
+        _browser.value = BrowserState(path = path, loading = true)
+        browseJob = scope.launch {
+            val started = SystemClock.uptimeMillis()
+            try {
+                val listing = listFolder(path)
+                StewardLog.i(
+                    "app folder listed in ${SystemClock.uptimeMillis() - started} ms: ${listing.entries.size} entries" +
+                        if (listing.hidden > 0) " (${listing.hidden} more not shown)" else "",
+                )
+                _browser.update { if (it.path == path) BrowserState(path = path, listing = listing) else it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                StewardLog.w("listing an app folder failed", e)
+                _browser.update { if (it.path == path) it.copy(loading = false, error = e.message ?: e.javaClass.simpleName) else it }
+            }
+        }
+    }
+
+    /** One level up; from an app's own folder back to the list of apps. Returns false when already there. */
+    fun browseUp(): Boolean {
+        val path = _browser.value.path ?: return false
+        val depth = path.removePrefix("${StorageAccess.rootPath}/").count { it == '/' }
+        if (depth <= 2) closeBrowser() else openFolder(path.substringBeforeLast('/'))
+        return true
+    }
+
+    fun closeBrowser() {
+        browseJob?.cancel()
+        _browser.value = BrowserState()
+    }
+
+    /** Lists the current folder again (after a removal). */
+    fun refreshBrowser() {
+        _browser.value.path?.let(::openFolder)
+    }
+
+    fun togglePick(path: String) = _browser.update {
+        it.copy(selected = if (path in it.selected) it.selected - path else it.selected + path)
+    }
+
+    fun setPicked(paths: Collection<String>, selected: Boolean) = _browser.update {
+        it.copy(selected = if (selected) it.selected + paths else it.selected - paths.toSet())
+    }
+
+    /**
+     * Lists one app folder: through Shizuku for Android/data and obb on Android 11+ (no normal app may read them), in
+     * the app for Android/media.
+     */
+    suspend fun listFolder(path: String): AppFolderListing {
+        val request = AppDataWire.encodeListRequest(AppDataWire.ListRequest(StorageAccess.rootPath, ownPackage, path))
+        val restricted = !path.startsWith("${StorageAccess.rootPath}/Android/media/") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        if (restricted) {
+            val helper = shizuku.helper()
+            // Null from a helper started by an older version of the app, which doesn't know this call yet.
+            val fd = withContext(Dispatchers.IO) { shizuku.pipeOf(request).use { helper.listAppFolder(it) } }
+                ?: throw IllegalStateException("The Shizuku helper is out of date. Stop and restart Shizuku, then try again.")
+            return shizuku.readLines(fd) { AppDataHelper.Client.readList(it) }
+        }
+        return withContext(Dispatchers.IO) {
+            val lines = ArrayList<String>()
+            AppDataHelper.Helper.list(request) { lines += it }
+            AppDataHelper.Client.readList(lines.asSequence())
+        }
     }
 
     /** Undo for an app-folder run: quarantined OBBs and leftovers go back (through Shizuku when needed). */

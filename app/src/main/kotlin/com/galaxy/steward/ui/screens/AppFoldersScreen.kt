@@ -50,7 +50,7 @@ import com.galaxy.steward.ui.components.toggleState
 
 /** Review of Android/data, obb and media: caches, logs, temp files, outdated OBBs and leftovers of removed apps. */
 @Composable
-fun AppFoldersScreen(vm: StewardViewModel, onBack: () -> Unit) {
+fun AppFoldersScreen(vm: StewardViewModel, onBrowse: () -> Unit, onBack: () -> Unit) {
     val state by vm.apps.state.collectAsStateWithLifecycle()
     val report = state.folders
     val items = report?.items.orEmpty()
@@ -62,6 +62,7 @@ fun AppFoldersScreen(vm: StewardViewModel, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             ReviewTopBar("App folders", onBack) {
+                TextButton(onClick = onBrowse) { Text("Browse") }
                 TextButton(onClick = { vm.apps.setFolderSelected(items.map { it.id }, false) }) { Text("None") }
             }
         },
@@ -138,7 +139,7 @@ fun AppFoldersScreen(vm: StewardViewModel, onBack: () -> Unit) {
             val large = report?.largeFiles.orEmpty()
             if (large.isNotEmpty()) {
                 item { SectionHeader("Largest files in app folders") }
-                item { InlineNotice("For information only: these belong to their apps (offline media, game data, models). Manage them inside each app.") }
+                item { InlineNotice("These belong to their apps (offline media, game data, models). To remove one you're sure the app can do without, open Browse.") }
                 items(large.take(20)) { f ->
                     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
                         Text("${vm.apps.label(f.packageName)} · ${f.size.humanBytes()}", style = MaterialTheme.typography.bodyMedium)

@@ -91,7 +91,7 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
             val s = outcome.summary
             val lines = buildList {
                 if (s.bytesFreed > 0) add("Freed ${s.bytesFreed.humanBytes()}")
-                if (s.cleared > 0) add("${s.cleared.plural("cache, log or temp file", "cache, log and temp files")} removed for good")
+                if (s.cleared > 0) add("${s.cleared.plural("file")} removed for good")
                 if (s.deduped > 0) add("${s.deduped.plural("verified duplicate", "verified duplicates")} removed")
                 if (s.quarantined > 0) add("${s.quarantined.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
                 if (s.moved > 0) add("${s.moved.plural("item", "items")} organised")

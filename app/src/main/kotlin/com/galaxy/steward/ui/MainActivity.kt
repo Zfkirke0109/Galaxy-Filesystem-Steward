@@ -35,6 +35,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.galaxy.steward.ui.components.ApplyProgressDialog
 import com.galaxy.steward.ui.components.OutcomeDialog
+import com.galaxy.steward.ui.screens.AppFolderBrowserScreen
 import com.galaxy.steward.ui.screens.AppFoldersScreen
 import com.galaxy.steward.ui.screens.AppStorageScreen
 import com.galaxy.steward.ui.screens.AppsScreen
@@ -62,6 +63,7 @@ object Routes {
     const val APPS = "apps"
     const val APP_STORAGE = "app-storage"
     const val APP_FOLDERS = "app-folders"
+    const val APP_BROWSER = "app-browser"
     const val TERMUX = "termux"
 }
 
@@ -145,7 +147,8 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.OPTIMIZE) { OptimizeScreen(vm, state) { nav.popBackStack() } }
             composable(Routes.APPS) { AppsScreen(vm) { nav.navigate(it) } }
             composable(Routes.APP_STORAGE) { AppStorageScreen(vm) { nav.popBackStack() } }
-            composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm) { nav.popBackStack() } }
+            composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm, { nav.navigate(Routes.APP_BROWSER) }) { nav.popBackStack() } }
+            composable(Routes.APP_BROWSER) { AppFolderBrowserScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX) { TermuxScreen(vm) { nav.popBackStack() } }
         }
     }

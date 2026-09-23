@@ -396,6 +396,24 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         Outcome.Applied("App folder clean-up", summary)
     }
 
+    /**
+     * Removes what you picked in the app folder browser: into the quarantine ([quarantine], undoable from History) or
+     * deleted for good. The folder is listed again afterwards.
+     */
+    fun removePicked(quarantine: Boolean) {
+        val browser = apps.browser.value
+        val listing = browser.listing ?: return
+        val items = listing.itemsFor(listing.entries.filter { it.path in browser.selected }, quarantine)
+        if (items.isEmpty()) return
+        val title = (if (quarantine) "Removed from " else "Deleted from ") + apps.label(listing.packageName)
+        launchRun(title) { progress ->
+            val summary = apps.applyFolders(title, items, progress)
+            reindexLater(summary.changedPaths)
+            apps.refreshBrowser()
+            Outcome.Applied(title, summary)
+        }
+    }
+
     fun clearAppCaches(packages: List<String>, stopFirst: Boolean) = launchRun("Clearing app caches") { progress ->
         val result = apps.clearCaches(packages, stopFirst, progress)
         Outcome.Report("App caches", AppsController.describe(result), result.unchanged.map { "No verified change: $it" })

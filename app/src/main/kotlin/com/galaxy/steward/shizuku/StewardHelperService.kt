@@ -17,8 +17,9 @@ import kotlin.system.exitProcess
 /**
  * The privileged half of the steward. Shizuku starts it in a separate process running as Android's shell user
  * (uid 2000), from this APK. It only exposes the fixed operations in [IStewardHelper]: the app-data scanner and
- * executor from `core` (with all their run-time checks), a cache-only clear for one validated package name,
- * granting the app usage access, and a fixed dump of the device log. There is no generic command runner.
+ * executor from `core` (with all their run-time checks), a read-only folder listing for the app folder browser, a
+ * cache-only clear for one validated package name, granting the app usage access, and a fixed dump of the device
+ * log. There is no generic command runner.
  */
 @Keep
 class StewardHelperService : IStewardHelper.Stub {
@@ -36,6 +37,11 @@ class StewardHelperService : IStewardHelper.Stub {
     override fun scanAppData(request: ParcelFileDescriptor): ParcelFileDescriptor {
         val text = readAll(request)
         return stream { out -> AppDataHelper.Helper.scan(text, out) }
+    }
+
+    override fun listAppFolder(request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> AppDataHelper.Helper.list(text, out) }
     }
 
     override fun applyAppData(request: ParcelFileDescriptor): ParcelFileDescriptor {

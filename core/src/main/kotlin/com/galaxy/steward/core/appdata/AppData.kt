@@ -42,6 +42,10 @@ enum class AppJunkKind(val title: String, val description: String, val defaultSe
         "Folders in Android/data, obb and media belonging to apps that are no longer installed.",
         false, true,
     ),
+
+    // Chosen by you in the app folder browser; never produced by a scan.
+    PICKED("Picked by you", "Files and folders you chose in the app folder browser, moved to the quarantine.", false, true),
+    PICKED_DELETE("Deleted by you", "Files and folders you chose in the app folder browser, deleted for good.", false, false),
 }
 
 /**

@@ -38,6 +38,7 @@ tuned for Galaxy devices such as the S23 series.
 | **Weekly audit** | Optional read-only scan while the phone charges. The first one runs a day after you switch it on. It skips a week when you scanned within the last day, and stops as soon as you start a scan or clean-up yourself. | Sends a notification saying how much space you could reclaim. It never changes files, except emptying quarantines that are past their retention period. |
 | **App storage** | What every installed app stores, split into app size, app data (accounts, messages, offline downloads) and cache. Needs usage access. | Clears only the cache of the apps you tick, through Shizuku. A clear counts only when the app's live cache size actually drops. App data is shown, never deleted; the ⓘ button opens Android's App info. |
 | **App folders** | `Android/data`, `Android/obb` and `Android/media`: cache folders, logs and crash dumps, temp files, thumbnail caches, outdated OBB game data, and folders left by apps you removed. Also lists the largest files each app keeps. | Caches, logs and temp files are deleted for good (apps rebuild them). Outdated OBBs and leftovers are quarantined, so they can be undone. |
+| **Browse app folders** | `Android/data`, `Android/obb` and `Android/media` folder by folder, like a file manager: every app's folder, then each file and subfolder with its total size, largest first. | Tick any files or folders and remove them. By default they go to the quarantine (History can undo it); one switch deletes them for good instead. An app's own top folder, protected apps, links and key-like files are never removed, and files changed after you opened the folder are kept. |
 | **Termux** | Termux's private home and packages: APT downloads, pip/uv/Poetry/npm/Go/Cargo/rustup/Bun/Android SDK caches, caches inside proot distributions that aren't running, build outputs Git ignores in your projects, and everything else in `~/.cache`. | Termux runs a small audited script ([`termux-steward.sh`](core/src/main/resources/com/galaxy/steward/core/termux/termux-steward.sh)) that checks every path again before removing it. Installed packages, configs and sources are never touched. |
 | **Logcat export** | The device log, for reporting a problem. With Shizuku connected it's the whole device log (the main, system, crash and events buffers); without it, Galaxy Steward's own lines. | **Settings → Diagnostics → Export** saves it to `Documents/Galaxy Steward LogCat/logcat-<date>.txt`, and **Share** sends it to another app. The steward never moves, deduplicates or cleans that folder. Every scan, clean-up, undo, Termux audit and export also writes one summary line (counts, sizes and durations, never file names) under the `GalaxySteward` tag. |
 
@@ -69,9 +70,9 @@ tab uses two optional helpers that are already on your phone:
 
 - **Shizuku** gives the steward a small helper process with ADB-level rights (no root). The helper only exposes fixed
   operations: the same app-folder scanner and cleaner as the rest of the app, with all their checks, a cache-only
-  clear for one package (`cmd package clear --cache-only`), granting the app usage access, and one fixed
-  `logcat -d` for the logcat export (only the shell user may read the whole device log). It has no general command
-  runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
+  clear for one package (`cmd package clear --cache-only`), a read-only folder listing for the app folder browser,
+  granting the app usage access, and one fixed `logcat -d` for the logcat export (only the shell user may read the
+  whole device log). It has no general command runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
   scan `Android/media` and show app sizes.
 - **Termux** keeps its home private to itself, so the steward asks Termux to run the helper script through Termux's
   own `RUN_COMMAND` bridge. Tap **Allow** on the Apps tab, then paste this once into Termux:

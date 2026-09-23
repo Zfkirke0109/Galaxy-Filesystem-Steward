@@ -12,6 +12,7 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -289,6 +290,37 @@ class AppFlowTest {
         assertTrue(File(root, "Android/media/com.whatsapp/WhatsApp/Media/.Thumbs/t1.jpg").exists()) // not selected by default
         assertTrue(File(root, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/IMG-1.jpg").exists())
         compose.onNodeWithText("Done").performClick()
+
+        // Browse app folders like a file manager (Android/media needs no Shizuku), pick a folder and remove it.
+        compose.onNodeWithText("Browse").performClick()
+        compose.onNodeWithText("Android/media").performClick()
+        shot("16a-app-folder-apps")
+        compose.onNodeWithText("com.whatsapp").performClick()
+        val media = File(root, "Android/media/com.whatsapp/WhatsApp/Media").path
+        awaitState("app folder listing", vm) { vm.apps.browser.value.listing?.path?.endsWith("/com.whatsapp") == true }
+        compose.onNodeWithText("WhatsApp").performClick()
+        awaitState("app folder listing", vm) { vm.apps.browser.value.listing?.path?.endsWith("/WhatsApp") == true }
+        compose.onNodeWithText("Media").performClick()
+        awaitState("app folder listing", vm) { vm.apps.browser.value.listing?.path == media }
+        assertEquals(listOf("WhatsApp Images", ".Thumbs"), vm.apps.browser.value.listing!!.entries.map { it.name }) // largest first
+        compose.onAllNodes(isToggleable())[0].performClick() // WhatsApp Images
+        shot("16b-app-folder-browser")
+        compose.onNodeWithText("Remove").performClick()
+        compose.onNodeWithText("Remove 1 item?").assertExists()
+        shot("16c-app-folder-remove")
+        compose.onNode(hasText("Remove") and hasAnyAncestor(isDialog())).performClick()
+        awaitState("removing a picked folder", vm) { vm.state.value.applying == null && vm.state.value.outcome is Outcome.Applied }
+        assertFalse(File(media, "WhatsApp Images").exists())
+        assertTrue(File(media, ".Thumbs/t1.jpg").exists())
+        assertTrue(File(root, ".StorageSteward/Quarantine").walk().any { it.name == "IMG-1.jpg" })
+        awaitState("the folder listed again", vm) { vm.apps.browser.value.listing?.entries?.map { it.name } == listOf(".Thumbs") }
+        // It went to the quarantine, so the result offers Undo, which puts it back.
+        compose.onNodeWithText("Undo").performClick()
+        awaitState("undoing the removal", vm) { vm.state.value.outcome is Outcome.RolledBack }
+        assertTrue(File(media, "WhatsApp Images/IMG-1.jpg").exists())
+        compose.onNodeWithText("Done").performClick()
+        repeat(4) { compose.onNodeWithContentDescription("Back").performClick() } // Media, WhatsApp, app, list of apps
+        compose.onNodeWithText("App folders").assertExists()
         compose.onNodeWithContentDescription("Back").performClick()
 
         // Termux is not installed here: the screen explains how to connect it.
