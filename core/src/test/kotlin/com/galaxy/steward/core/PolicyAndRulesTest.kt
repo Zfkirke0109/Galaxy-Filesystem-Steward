@@ -1,5 +1,6 @@
 package com.galaxy.steward.core
 
+import com.galaxy.steward.core.exec.MediaRescan
 import com.galaxy.steward.core.organize.BuiltInRules
 import com.galaxy.steward.core.organize.KeywordRule
 import com.galaxy.steward.core.organize.RuleTarget
@@ -85,5 +86,22 @@ class PolicyAndRulesTest {
         assertEquals("1.0 KiB", 1024L.humanBytes())
         assertEquals("1.5 MiB", (MIB + MIB / 2).humanBytes())
         assertEquals("2.0 GiB", (2 * GIB).humanBytes())
+    }
+
+    @Test
+    fun mediaRescanCollapsesToAffectedFolders() {
+        val root = "/storage/emulated/0"
+        val dirs = setOf("$root/Documents/Archives/Presets", "$root/Documents/Archives/Presets/Full", "$root/Download/Trip")
+        val changed = listOf(
+            "$root/Download/Trip/a.jpg", // moved away: its folder is rescanned
+            "$root/Download/Trip/b.jpg",
+            "$root/Documents/Archives/Presets", // folder moved here: rescanned as a whole ...
+            "$root/Documents/Archives/Presets/Full/x.vdc", // ... so its contents need no call of their own
+            "$root/notes.txt", // top-level file: the file itself, never the whole volume
+            "$root/.StorageSteward/Quarantine/run/Download/c.tmp", // quarantine is never indexed
+            "/elsewhere/file",
+        )
+        val targets = MediaRescan.targets(root, changed) { it in dirs }
+        assertEquals(listOf("$root/Documents/Archives/Presets", "$root/Download/Trip", "$root/notes.txt"), targets)
     }
 }

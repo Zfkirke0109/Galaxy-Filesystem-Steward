@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
@@ -34,6 +35,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.galaxy.steward.ui.components.ApplyProgressDialog
 import com.galaxy.steward.ui.components.OutcomeDialog
+import com.galaxy.steward.ui.screens.AppFoldersScreen
+import com.galaxy.steward.ui.screens.AppStorageScreen
+import com.galaxy.steward.ui.screens.AppsScreen
 import com.galaxy.steward.ui.screens.DuplicatesScreen
 import com.galaxy.steward.ui.screens.ExplorerScreen
 import com.galaxy.steward.ui.screens.HistoryScreen
@@ -43,6 +47,7 @@ import com.galaxy.steward.ui.screens.OptimizeScreen
 import com.galaxy.steward.ui.screens.OrganizeScreen
 import com.galaxy.steward.ui.screens.PermissionScreen
 import com.galaxy.steward.ui.screens.SettingsScreen
+import com.galaxy.steward.ui.screens.TermuxScreen
 import com.galaxy.steward.ui.theme.StewardTheme
 
 object Routes {
@@ -54,6 +59,10 @@ object Routes {
     const val JUNK = "junk"
     const val ORGANIZE = "organize"
     const val OPTIMIZE = "optimize"
+    const val APPS = "apps"
+    const val APP_STORAGE = "app-storage"
+    const val APP_FOLDERS = "app-folders"
+    const val TERMUX = "termux"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
@@ -61,6 +70,7 @@ private data class Tab(val route: String, val label: String, val icon: ImageVect
 private val tabs = listOf(
     Tab(Routes.HOME, "Home", Icons.Rounded.Home),
     Tab(Routes.EXPLORE, "Map", Icons.Rounded.Explore),
+    Tab(Routes.APPS, "Apps", Icons.Rounded.Apps),
     Tab(Routes.HISTORY, "History", Icons.Rounded.History),
     Tab(Routes.SETTINGS, "Settings", Icons.Rounded.Settings),
 )
@@ -133,6 +143,10 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.JUNK) { JunkScreen(vm, state) { nav.popBackStack() } }
             composable(Routes.ORGANIZE) { OrganizeScreen(vm, state) { nav.popBackStack() } }
             composable(Routes.OPTIMIZE) { OptimizeScreen(vm, state) { nav.popBackStack() } }
+            composable(Routes.APPS) { AppsScreen(vm) { nav.navigate(it) } }
+            composable(Routes.APP_STORAGE) { AppStorageScreen(vm) { nav.popBackStack() } }
+            composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX) { TermuxScreen(vm) { nav.popBackStack() } }
         }
     }
 

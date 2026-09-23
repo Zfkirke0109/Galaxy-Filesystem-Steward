@@ -4,8 +4,10 @@ import android.app.AppOpsManager
 import android.content.Context
 import android.os.Environment
 import android.os.Looper
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -17,6 +19,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.galaxy.steward.core.DAY_MS
+import com.galaxy.steward.core.appdata.AppJunkKind
 import com.galaxy.steward.ui.MainActivity
 import com.galaxy.steward.ui.Outcome
 import com.galaxy.steward.ui.StewardViewModel
@@ -108,6 +111,10 @@ class AppFlowTest {
             for (i in 1..3) file("$base/day$i.jpg", Random(20 + i).nextBytes(400_000))
         }
         file("Android/data/com.example/files/blob.bin", photo)
+        // App folders reachable without Shizuku (Android/media): an old log and a thumbnail cache.
+        text("Android/media/com.example.logger/logs/sync-2024-05-01.log", "old log line")
+        file("Android/media/com.whatsapp/WhatsApp/Media/.Thumbs/t1.jpg", Random(30).nextBytes(20_000))
+        file("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/IMG-1.jpg", Random(31).nextBytes(30_000))
         text("Documents/keys/release.jks", "keystore")
         root.walkBottomUp().filter { it.isDirectory }.forEach { it.setLastModified(old) }
 
@@ -218,6 +225,34 @@ class AppFlowTest {
         shot("12-storage-map")
         compose.onNodeWithText("Settings").performClick()
         shot("13-settings")
+
+        // Apps tab: without Shizuku the app folders scan covers Android/media in-process.
+        compose.onNodeWithText("Apps").performClick()
+        shot("14-apps")
+        compose.onNodeWithText("Scan").performClick()
+        awaitState("app folder scan", vm) { vm.apps.state.value.folders != null && !vm.apps.state.value.foldersScanning }
+        val folders = vm.apps.state.value.folders!!
+        assertTrue(folders.items.any { it.kind == AppJunkKind.LOGS && it.packageName == "com.example.logger" })
+        assertTrue(folders.items.any { it.kind == AppJunkKind.THUMBNAILS && it.packageName == "com.whatsapp" })
+        compose.onNodeWithText("Logs and crash reports").performClick()
+        shot("15-app-folders")
+        compose.onNodeWithText("Clean").performClick()
+        compose.onNodeWithText("Clean app folders?").assertExists()
+        compose.onNode(hasText("Clean") and hasAnyAncestor(isDialog())).performClick()
+        awaitState("app folder clean", vm) { vm.state.value.applying == null && vm.state.value.outcome is Outcome.Applied }
+        shot("16-app-folders-result")
+        assertFalse(File(root, "Android/media/com.example.logger/logs/sync-2024-05-01.log").exists())
+        assertTrue(File(root, "Android/media/com.example.logger/logs").isDirectory) // the folder itself stays
+        assertTrue(File(root, "Android/media/com.whatsapp/WhatsApp/Media/.Thumbs/t1.jpg").exists()) // not selected by default
+        assertTrue(File(root, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/IMG-1.jpg").exists())
+        compose.onNodeWithText("Done").performClick()
+        compose.onNodeWithContentDescription("Back").performClick()
+
+        // Termux is not installed here: the screen explains how to connect it.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Termux home and packages"))
+        compose.onNodeWithText("Open").performClick()
+        compose.onNodeWithText("Connect Termux").assertExists()
+        shot("17-termux-setup")
         scenario.close()
     }
 }

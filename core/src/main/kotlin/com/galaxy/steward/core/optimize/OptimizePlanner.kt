@@ -6,6 +6,7 @@ import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
+import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
@@ -126,9 +127,16 @@ class OptimizePlanner(
         if (!sameName && inner.name.trim().lowercase() !in extractNames) return null
         if (inner.dirs.any { it.name == inner.name } || inner.files.any { it.name == inner.name }) return null
         if (inner.dirs.isEmpty() && inner.files.isEmpty()) return null
+        // Inside source and decompiled trees a repeated name is a package path (smali/com/acme/userConfig/userConfig),
+        // not an archive wrapper: flattening it would change what the code means.
+        if (insideCodeTree(wrapper)) return null
         var newest = inner.mtime
-        inner.walkFiles { if (it.mtime > newest) newest = it.mtime }
-        if (newest > recentCutoff) return null
+        var hasCode = false
+        inner.walkFiles {
+            if (it.mtime > newest) newest = it.mtime
+            if (it.kind == FileKind.CODE) hasCode = true
+        }
+        if (newest > recentCutoff || hasCode) return null
 
         val ops = ArrayList<Operation>()
         for (d in inner.dirs) ops += MoveDirOp(d.path, "${wrapper.path}/${d.name}", allowRename = true)
@@ -144,6 +152,15 @@ class OptimizePlanner(
             defaultSelected = true,
             operations = ops,
         )
+    }
+
+    private fun insideCodeTree(dir: DirNode): Boolean {
+        var d: DirNode? = dir
+        while (d != null && d.parent != null) {
+            if (SafetyPolicy.isCodeTreeDir(d.name)) return true
+            d = d.parent
+        }
+        return false
     }
 
     // ------------------------------------------------------------------ oversized flat folders

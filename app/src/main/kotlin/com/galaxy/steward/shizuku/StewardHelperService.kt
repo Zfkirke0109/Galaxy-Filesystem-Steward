@@ -1,0 +1,106 @@
+package com.galaxy.steward.shizuku
+
+import android.content.Context
+import android.os.ParcelFileDescriptor
+import android.os.Process
+import androidx.annotation.Keep
+import com.galaxy.steward.core.appdata.AppDataHelper
+import com.galaxy.steward.core.appdata.AppDataWire
+import com.galaxy.steward.core.appdata.AppPolicy
+import kotlinx.coroutines.runBlocking
+import java.io.BufferedWriter
+import java.io.OutputStreamWriter
+import java.util.concurrent.TimeUnit
+import kotlin.system.exitProcess
+
+/**
+ * The privileged half of the steward. Shizuku starts it in a separate process running as Android's shell user
+ * (uid 2000), from this APK. It only exposes the fixed operations in [IStewardHelper]: the app-data scanner and
+ * executor from `core` (with all their run-time checks), a cache-only clear for one validated package name, and
+ * granting the app usage access. There is no generic command runner.
+ */
+@Keep
+class StewardHelperService : IStewardHelper.Stub {
+    constructor() : super()
+
+    @Suppress("unused")
+    constructor(context: Context) : super()
+
+    override fun destroy() {
+        exitProcess(0)
+    }
+
+    override fun uid(): Int = Process.myUid()
+
+    override fun scanAppData(request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> AppDataHelper.Helper.scan(text, out) }
+    }
+
+    override fun applyAppData(request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> runBlocking { AppDataHelper.Helper.apply(text, out) } }
+    }
+
+    override fun rollbackAppData(rootPath: String, entries: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(entries)
+        return stream { out -> runBlocking { AppDataHelper.Helper.rollback(rootPath, text, out) } }
+    }
+
+    override fun clearAppCache(packageName: String, userId: Int, forceStop: Boolean, timeoutMs: Long): String {
+        if (!AppPolicy.isPackageName(packageName) || userId < 0) return "error=invalid package"
+        if (packageName in AppPolicy.STRICT_NO_TOUCH) return "error=protected app"
+        val user = userId.toString()
+        if (forceStop && AppPolicy.mayForceStop(packageName)) {
+            exec(listOf("/system/bin/am", "force-stop", "--user", user, packageName), 10_000)
+        }
+        // On Samsung Android 16 this call clears the cache but its completion callback can hang (observed by the
+        // Termux steward), so success is judged by the app from live storage stats, never from the exit code.
+        val code = exec(listOf("/system/bin/cmd", "package", "clear", "--user", user, "--cache-only", packageName), timeoutMs.coerceIn(5_000, 60_000))
+        return "exit=$code"
+    }
+
+    override fun grantUsageAccess(packageName: String): Boolean {
+        if (!AppPolicy.isPackageName(packageName)) return false
+        return exec(listOf("/system/bin/appops", "set", packageName, "GET_USAGE_STATS", "allow"), 10_000) == 0
+    }
+
+    /** Runs a fixed command without a shell. Returns the exit code, 124 on timeout (like `timeout`), -1 on error. */
+    private fun exec(command: List<String>, timeoutMs: Long): Int = try {
+        val p = ProcessBuilder(command).redirectErrorStream(true).start()
+        Thread { runCatching { p.inputStream.readBytes() } }.start()
+        if (p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            p.exitValue()
+        } else {
+            p.destroy()
+            124
+        }
+    } catch (_: Exception) {
+        -1
+    }
+
+    private fun readAll(fd: ParcelFileDescriptor): String =
+        ParcelFileDescriptor.AutoCloseInputStream(fd).use { it.readBytes().decodeToString() }
+
+    /** Streams lines produced by [producer] on a worker thread through a pipe the app reads as they arrive. */
+    private fun stream(producer: ((String) -> Unit) -> Unit): ParcelFileDescriptor {
+        val (read, write) = ParcelFileDescriptor.createPipe()
+        Thread {
+            BufferedWriter(OutputStreamWriter(ParcelFileDescriptor.AutoCloseOutputStream(write), Charsets.UTF_8)).use { out ->
+                try {
+                    producer { line ->
+                        out.write(line)
+                        out.write("\n")
+                        if (line.startsWith("J\t") || line.startsWith("P\t")) out.flush()
+                    }
+                } catch (e: Exception) {
+                    out.write(AppDataWire.error(e.message ?: e.javaClass.simpleName))
+                    out.write("\n")
+                    out.write(AppDataWire.END)
+                    out.write("\n")
+                }
+            }
+        }.apply { name = "steward-helper" }.start()
+        return read
+    }
+}

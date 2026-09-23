@@ -43,8 +43,13 @@ data class ExecutionSummary(
     val messages: List<String>,
     /** Paths whose existence changed - handed to the media scanner. */
     val changedPaths: List<String>,
+    /** Regenerable files (caches, logs, temp) deleted for good. */
+    val cleared: Int = 0,
 ) {
     val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs > 0
+
+    /** Something in this run can be reverted from History. */
+    val undoable: Boolean get() = changedAnything
 }
 
 fun interface ExecutionListener {

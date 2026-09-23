@@ -15,6 +15,12 @@ tuned for Galaxy devices such as the S23 series.
   <img src="docs/screenshots/autopilot-result.png" width="200" alt="Autopilot result with an Undo button">
 </p>
 
+<p>
+  <img src="docs/screenshots/apps.png" width="200" alt="Apps tab with Shizuku, usage access and Termux status">
+  <img src="docs/screenshots/app-folders.png" width="200" alt="App folder review grouped by logs and thumbnail caches">
+  <img src="docs/screenshots/termux-setup.png" width="200" alt="Termux connection steps">
+</p>
+
 <sub>Screenshots are rendered by the end-to-end test from a sample storage layout.</sub>
 
 ## What it does
@@ -30,6 +36,9 @@ tuned for Galaxy devices such as the S23 series.
 | **Storage map** | Folder-by-folder breakdown with size bars, largest files, a breakdown by file type, and the ownership zone of each folder. | Read only. |
 | **History** | Every run, with what it freed, moved, deduplicated or quarantined. | **Undo** replays the journal backwards and checks each step before reverting it. Quarantine can be emptied per run or all at once. |
 | **Weekly audit** | Optional read-only scan while the phone charges. | Sends a notification saying how much space you could reclaim. It never changes files, except emptying quarantines that are past their retention period. |
+| **App storage** | What every installed app stores, split into app size, app data (accounts, messages, offline downloads) and cache. Needs usage access. | Clears only the cache of the apps you tick, through Shizuku. A clear counts only when the app's live cache size actually drops. App data is shown, never deleted; the ⓘ button opens Android's App info. |
+| **App folders** | `Android/data`, `Android/obb` and `Android/media`: cache folders, logs and crash dumps, temp files, thumbnail caches, outdated OBB game data, and folders left by apps you removed. Also lists the largest files each app keeps. | Caches, logs and temp files are deleted for good (apps rebuild them). Outdated OBBs and leftovers are quarantined, so they can be undone. |
+| **Termux** | Termux's private home and packages: APT downloads, pip/uv/Poetry/npm/Go/Cargo/rustup/Bun/Android SDK caches, caches inside proot distributions that aren't running, build outputs Git ignores in your projects, and everything else in `~/.cache`. | Termux runs a small audited script ([`termux-steward.sh`](core/src/main/resources/com/galaxy/steward/core/termux/termux-steward.sh)) that checks every path again before removing it. Installed packages, configs and sources are never touched. |
 
 **Autopilot** on the home screen applies everything that's currently selected in one confirmed run. It works in the
 safest order: dedupe, then clutter, then layout fixes, then filing.
@@ -52,6 +61,37 @@ Pictures/Imported/<year>/   Pictures/Screenshots/   Movies/Imported/<year>/   Mu
 You can add your own keyword and file-type rules in **Settings → Custom filing rules**. They run before the
 built-in ones, for example `acme, invoice*` + `pdf` → `Documents/Work/ACME`.
 
+### App data, Shizuku and Termux
+
+Since Android 11, no normal app can read `Android/data` or `Android/obb`, or clear another app's cache. The **Apps**
+tab uses two optional helpers that are already on your phone:
+
+- **Shizuku** gives the steward a small helper process with ADB-level rights (no root). The helper only exposes fixed
+  operations: the same app-folder scanner and cleaner as the rest of the app, with all their checks, a cache-only
+  clear for one package (`cmd package clear --cache-only`), and granting the app usage access. It has no general
+  command runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
+  scan `Android/media` and show app sizes.
+- **Termux** keeps its home private to itself, so the steward asks Termux to run the helper script through Termux's
+  own `RUN_COMMAND` bridge. Tap **Allow** on the Apps tab, then paste this once into Termux:
+
+  ```
+  mkdir -p ~/.termux && sed -i '/^allow-external-apps/d' ~/.termux/termux.properties 2>/dev/null; echo 'allow-external-apps = true' >> ~/.termux/termux.properties && termux-reload-settings
+  ```
+
+  Run `termux-setup-storage` too, if you haven't already. The script then hands its full report back through shared
+  storage, so a large report isn't cut off.
+
+App-data rules carried over from the Termux steward's strict v18 policy:
+
+- **Amazon Music and Audible are never touched**: nothing is cleaned, stopped or cleared.
+- **Only regenerable data is deleted**: cache folders, logs, crash dumps and temp files older than a set age. The app
+  never deletes offline media, downloads, saves, databases (LevelDB/RocksDB write-ahead logs are recognised), or
+  anything with a credential-like name. The same is true of app data in `/data/data`, which would sign you out.
+- **Cache clears are checked against live storage statistics.** Apps are stopped first unless you turn that off.
+  System apps, Google Play services, Samsung apps, messaging, Termux and Shizuku are never stopped.
+- A folder only counts as a **leftover** when Android doesn't know its package at all. Apps removed with "keep data"
+  and archived apps count as installed. If the package list looks unreliable, nothing is reported as a leftover.
+
 ## Safety model
 
 These rules come from the Termux steward and are enforced both when the plan is built and again right before each
@@ -73,6 +113,12 @@ operation runs:
   moves files back, and restores quarantined items.
 - **Quarantine** lives at `/storage/emulated/0/.StorageSteward/Quarantine/<run>/` on the same volume, so
   quarantining is an instant rename. A `.nomedia` marker keeps galleries from indexing it.
+- **Runs survive switching apps.** A foreground service keeps a scan, clean-up or undo running if you leave the
+  app. Afterwards, the affected folders are rescanned for the media index (not every file one by one), so galleries
+  pick up the new layout without keeping Android's media service busy for minutes.
+- **Source trees keep their shape.** Folders inside `src`, `smali*`, `java`, `node_modules` and similar trees, or
+  containing code, are never flattened: `com/acme/model/model` is a package path, not a redundant wrapper.
+  apktool output (`apktool.yml`) counts as a project.
 
 ## Install
 
@@ -81,6 +127,8 @@ operation runs:
 2. Install `app-release.apk`. The CI build is signed with a debug key; sign your own build if you plan to
    distribute it. You'll need to allow installs from your browser or file manager.
 3. Open the app and grant **All files access**. The app has no internet permission, so nothing leaves your phone.
+4. Optional: on the **Apps** tab, connect Shizuku (for `Android/data`, `obb` and cache clearing), grant usage access
+   (for app sizes), and connect Termux.
 
 ## Build from source
 
@@ -95,9 +143,13 @@ Requirements: JDK 17 or later and the Android SDK (platform 36).
 
 The engine tests run against real temporary directories. They cover keeper choice, the protected zones, fresh
 SHA-256 re-checks that catch content changed after a scan, quarantine, folder deduplication and merges, filing
-rules, clutter detection, layout fixes, and undo. The app test scans a sample phone layout through the real
-ViewModel, opens every screen, applies Autopilot, checks the result file by file on disk, then undoes the run and
-checks that everything was restored.
+rules, clutter detection, layout fixes, and undo. They also cover app folders: the scan-clean-undo round trip
+through the same line protocol the Shizuku helper uses, plus refusals for protected apps, changed files and
+reinstalled apps. The Termux script tests run the real `termux-steward.sh` with bash against a throwaway fake Termux
+home. They check symlinked caches, forged paths, tracked sources, unknown targets and truncated output. The app test
+scans a sample phone layout through the real ViewModel, opens every screen, applies Autopilot, checks the result
+file by file on disk, then undoes the run and checks that everything was restored. It also cleans a sample
+`Android/media` folder from the Apps tab.
 
 ## Architecture
 
@@ -109,8 +161,13 @@ core/   Pure Kotlin/JVM engine, no Android dependencies, unit-tested against rea
   junk/       JunkPlanner
   organize/   Keyword and extension rules, OrganizePlanner (the semantic layout planner)
   optimize/   OptimizePlanner (flattening, date buckets, health insights)
-  exec/       ActionExecutor, PathGuard, JournalStore, RollbackEngine, QuarantineManager
+  exec/       ActionExecutor, PathGuard, JournalStore, RollbackEngine, QuarantineManager, MediaRescan
+  appdata/    AppDataScanner and AppDataExecutor for Android/data|obb|media, and the helper line protocol
+  termux/     termux-steward.sh (resource), target catalogue and output parser
 app/    Android app: Compose UI, ViewModel, settings, WorkManager weekly audit, MediaStore rescans
+  shizuku/    Shizuku bridge and StewardHelperService (runs as the shell user inside Shizuku)
+  termux/     RUN_COMMAND bridge and result receiver
+  apps/       Per-app storage stats and cache clears
 ```
 
 ### From the Termux script to the app
@@ -124,13 +181,18 @@ app/    Android app: Compose UI, ViewModel, settings, WorkManager weekly audit, 
 | `safe`, `quarantine-logs`, `all-safe` | Clutter (stale downloads, old logs, empty folders, …) |
 | `autopilot BALANCED_AUTOPILOT` | Autopilot card on the home screen |
 | hash-hint cache and benchmark-guided workers | Persistent hash cache and CPU-scaled parallel hashing |
+| `safe`, `dev-cache`, deep Termux and proot cleanup, repo build outputs | Apps → Termux |
+| `app-cache-audit`, targeted cache adapters (rish) | Apps → App storage (through Shizuku) |
+| `rish` `Android/data` sizing | Apps → App folders (through Shizuku) |
 
 ### What's deliberately left out
 
-Some of the script's Termux-specific jobs aren't possible, or aren't safe, from a normal Android app: clearing
-other apps' private caches, `pm trim-caches`, Termux and proot toolchain cleanup, and pruning Git repositories. An app
-without root or Shizuku can't reach those areas. The strict protections for Amazon Music, Audible and Facebook still
-apply, because the app never touches `Android/data`, `obb` or `media` at all.
+- **Device-wide `pm trim-caches`.** The v18 script disabled it because it can't exclude Amazon Music or Audible.
+  Caches are cleared app by app instead.
+- **Deleting app data in `/data/data`.** Only root could do that selectively, and clearing it wholesale signs you
+  out and loses messages. The app shows how big each app's data is and links to App info.
+- **Pruning Git history** (`git gc`, repacking). Build outputs that Git ignores can be cleaned; repository history is
+  left alone.
 
 On "faster I/O": the app speeds up everyday file access by freeing space (flash storage slows down and wears
 faster when nearly full), by removing duplicate and junk files that galleries and file managers would otherwise index,

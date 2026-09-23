@@ -22,6 +22,12 @@ object JournalAction {
     const val DEDUPED_QUARANTINED = "DEDUPED_QUARANTINED"
     const val QUARANTINED = "QUARANTINED"
     const val RMDIR = "RMDIR"
+
+    /** Regenerable data (caches, logs, temp files) deleted for good; `b` holds `files=<count>`. Not undoable. */
+    const val PURGED = "PURGED"
+
+    /** Actions [RollbackEngine] can revert. */
+    val RESTORABLE = setOf(MOVED, MOVED_DIR, DEDUPED, DEDUPED_QUARANTINED, QUARANTINED, RMDIR)
 }
 
 data class JournalEntry(
@@ -46,7 +52,13 @@ data class JournalEntry(
     }
 }
 
-class JournalWriter(val file: File) : Closeable {
+/** Where executors record what they did: a journal file, or a stream back to the app from the Shizuku helper. */
+interface JournalSink {
+    fun meta(key: String, value: String)
+    fun entry(entry: JournalEntry)
+}
+
+class JournalWriter(val file: File) : Closeable, JournalSink {
     private val out: BufferedWriter
 
     init {
@@ -54,12 +66,12 @@ class JournalWriter(val file: File) : Closeable {
         out = BufferedWriter(FileWriter(file, true))
     }
 
-    fun meta(key: String, value: String) {
+    override fun meta(key: String, value: String) {
         out.append('#').append(key).append('\t').append(value.replace('\t', ' ').replace('\n', ' ')).append('\n')
         out.flush()
     }
 
-    fun entry(entry: JournalEntry) {
+    override fun entry(entry: JournalEntry) {
         out.append(entry.encode()).append('\n')
         out.flush()
     }
@@ -78,8 +90,10 @@ data class JournalInfo(
     val rolledBackAt: Long?,
     val purgedAt: Long?,
     val entryCount: Int,
+    /** Entries that undo can revert (everything except permanent cache and log clean-ups). */
+    val restorableCount: Int = entryCount,
 ) {
-    val canRollback: Boolean get() = rolledBackAt == null && entryCount > 0
+    val canRollback: Boolean get() = rolledBackAt == null && restorableCount > 0
     fun stat(key: String): Long = stats[key] ?: 0L
 }
 
@@ -117,6 +131,7 @@ class JournalStore(val directory: File) {
         if (!file.isFile) return null
         val meta = HashMap<String, String>()
         var entries = 0
+        var restorable = 0
         try {
             file.forEachLine { line ->
                 if (line.startsWith('#')) {
@@ -124,6 +139,7 @@ class JournalStore(val directory: File) {
                     meta[key] = line.substringAfter('\t', "")
                 } else if (line.isNotEmpty()) {
                     entries++
+                    if (line.substringBefore('\t') in JournalAction.RESTORABLE) restorable++
                 }
             }
         } catch (_: IOException) {
@@ -145,6 +161,7 @@ class JournalStore(val directory: File) {
             rolledBackAt = meta["rolledback"]?.toLongOrNull(),
             purgedAt = meta["purged"]?.toLongOrNull(),
             entryCount = entries,
+            restorableCount = restorable,
         )
     }
 }

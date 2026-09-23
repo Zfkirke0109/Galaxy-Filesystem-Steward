@@ -13,7 +13,7 @@ import java.nio.file.attribute.BasicFileAttributes
  * same volume as the data so quarantining is an instant rename. Space is only released when a run's
  * quarantine is emptied - manually or after the retention period.
  */
-class QuarantineManager(private val guard: PathGuard, private val journals: JournalStore) {
+class QuarantineManager(private val guard: PathGuard, private val journals: JournalStore?) {
     fun dirFor(runId: String): Path = guard.quarantineRoot.resolve(runId)
 
     /** Creates the steward folder with a `.nomedia` marker so galleries never index quarantined media. */
@@ -46,7 +46,7 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         if (!dir.startsWith(guard.quarantineRoot) || dir == guard.quarantineRoot || !guard.isRealDirectory(dir)) return 0
         val bytes = treeSize(dir)
         deleteTree(dir)
-        if (journals.fileFor(runId).exists()) journals.appendMeta(runId, "purged", now.toString())
+        if (journals != null && journals.fileFor(runId).exists()) journals.appendMeta(runId, "purged", now.toString())
         return bytes
     }
 
@@ -57,7 +57,7 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         if (retentionDays <= 0) return 0
         val cutoff = now - retentionDays * DAY_MS
         return runsWithContent().sumOf { id ->
-            val info = journals.info(id)
+            val info = journals?.info(id)
             val finished = info?.finishedAt ?: info?.startedAt ?: 0L
             if (finished in 1 until cutoff) purge(id, now) else 0L
         }
