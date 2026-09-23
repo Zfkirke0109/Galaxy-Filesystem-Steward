@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Galaxy Steward</string>
+    <string name="audit_channel_name">Weekly storage audit</string>
+    <string name="audit_channel_description">A read-only weekly survey of what can be cleaned or organised.</string>
+</resources>
