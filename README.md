@@ -129,13 +129,20 @@ operation runs:
 
 ## Install
 
-1. Open the latest run of the **Android build** workflow in this repository's **Actions** tab and download the
-   `galaxy-steward-apks` artifact.
-2. Install `app-release.apk`. The CI build is signed with a debug key; sign your own build if you plan to
-   distribute it. You'll need to allow installs from your browser or file manager.
-3. Open the app and grant **All files access**. The app has no internet permission, so nothing leaves your phone.
-4. Optional: on the **Apps** tab, connect Shizuku (for `Android/data`, `obb` and cache clearing), grant usage access
+1. Download
+   [`galaxy-steward.apk`](https://github.com/Zfkirke0109/Galaxy-Filesystem-Steward/releases/latest/download/galaxy-steward.apk)
+   from the latest release and install it. You'll need to allow installs from your browser or file manager. To get
+   updates automatically, add this repository to [Obtainium](https://github.com/ImranR98/Obtainium) or GitHub Store
+   instead.
+2. Open the app and grant **All files access**. The app has no internet permission, so nothing leaves your phone.
+3. Optional: on the **Apps** tab, connect Shizuku (for `Android/data`, `obb` and cache clearing), grant usage access
    (for app sizes), and connect Termux.
+
+Every build is signed with the same release key, so each new version installs over the last one and the app keeps
+its settings and history. Builds made before release signing was set up each had a different throwaway key: uninstall
+such a build once before installing a release, and undo any runs you still want undone first. The
+[signing guide](docs/SIGNING.md) covers the one-time key setup and how CI signs, checks and publishes each build.
+Every workflow run also keeps its APK as an artifact, including runs for pull requests.
 
 ## Build from source
 
@@ -145,8 +152,11 @@ Requirements: JDK 17 or later and the Android SDK (platform 36).
 ./gradlew :core:test              # engine unit tests (plain JVM, fast)
 ./gradlew :app:testDebugUnitTest  # end-to-end app test (Robolectric) + screenshots in app/build/outputs/roborazzi
 ./gradlew :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:assembleRelease    # minified with R8
+./gradlew :app:assembleRelease    # shrunk with R8; signed with the release key if one is configured
 ```
+
+Release builds keep real class names and line numbers, so crash traces in a phone's logcat are readable without a
+mapping file. To sign local builds with the release key, see [docs/SIGNING.md](docs/SIGNING.md#building-locally-with-the-key).
 
 The engine tests run against real temporary directories. They cover keeper choice, the protected zones, fresh
 SHA-256 re-checks that catch content changed after a scan, quarantine, folder deduplication and merges, filing
