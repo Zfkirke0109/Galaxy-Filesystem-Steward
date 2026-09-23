@@ -1,0 +1,17 @@
+# Repository hygiene hooks, run by pre-commit.ci on every pull request.
+# Kotlin correctness is covered by the Gradle build, tests and Android lint in .github/workflows/android.yml.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+ci:
+  autoupdate_schedule: quarterly
