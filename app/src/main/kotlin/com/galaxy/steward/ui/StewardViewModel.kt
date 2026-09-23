@@ -419,6 +419,15 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         Outcome.Report("App caches", AppsController.describe(result), result.unchanged.map { "No verified change: $it" })
     }
 
+    fun clearAppData(packages: List<String>) = launchRun("Clearing app data") { progress ->
+        val result = apps.clearData(packages, progress)
+        Outcome.Report(
+            "App data cleared",
+            AppsController.describe(result),
+            result.unchanged.map { "No verified change: $it" } + result.refused.map { "Refused - $it" },
+        )
+    }
+
     fun cleanTermux(items: List<TermuxItem>) = launchRun("Termux clean-up") { progress ->
         progress(0, 1, "Waiting for Termux")
         val (_, summary) = termux.clean(items)

@@ -1,6 +1,8 @@
 package com.galaxy.steward.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -9,9 +11,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.apps.AppStorage
 import com.galaxy.steward.apps.AppStorageRow
+import com.galaxy.steward.core.ageText
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.shizuku.ShizukuStatus
@@ -43,12 +51,17 @@ import com.galaxy.steward.ui.components.EmptyState
 import com.galaxy.steward.ui.components.InlineNotice
 import com.galaxy.steward.ui.components.Pill
 import com.galaxy.steward.ui.components.SelectRow
+import com.galaxy.steward.ui.components.UsageBar
 
-private enum class AppSort(val label: String) { TOTAL("Largest"), DATA("App data"), CACHE("Cache") }
+private enum class AppSort(val label: String) { TOTAL("Largest"), DATA("App data"), CACHE("Cache"), UNUSED("Unused longest") }
+
+/** What the check boxes pick apps for. */
+private enum class ClearMode(val label: String) { CACHE("Clear cache"), DATA("Clear all data") }
 
 /**
- * Every app's storage split the way Android accounts it. App data (accounts, messages, offline downloads) is
- * shown so you can see where space goes and manage it in App info; only the cache is offered for clearing.
+ * Every app's storage split the way Android accounts it, with when each app was last used. Caches can be cleared
+ * for many apps at once. "Clear all data" resets the apps you pick, like Android's Clear storage button; it is never
+ * preselected, never offered for apps whose data may be irreplaceable, and always asks first.
  */
 @Composable
 fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
@@ -56,59 +69,116 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
     val shizuku by vm.apps.shizuku.status.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var sort by rememberSaveable { mutableStateOf(AppSort.TOTAL) }
+    var mode by rememberSaveable { mutableStateOf(ClearMode.CACHE) }
     var showSystem by rememberSaveable { mutableStateOf(false) }
     // Off by default: a force-stopped app receives no notifications until it is opened again.
     var stopFirst by rememberSaveable { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<List<AppStorageRow>?>(null) }
+    var confirmData by remember { mutableStateOf<List<AppStorageRow>?>(null) }
     val canClear = shizuku == ShizukuStatus.READY
+    val dataMode = mode == ClearMode.DATA
+    val now = remember(state.apps) { System.currentTimeMillis() }
 
     val rows = remember(state.apps, sort, showSystem) {
-        state.apps.filter { showSystem || !it.system || it.cacheBytes >= 50L * 1024 * 1024 }.sortedByDescending {
-            when (sort) {
-                AppSort.TOTAL -> it.totalBytes
-                AppSort.DATA -> it.dataBytes
-                AppSort.CACHE -> it.cacheBytes
-            }
+        val shown = state.apps.filter { showSystem || !it.system || it.cacheBytes >= 50L * 1024 * 1024 }
+        when (sort) {
+            // No recorded use at all first: Android keeps two years of usage history.
+            AppSort.UNUSED -> shown.sortedWith(compareBy<AppStorageRow> { it.lastUsed ?: 0L }.thenByDescending { it.totalBytes })
+            AppSort.TOTAL -> shown.sortedByDescending { it.totalBytes }
+            AppSort.DATA -> shown.sortedByDescending { it.dataBytes }
+            AppSort.CACHE -> shown.sortedByDescending { it.cacheBytes }
         }
     }
     val selected = state.apps.filter { it.packageName in state.cacheSelected && !it.protected }
+    val dataSelected = state.apps.filter { it.packageName in state.dataSelected && it.clearBlock == null }
 
     Scaffold(
         topBar = {
             ReviewTopBar("App storage", onBack) {
-                TextButton(onClick = { vm.apps.setCacheSelected(state.apps.map { it.packageName }, false) }) { Text("None") }
+                TextButton(
+                    onClick = { if (dataMode) vm.apps.clearDataSelection() else vm.apps.setCacheSelected(state.apps.map { it.packageName }, false) },
+                ) { Text("None") }
             }
         },
         bottomBar = {
-            ActionBar(
-                summary = "Frees about ${selected.sumOf { it.cacheBytes }.humanBytes()}",
-                detail = if (canClear) "${selected.size.plural("app cache", "app caches")} selected" else "Connect Shizuku to clear caches here",
-                action = "Clear",
-                enabled = canClear && selected.isNotEmpty(),
-            ) { confirm = selected }
+            if (dataMode) {
+                ActionBar(
+                    summary = "Frees about ${dataSelected.sumOf { it.clearableBytes }.humanBytes()}",
+                    detail = if (canClear) "${dataSelected.size.plural("app")} to reset" else "Connect Shizuku to clear app data here",
+                    action = "Clear data",
+                    enabled = canClear && dataSelected.isNotEmpty(),
+                ) { confirmData = dataSelected }
+            } else {
+                ActionBar(
+                    summary = "Frees about ${selected.sumOf { it.cacheBytes }.humanBytes()}",
+                    detail = if (canClear) "${selected.size.plural("app cache", "app caches")} selected" else "Connect Shizuku to clear caches here",
+                    action = "Clear",
+                    enabled = canClear && selected.isNotEmpty(),
+                ) { confirm = selected }
+            }
         },
     ) { padding ->
         if (state.apps.isEmpty()) {
             EmptyState(
                 Icons.Rounded.Apps,
                 if (state.usageAccess) "Measuring apps…" else "Usage access needed",
-                if (state.usageAccess) "This takes a few seconds." else "Grant usage access on the Apps tab to see each app's storage.",
+                if (state.usageAccess) "Each app shows up as soon as it is measured." else "Grant usage access on the Apps tab to see each app's storage.",
                 Modifier.padding(padding),
             )
             return@Scaffold
         }
         LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(vertical = 6.dp)) {
-            item {
-                InlineNotice(
-                    "App data holds accounts, messages, offline music and settings; clearing it signs you out, so it is only shown here. " +
-                        "Tap ⓘ to manage an app in Android's App info. Cache is rebuilt by each app and is safe to clear.",
-                )
-            }
-            if (!canClear) {
-                item { InlineNotice("Without Shizuku, open an app's App info and tap Clear cache there. Connect Shizuku on the Apps tab to clear many at once.") }
+            if (state.statsLoading && state.statsTotal > 0) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "Measuring apps… ${state.statsDone} of ${state.statsTotal}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        UsageBar(state.statsDone.toFloat() / state.statsTotal, height = 4)
+                    }
+                }
             }
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ClearMode.entries.forEach { m ->
+                        FilterChip(selected = mode == m, onClick = { mode = m }, label = { Text(m.label) }, modifier = Modifier.padding(end = 8.dp))
+                    }
+                }
+            }
+            item {
+                if (dataMode) {
+                    InlineNotice(
+                        "Clear all data resets an app to how it was when installed, like Android's Clear storage button: sign-ins, " +
+                            "settings, saved games and downloads it keeps on this phone, including its Android/data folder, are deleted " +
+                            "for good. The app stays installed. Messengers and mail, authenticators and wallets, Termux, Shizuku and " +
+                            "system apps are never offered.",
+                        error = true,
+                    )
+                } else {
+                    InlineNotice(
+                        "Cache is rebuilt by each app and is safe to clear. App data holds accounts, messages, saved games and offline " +
+                            "downloads: to reset an app completely, use Clear all data. Tap ⓘ to open an app's App info.",
+                    )
+                }
+            }
+            if (!canClear) {
+                item {
+                    InlineNotice(
+                        if (dataMode) {
+                            "Without Shizuku, open an app's App info > Storage and tap Clear storage there. Connect Shizuku on the Apps tab to clear it here."
+                        } else {
+                            "Without Shizuku, open an app's App info and tap Clear cache there. Connect Shizuku on the Apps tab to clear many at once."
+                        },
+                    )
+                }
+            }
+            item {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     AppSort.entries.forEach { s ->
                         FilterChip(selected = sort == s, onClick = { sort = s }, label = { Text(s.label) }, modifier = Modifier.padding(end = 8.dp))
                     }
@@ -117,7 +187,7 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             item {
                 Column {
                     ToggleLine("Show system apps", showSystem) { showSystem = it }
-                    if (canClear) {
+                    if (canClear && !dataMode) {
                         ToggleLine("Stop each app first (more thorough; stopped apps stay silent until you open them)", stopFirst) { stopFirst = it }
                     }
                 }
@@ -125,15 +195,17 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             // Hundreds of apps: one lazy row each rather than one big card.
             items(rows, key = { it.packageName }) { row ->
                 SelectRow(
-                    checked = row.packageName in state.cacheSelected && !row.protected,
-                    onCheckedChange = { vm.apps.toggleCache(row.packageName) },
-                    enabled = canClear && !row.protected && row.cacheBytes > 0,
+                    checked = if (dataMode) row.packageName in state.dataSelected && row.clearBlock == null else row.packageName in state.cacheSelected && !row.protected,
+                    onCheckedChange = { if (dataMode) vm.apps.toggleData(row.packageName) else vm.apps.toggleCache(row.packageName) },
+                    enabled = canClear && if (dataMode) row.clearBlock == null && row.clearableBytes > 0 else !row.protected && row.cacheBytes > 0,
                     title = row.label,
-                    subtitle = "App data ${row.dataBytes.humanBytes()} · cache ${row.cacheBytes.humanBytes()} · app ${row.appBytes.humanBytes()}",
+                    subtitle = "App data ${row.dataBytes.humanBytes()} · cache ${row.cacheBytes.humanBytes()} · app ${row.appBytes.humanBytes()} · " +
+                        (row.lastUsed?.let { "used ${ageText(it, now)}" } ?: "no use recorded"),
                     modifier = Modifier.padding(horizontal = 8.dp),
                     trailing = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (row.protected) Pill("Protected")
+                            val pill = if (dataMode) row.clearBlock else if (row.protected) "Protected" else null
+                            if (pill != null) Pill(pill)
                             IconButton(onClick = { context.startActivity(AppStorage.appInfoIntent(row.packageName)) }) {
                                 Icon(Icons.Outlined.Info, contentDescription = "App info for ${row.label}")
                             }
@@ -161,6 +233,59 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             onDismiss = { confirm = null },
         )
     }
+
+    confirmData?.let { list ->
+        ClearDataDialog(
+            apps = list,
+            onConfirm = {
+                confirmData = null
+                vm.clearAppData(list.map { it.packageName })
+            },
+            onDismiss = { confirmData = null },
+        )
+    }
+}
+
+/** The one place the steward deletes app data with no undo, so it names the apps and waits for an explicit "I understand". */
+@Composable
+internal fun ClearDataDialog(apps: List<AppStorageRow>, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    var understood by remember { mutableStateOf(false) }
+    val names = apps.sortedByDescending { it.clearableBytes }.map { it.label }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+        title = { Text("Clear all data of ${apps.size.plural("app")}?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    if (names.size <= 4) names.joinToString() else names.take(3).joinToString() + " and ${names.size - 3} more",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                listOf(
+                    "Frees about ${apps.sumOf { it.clearableBytes }.humanBytes()}",
+                    "Each app goes back to how it was when installed: sign-ins, settings, saved games and downloads are deleted, " +
+                        "including everything in its Android/data folder",
+                    "Each app is stopped and asks for its permissions again",
+                    "There is no undo: anything not backed up elsewhere is gone for good",
+                ).forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                Row(
+                    Modifier.fillMaxWidth().clickable { understood = !understood },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = understood, onCheckedChange = { understood = it })
+                    Text("I understand this can't be undone", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = understood,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("Clear data") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

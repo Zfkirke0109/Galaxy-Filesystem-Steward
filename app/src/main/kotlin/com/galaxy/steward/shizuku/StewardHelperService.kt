@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import androidx.annotation.Keep
+import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.core.appdata.AppDataHelper
 import com.galaxy.steward.core.appdata.AppDataWire
 import com.galaxy.steward.core.appdata.AppPolicy
@@ -18,8 +19,8 @@ import kotlin.system.exitProcess
  * The privileged half of the steward. Shizuku starts it in a separate process running as Android's shell user
  * (uid 2000), from this APK. It only exposes the fixed operations in [IStewardHelper]: the app-data scanner and
  * executor from `core` (with all their run-time checks), a read-only folder listing for the app folder browser, a
- * cache-only clear for one validated package name, granting the app usage access, and a fixed dump of the device
- * log. There is no generic command runner.
+ * cache-only clear or a full data clear for one validated package name, granting the app usage access, and a fixed
+ * dump of the device log. There is no generic command runner.
  */
 @Keep
 class StewardHelperService : IStewardHelper.Stub {
@@ -67,6 +68,17 @@ class StewardHelperService : IStewardHelper.Stub {
         return "exit=$code"
     }
 
+    override fun clearAppData(packageName: String, userId: Int, timeoutMs: Long): String {
+        if (!AppPolicy.isPackageName(packageName) || userId < 0) return "error=invalid package"
+        AppPolicy.clearDataBlock(packageName, BuildConfig.APPLICATION_ID)?.let { return "error=$it" }
+        val user = userId.toString()
+        // The name rules can't see every preinstalled app; ask the package manager, and refuse when it can't say.
+        val (listed, system) = capture(listOf("/system/bin/cmd", "package", "list", "packages", "-s", "--user", user, packageName), 15_000)
+        if (listed != 0) return "error=could not check the package"
+        if (system.lineSequence().any { it.trim() == "package:$packageName" }) return "error=System app"
+        return "exit=${exec(listOf("/system/bin/pm", "clear", "--user", user, packageName), timeoutMs.coerceIn(5_000, 120_000))}"
+    }
+
     override fun grantUsageAccess(packageName: String): Boolean {
         if (!AppPolicy.isPackageName(packageName)) return false
         return exec(listOf("/system/bin/appops", "set", packageName, "GET_USAGE_STATS", "allow"), 10_000) == 0
@@ -105,6 +117,28 @@ class StewardHelperService : IStewardHelper.Stub {
         }
     } catch (_: Exception) {
         -1
+    }
+
+    /** Like [exec], and also returns what the command printed (at most 1 MiB). */
+    private fun capture(command: List<String>, timeoutMs: Long): Pair<Int, String> = try {
+        val p = ProcessBuilder(command).redirectErrorStream(true).start()
+        val output = StringBuilder()
+        val reader = Thread {
+            runCatching {
+                p.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line -> synchronized(output) { if (output.length < 1 shl 20) output.appendLine(line) } }
+                }
+            }
+        }.apply { start() }
+        if (p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            reader.join(2_000)
+            p.exitValue() to synchronized(output) { output.toString() }
+        } else {
+            p.destroy()
+            124 to ""
+        }
+    } catch (_: Exception) {
+        -1 to ""
     }
 
     private fun readAll(fd: ParcelFileDescriptor): String =

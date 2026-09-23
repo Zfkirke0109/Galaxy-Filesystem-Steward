@@ -17,6 +17,7 @@ tuned for Galaxy devices such as the S23 series.
 
 <p>
   <img src="docs/screenshots/apps.png" width="200" alt="Apps tab with Shizuku, usage access and Termux status">
+  <img src="docs/screenshots/app-storage.png" width="200" alt="App storage in Clear all data mode, with last use and a messenger that is never offered">
   <img src="docs/screenshots/app-folders.png" width="200" alt="App folder review grouped by logs and thumbnail caches">
   <img src="docs/screenshots/termux-setup.png" width="200" alt="Termux connection steps">
 </p>
@@ -36,7 +37,7 @@ tuned for Galaxy devices such as the S23 series.
 | **Storage map** | Folder-by-folder breakdown with size bars, largest files, a breakdown by file type, and the ownership zone of each folder. | Read only. |
 | **History** | Every run, with what it freed, moved, deduplicated or quarantined. | **Undo** replays the journal backwards and checks each step before reverting it. Quarantine can be emptied per run or all at once. |
 | **Weekly audit** | Optional read-only scan while the phone charges. The first one runs a day after you switch it on. It skips a week when you scanned within the last day, and stops as soon as you start a scan or clean-up yourself. | Sends a notification saying how much space you could reclaim. It never changes files, except emptying quarantines that are past their retention period. |
-| **App storage** | What every installed app stores, split into app size, app data (accounts, messages, offline downloads) and cache. Needs usage access. | Clears only the cache of the apps you tick, through Shizuku. A clear counts only when the app's live cache size actually drops. App data is shown, never deleted; the ⓘ button opens Android's App info. |
+| **App storage** | What every installed app stores, split into app size, app data (accounts, messages, offline downloads) and cache, with when each app was last used. Sort by size or by **Unused longest**. Apps appear as soon as each one is measured. Needs usage access. | **Clear cache** clears only the cache of the apps you tick, through Shizuku. **Clear all data** resets the apps you pick, exactly like Android's App info → Storage → Clear storage (`pm clear` through Shizuku). Nothing is preselected, and it asks you to confirm that it can't be undone. Messengers and mail, authenticators, password managers and wallets, Termux, Shizuku and system apps are never offered. Both kinds of clear count only when the app's live size actually drops. The ⓘ button opens Android's App info. |
 | **App folders** | `Android/data`, `Android/obb` and `Android/media`: cache folders, logs and crash dumps, temp files, thumbnail caches, outdated OBB game data, and folders left by apps you removed. Also lists the largest files each app keeps. | Caches, logs and temp files are deleted for good (apps rebuild them). Outdated OBBs and leftovers are quarantined, so they can be undone. |
 | **Browse app folders** | `Android/data`, `Android/obb` and `Android/media` folder by folder, like a file manager: every app's folder, then each file and subfolder with its total size, largest first. | Tick any files or folders and remove them. By default they go to the quarantine (History can undo it); one switch deletes them for good instead. An app's own top folder, protected apps, links and key-like files are never removed, and files changed after you opened the folder are kept. |
 | **Termux** | Termux's private home and packages: APT downloads, pip/uv/Poetry/npm/Go/Cargo/rustup/Bun/Android SDK caches, caches inside proot distributions that aren't running, build outputs Git ignores in your projects, and everything else in `~/.cache`. | Termux runs a small audited script ([`termux-steward.sh`](core/src/main/resources/com/galaxy/steward/core/termux/termux-steward.sh)) that checks every path again before removing it. Installed packages, configs and sources are never touched. |
@@ -70,9 +71,10 @@ tab uses two optional helpers that are already on your phone:
 
 - **Shizuku** gives the steward a small helper process with ADB-level rights (no root). The helper only exposes fixed
   operations: the same app-folder scanner and cleaner as the rest of the app, with all their checks, a cache-only
-  clear for one package (`cmd package clear --cache-only`), a read-only folder listing for the app folder browser,
-  granting the app usage access, and one fixed `logcat -d` for the logcat export (only the shell user may read the
-  whole device log). It has no general command runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
+  clear for one package (`cmd package clear --cache-only`), a full data clear for one package you picked
+  (`pm clear`, after checking it again against the same rules and that it isn't a system package), a read-only folder
+  listing for the app folder browser, granting the app usage access, and one fixed `logcat -d` for the logcat export
+  (only the shell user may read the whole device log). It has no general command runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
   scan `Android/media` and show app sizes.
 - **Termux** keeps its home private to itself, so the steward asks Termux to run the helper script through Termux's
   own `RUN_COMMAND` bridge. Tap **Allow** on the Apps tab, then paste this once into Termux:
@@ -87,9 +89,14 @@ tab uses two optional helpers that are already on your phone:
 App-data rules carried over from the Termux steward's strict v18 policy:
 
 - **Amazon Music and Audible are never touched**: nothing is cleaned, stopped or cleared.
-- **Only regenerable data is deleted**: cache folders, logs, crash dumps and temp files older than a set age. The app
-  never deletes offline media, downloads, saves, databases (LevelDB/RocksDB write-ahead logs are recognised), or
-  anything with a credential-like name. The same is true of app data in `/data/data`, which would sign you out.
+- **Scans and clean-ups only delete regenerable data**: cache folders, logs, crash dumps and temp files older than a
+  set age. They never delete offline media, downloads, saves, databases (LevelDB/RocksDB write-ahead logs are
+  recognised), or anything with a credential-like name.
+- **All of an app's data is only cleared when you pick that app** under App storage → Clear all data and confirm it.
+  That is Android's own Clear storage: it empties the app's private data and its `Android/data` folder, signs you out
+  and can't be undone. Apps whose data may be the only copy of something (messengers and mail, 2FA authenticators,
+  password managers, crypto wallets) are never offered, but no list can name every such app, so check before you
+  confirm.
 - **Cache clears are checked against live storage statistics.** You can have each app stopped first, which clears a
   little more. It's off by default, because a stopped app gets no notifications until you open it again. System apps,
   Google Play services, Samsung apps, messengers, mail and social apps, Termux and Shizuku are never stopped.
@@ -188,7 +195,7 @@ core/   Pure Kotlin/JVM engine, no Android dependencies, unit-tested against rea
 app/    Android app: Compose UI, ViewModel, settings, WorkManager weekly audit, MediaStore rescans
   shizuku/    Shizuku bridge and StewardHelperService (runs as the shell user inside Shizuku)
   termux/     RUN_COMMAND bridge and result receiver
-  apps/       Per-app storage stats and cache clears
+  apps/       Per-app storage stats, last use, cache clears and full data clears
 ```
 
 ### From the Termux script to the app
@@ -210,8 +217,9 @@ app/    Android app: Compose UI, ViewModel, settings, WorkManager weekly audit, 
 
 - **Device-wide `pm trim-caches`.** The v18 script disabled it because it can't exclude Amazon Music or Audible.
   Caches are cleared app by app instead.
-- **Deleting app data in `/data/data`.** Only root could do that selectively, and clearing it wholesale signs you
-  out and loses messages. The app shows how big each app's data is and links to App info.
+- **Deleting single files inside `/data/data`.** Only root can reach inside another app's private data. Without root
+  the only option is all or nothing, Android's Clear storage, which App storage → Clear all data offers for the apps
+  you pick.
 - **Pruning Git history** (`git gc`, repacking). Build outputs that Git ignores can be cleaned; repository history is
   left alone.
 

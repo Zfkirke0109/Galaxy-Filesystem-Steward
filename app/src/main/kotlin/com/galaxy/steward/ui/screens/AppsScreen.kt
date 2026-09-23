@@ -154,7 +154,8 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     title = "Installed apps",
                     text = when {
                         !apps.usageAccess -> "Grant usage access to see what every app stores, split into app data and cache."
-                        apps.statsLoading && apps.apps.isEmpty() -> "Measuring apps…"
+                        apps.statsLoading && !apps.everLoaded ->
+                            "Measuring apps…" + if (apps.statsTotal > 0) " ${apps.statsDone} of ${apps.statsTotal}" else ""
                         apps.statsError != null -> apps.statsError!!
                         else -> "${apps.apps.size.plural("app")} use ${total.humanBytes()}: ${data.humanBytes()} app data, ${cache.humanBytes()} cache"
                     },

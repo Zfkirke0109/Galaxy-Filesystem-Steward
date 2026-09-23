@@ -28,4 +28,9 @@ interface IStewardHelper {
     // Lists one folder inside Android/{data,obb,media}/<package> with the size of each entry (the app folder
     // browser). Read-only; the request and the listing use core's AppDataWire format.
     ParcelFileDescriptor listAppFolder(in ParcelFileDescriptor request) = 8;
+
+    // Clears all data of one app, like Android's Settings > Clear storage (a fixed `pm clear`), after checking the
+    // package against core's AppPolicy.clearDataBlock and that it is not a system package. Returns "exit=<code>" or
+    // "error=<reason>".
+    String clearAppData(String packageName, int userId, long timeoutMs) = 9;
 }

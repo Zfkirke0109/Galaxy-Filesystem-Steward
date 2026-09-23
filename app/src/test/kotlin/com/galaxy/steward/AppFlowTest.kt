@@ -3,11 +3,19 @@ package com.galaxy.steward
 import android.Manifest
 import android.app.AppOpsManager
 import android.app.Application
+import android.app.usage.StorageStats
+import android.app.usage.StorageStatsManager
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import android.net.Uri
 import android.os.Environment
 import android.os.Looper
+import android.os.Process
+import android.os.storage.StorageManager
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
@@ -42,10 +50,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadow.api.Shadow
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowEnvironment
 import org.robolectric.shadows.ShadowLog
 import org.robolectric.shadows.ShadowStatFs
+import org.robolectric.shadows.ShadowStorageStatsManager
+import org.robolectric.shadows.ShadowUsageStatsManager
 import java.io.File
 import kotlin.random.Random
 
@@ -136,6 +147,47 @@ class AppFlowTest {
         ShadowEnvironment.addExternalDir("emulated-0")
     }
 
+    /**
+     * Three apps as Android's statistics report them: sizes from StorageStatsManager, last use from UsageStatsManager,
+     * and usage access granted so both can be read.
+     */
+    private fun installApps() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val now = System.currentTimeMillis()
+        val storage = Shadow.extract<ShadowStorageStatsManager>(context.getSystemService(StorageStatsManager::class.java))
+        val usage = Shadow.extract<ShadowUsageStatsManager>(context.getSystemService(UsageStatsManager::class.java))
+        // Package, label, app, data (without cache), cache, and how long ago it was last used.
+        listOf(
+            listOf("com.example.game", "Example Game", 300L * 1024 * 1024, 2_600L * 1024 * 1024, 40L * 1024 * 1024, 200 * DAY_MS),
+            listOf("org.thoughtcrime.securesms", "Signal", 120L * 1024 * 1024, 900L * 1024 * 1024, 30L * 1024 * 1024, DAY_MS / 2),
+            listOf("com.example.notes", "Notes", 20L * 1024 * 1024, 5L * 1024 * 1024, 1L * 1024 * 1024, 3 * DAY_MS),
+        ).forEach { row ->
+            val pkg = row[0] as String
+            shadowOf(context.packageManager).installPackage(
+                PackageInfo().apply {
+                    packageName = pkg
+                    applicationInfo = ApplicationInfo().apply {
+                        packageName = pkg
+                        nonLocalizedLabel = row[1] as String
+                    }
+                },
+            )
+            val stats = StorageStats::class.java.getDeclaredConstructor().newInstance()
+            fun field(name: String, value: Long) = StorageStats::class.java.getDeclaredField(name).apply { isAccessible = true }.setLong(stats, value)
+            field("codeBytes", row[2] as Long)
+            field("dataBytes", row[3] as Long + row[4] as Long) // Android counts the cache as part of the data
+            field("cacheBytes", row[4] as Long)
+            storage.addStorageStats(StorageManager.UUID_DEFAULT, pkg, Process.myUserHandle(), stats)
+            usage.addUsageStats(
+                UsageStatsManager.INTERVAL_BEST,
+                ShadowUsageStatsManager.UsageStatsBuilder.newBuilder().setPackageName(pkg).setFirstTimeStamp(now - 300 * DAY_MS)
+                    .setLastTimeStamp(now).setLastTimeUsed(now - row[5] as Long).build(),
+            )
+        }
+        shadowOf(context.getSystemService(AppOpsManager::class.java))
+            .setMode(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName, AppOpsManager.MODE_ALLOWED)
+    }
+
     /** "All files access" is an app-op on Android 11+; flip it the way the Settings toggle would. */
     private fun setAllFilesAccess(granted: Boolean) {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -150,6 +202,7 @@ class AppFlowTest {
 
     @Test
     fun scanReviewApplyAndUndo() {
+        installApps()
         setAllFilesAccess(false)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         compose.onNodeWithText("Grant all files access").assertExists()
@@ -270,9 +323,32 @@ class AppFlowTest {
         assertEquals("${context.packageName}.files", uri.authority)
         context.contentResolver.openInputStream(uri)!!.use { assertEquals(log, it.readBytes().decodeToString()) }
 
-        // Apps tab: without Shizuku the app folders scan covers Android/media in-process.
+        // Apps tab: app sizes are read as soon as it opens.
         compose.onNodeWithText("Apps").performClick()
+        // The tab reads app sizes when it resumes; Robolectric leaves the navigation entry short of RESUMED, so start
+        // the read the way that resume does.
+        vm.apps.loadStats()
+        awaitState("app sizes", vm) { vm.apps.state.value.everLoaded }
         shot("14-apps")
+        assertEquals(setOf("com.example.game", "org.thoughtcrime.securesms", "com.example.notes"), vm.apps.state.value.apps.map { it.packageName }.toSet())
+        assertEquals(setOf("com.example.game", "org.thoughtcrime.securesms"), vm.apps.state.value.cacheSelected) // caches of 25 MiB and more
+
+        // App storage: sizes with last use, sorted by the app unused longest.
+        compose.onNodeWithText("Review").performClick()
+        compose.onNodeWithText("App data 2.5 GiB · cache 40.0 MiB · app 300 MiB · used 6 months ago").assertExists()
+        compose.onNodeWithText("Unused longest").performClick()
+        shot("14a-app-storage")
+        // Clear all data: nothing is picked for you, messengers are never offered, and without Shizuku it points to
+        // Android's own Clear storage button.
+        compose.onNodeWithText("Clear all data").performClick()
+        compose.onNodeWithText("Messages").assertExists()
+        compose.onNodeWithText("Without Shizuku, open an app's App info > Storage and tap Clear storage there.", substring = true).assertExists()
+        assertTrue(vm.apps.state.value.dataSelected.isEmpty())
+        compose.onNodeWithText("Clear data").assertIsNotEnabled()
+        shot("14b-app-storage-clear-data")
+        compose.onNodeWithContentDescription("Back").performClick()
+
+        // Without Shizuku the app folders scan covers Android/media in-process.
         compose.onNodeWithText("Scan").performClick()
         awaitState("app folder scan", vm) { vm.apps.state.value.folders != null && !vm.apps.state.value.foldersScanning }
         val folders = vm.apps.state.value.folders!!
