@@ -8,10 +8,15 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Process
+import android.os.UserHandle
 import android.os.storage.StorageManager
 import android.provider.Settings
 import androidx.core.net.toUri
 import com.galaxy.steward.core.appdata.AppPolicy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.IOException
 
 /** One app's storage as Android accounts it (StorageStatsManager). */
@@ -87,31 +92,41 @@ object AppStorage {
     }
 
     /** Storage of every installed app. Needs usage access; throws [SecurityException] without it. */
-    fun query(context: Context): List<AppStorageRow> {
+    /**
+     * Every installed app's storage. Each app is its own query to the system (and loading its label reads its
+     * resources), so they run a few at a time: one after another took 42 s for 756 apps on a Galaxy S23 Ultra.
+     */
+    suspend fun query(context: Context): List<AppStorageRow> = coroutineScope {
         val pm = context.packageManager
         val stats = context.getSystemService(StorageStatsManager::class.java)
         val user = Process.myUserHandle()
         @Suppress("DEPRECATION")
         val apps = pm.getInstalledApplications(0)
-        return apps.mapNotNull { info ->
-            val s = try {
-                stats.queryStatsForPackage(StorageManager.UUID_DEFAULT, info.packageName, user)
-            } catch (_: PackageManager.NameNotFoundException) {
-                return@mapNotNull null
-            } catch (_: IOException) {
-                return@mapNotNull null
-            }
-            AppStorageRow(
-                packageName = info.packageName,
-                label = pm.getApplicationLabel(info).toString(),
-                system = info.flags and ApplicationInfo.FLAG_SYSTEM != 0,
-                appBytes = s.appBytes,
-                dataBytes = (s.dataBytes - s.cacheBytes).coerceAtLeast(0),
-                cacheBytes = s.cacheBytes,
-                protected = AppPolicy.isProtected(info.packageName, context.packageName),
-            )
-        }.sortedByDescending { it.totalBytes }
+        val workers = Dispatchers.IO.limitedParallelism(PARALLEL_QUERIES)
+        apps.map { info -> async(workers) { row(context, pm, stats, user, info) } }.awaitAll().filterNotNull()
+            .sortedByDescending { it.totalBytes }
     }
+
+    private fun row(context: Context, pm: PackageManager, stats: StorageStatsManager, user: UserHandle, info: ApplicationInfo): AppStorageRow? {
+        val s = try {
+            stats.queryStatsForPackage(StorageManager.UUID_DEFAULT, info.packageName, user)
+        } catch (_: PackageManager.NameNotFoundException) {
+            return null
+        } catch (_: IOException) {
+            return null
+        }
+        return AppStorageRow(
+            packageName = info.packageName,
+            label = pm.getApplicationLabel(info).toString(),
+            system = info.flags and ApplicationInfo.FLAG_SYSTEM != 0,
+            appBytes = s.appBytes,
+            dataBytes = (s.dataBytes - s.cacheBytes).coerceAtLeast(0),
+            cacheBytes = s.cacheBytes,
+            protected = AppPolicy.isProtected(info.packageName, context.packageName),
+        )
+    }
+
+    private const val PARALLEL_QUERIES = 8
 
     /** Live cache size of one app, or null when it cannot be read. */
     fun cacheBytes(context: Context, packageName: String): Long? = try {

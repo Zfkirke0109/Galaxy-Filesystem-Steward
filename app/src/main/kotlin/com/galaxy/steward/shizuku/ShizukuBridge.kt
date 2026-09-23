@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import com.galaxy.steward.BuildConfig
@@ -59,20 +61,36 @@ class ShizukuBridge(private val context: Context) {
         refresh()
     }
 
+    private val main = Handler(Looper.getMainLooper())
+    private var retries = 0
+
     fun refresh() {
-        _status.value = when {
-            !installed() -> ShizukuStatus.NOT_INSTALLED
-            !Shizuku.pingBinder() -> ShizukuStatus.NOT_RUNNING
-            Shizuku.isPreV11() -> ShizukuStatus.NOT_RUNNING
-            Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> ShizukuStatus.NO_PERMISSION
-            else -> ShizukuStatus.READY
+        _status.value = try {
+            when {
+                !installed() -> ShizukuStatus.NOT_INSTALLED
+                !Shizuku.pingBinder() -> ShizukuStatus.NOT_RUNNING
+                Shizuku.isPreV11() -> ShizukuStatus.NOT_RUNNING
+                Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> ShizukuStatus.NO_PERMISSION
+                else -> ShizukuStatus.READY
+            }.also { retries = 0 }
+        } catch (e: RuntimeException) {
+            // Right after an update the new process can ask before Shizuku has attached it ("Not an attached client"),
+            // which used to crash the app at start. Treat Shizuku as not ready and ask again in a moment.
+            StewardLog.w("Shizuku is not ready for this app yet", e)
+            if (retries++ < MAX_RETRIES) main.postDelayed(::refresh, RETRY_MS)
+            ShizukuStatus.NOT_RUNNING
         }
     }
 
     val ready: Boolean get() = status.value == ShizukuStatus.READY
 
     fun requestPermission() {
-        if (Shizuku.pingBinder() && !Shizuku.isPreV11()) Shizuku.requestPermission(REQUEST_CODE)
+        try {
+            if (Shizuku.pingBinder() && !Shizuku.isPreV11()) Shizuku.requestPermission(REQUEST_CODE)
+        } catch (e: RuntimeException) {
+            StewardLog.w("Shizuku could not ask for permission", e)
+            refresh()
+        }
     }
 
     fun launchManager(): Boolean {
@@ -151,5 +169,7 @@ class ShizukuBridge(private val context: Context) {
         const val MANAGER = "moe.shizuku.privileged.api"
         private const val REQUEST_CODE = 7302
         private const val BIND_TIMEOUT_MS = 20_000L
+        private const val RETRY_MS = 500L
+        private const val MAX_RETRIES = 10
     }
 }
