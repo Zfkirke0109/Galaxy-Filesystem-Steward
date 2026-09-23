@@ -2,7 +2,9 @@ package com.galaxy.steward.apps
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import com.galaxy.steward.core.MIB
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.core.appdata.AppDataExecutor
 import com.galaxy.steward.core.appdata.AppDataHelper
@@ -21,6 +23,7 @@ import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.shizuku.ShizukuBridge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -92,8 +95,10 @@ class AppsController(
         if (!_state.value.usageAccess || _state.value.statsLoading) return
         scope.launch {
             _state.update { it.copy(statsLoading = true, statsError = null) }
+            val started = SystemClock.uptimeMillis()
             try {
                 val rows = withContext(Dispatchers.IO) { AppStorage.query(context) }
+                StewardLog.i("app sizes read in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${rows.size} apps")
                 _state.update { s ->
                     val fresh = s.apps.isEmpty()
                     s.copy(
@@ -103,8 +108,10 @@ class AppsController(
                     )
                 }
             } catch (e: SecurityException) {
+                StewardLog.w("app sizes need usage access", e)
                 _state.update { it.copy(statsLoading = false, usageAccess = false, statsError = "Usage access is needed to read app sizes") }
             } catch (e: Exception) {
+                StewardLog.w("reading app sizes failed", e)
                 _state.update { it.copy(statsLoading = false, statsError = e.message ?: e.javaClass.simpleName) }
             }
         }
@@ -199,6 +206,7 @@ class AppsController(
         if (_state.value.foldersScanning) return
         scope.launch {
             _state.update { it.copy(foldersScanning = true, foldersProgress = null, foldersError = null) }
+            val started = SystemClock.uptimeMillis()
             try {
                 val areas = reachableAreas()
                 val installed = withContext(Dispatchers.IO) { AppStorage.knownPackages(context) }
@@ -217,6 +225,11 @@ class AppsController(
                         AppDataHelper.Client.readScan(lines.asSequence(), onProgress)
                     }
                 }
+                StewardLog.i(
+                    "app folder scan done in ${RunLog.seconds(SystemClock.uptimeMillis() - started)} " +
+                        "(${if (shizuku.ready) "through Shizuku" else "in the app"}, ${areas.joinToString { it.name.lowercase() }}): " +
+                        "${report.items.size} findings, ${report.items.sumOf { it.bytes }.humanBytes()}, ${report.unreadable.size} folders unreadable",
+                )
                 val labels = withContext(Dispatchers.IO) {
                     (report.usage.map { it.packageName } + report.items.map { it.packageName }).distinct()
                         .associateWith { AppStorage.label(context, it) }
@@ -234,6 +247,7 @@ class AppsController(
                 _state.update { it.copy(foldersScanning = false, foldersProgress = null) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("app folder scan failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(foldersScanning = false, foldersProgress = null, foldersError = e.message ?: e.javaClass.simpleName) }
             }
         }

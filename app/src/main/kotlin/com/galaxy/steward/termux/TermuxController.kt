@@ -1,11 +1,14 @@
 package com.galaxy.steward.termux
 
 import android.content.Context
+import android.os.SystemClock
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.exec.JournalAction
 import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.core.exec.JournalWriter
+import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxException
 import com.galaxy.steward.core.termux.TermuxItem
@@ -13,6 +16,7 @@ import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.core.termux.TermuxReport
 import com.galaxy.steward.core.termux.TermuxScript
 import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.diagnostics.StewardLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,9 +55,14 @@ class TermuxController(
         if (_state.value.auditing || _state.value.status != TermuxStatus.READY) return
         scope.launch {
             _state.update { it.copy(auditing = true, error = null, needsExternalApps = false) }
+            val started = SystemClock.uptimeMillis()
             try {
                 val output = run("audit", emptyList(), AUDIT_TIMEOUT_MS)
                 val report = withContext(Dispatchers.Default) { TermuxProtocol.parseAudit(output) }
+                StewardLog.i(
+                    "Termux audit done in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: Termux uses ${report.totalBytes.humanBytes()}, " +
+                        "${report.items.size} cleanable items (${report.items.sumOf { it.bytes }.humanBytes()}), ${report.unsafe.size} unsafe paths skipped",
+                )
                 _state.update {
                     it.copy(auditing = false, report = report, selected = report.items.filter { i -> i.defaultSelected }.map { i -> i.spec }.toSet())
                 }
@@ -61,8 +70,10 @@ class TermuxController(
                 _state.update { it.copy(auditing = false) }
                 throw e
             } catch (e: ExternalAppsDisabled) {
+                StewardLog.w("Termux audit refused: allow-external-apps is off")
                 _state.update { it.copy(auditing = false, needsExternalApps = true, error = e.message) }
             } catch (e: Exception) {
+                StewardLog.w("Termux audit failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(auditing = false, error = e.message ?: e.javaClass.simpleName) }
             }
         }

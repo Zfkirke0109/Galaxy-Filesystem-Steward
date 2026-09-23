@@ -63,6 +63,7 @@ import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.StatCard
 import com.galaxy.steward.ui.components.UsageBar
 import com.galaxy.steward.ui.components.kindColor
+import com.galaxy.steward.ui.components.rememberScanStarter
 import java.text.DateFormat
 import java.util.Date
 
@@ -264,6 +265,7 @@ fun KindLegend(bytesByKind: Map<FileKind, Long>) {
 
 @Composable
 private fun ScanCard(vm: StewardViewModel, state: UiState) {
+    val startScan = rememberScanStarter(vm)
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -296,7 +298,7 @@ private fun ScanCard(vm: StewardViewModel, state: UiState) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Button(onClick = vm::startScan, modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = startScan, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("Start smart scan")
@@ -314,7 +316,7 @@ private fun ScanCard(vm: StewardViewModel, state: UiState) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        FilledTonalButton(onClick = vm::startScan) {
+                        FilledTonalButton(onClick = startScan) {
                             Icon(Icons.Rounded.Refresh, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
                             Text("Rescan")

@@ -5,6 +5,7 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import com.galaxy.steward.StewardApp
 import com.galaxy.steward.apps.AppsController
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.ScanPhase
 import com.galaxy.steward.core.ScanProgress
 import com.galaxy.steward.core.Steward
@@ -29,6 +30,7 @@ import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.work.AuditWorker
 import com.galaxy.steward.work.KeepAlive
@@ -79,6 +81,9 @@ class StewardSession {
     var scanJob: Job? = null
     var applyJob: Job? = null
     var started = false
+
+    /** A scan or a run (clean-up, undo, app data, Termux) is in progress. */
+    fun busy(): Boolean = state.value.let { it.scanning || it.applying != null }
 }
 
 class StewardViewModel(application: Application) : AndroidViewModel(application) {
@@ -143,21 +148,34 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         if (_state.value.scanning || _state.value.applying != null) return
         session.scanJob = scope.launch {
             _state.update { it.copy(scanning = true, progress = ScanProgress(ScanPhase.MAPPING), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("scan started")
             try {
                 val space = StorageAccess.space()
+                // How long each phase took, for the log line at the end.
+                val phases = ArrayList<Pair<ScanPhase, Long>>()
                 val report = keepAlive("Scanning storage") { withContext(Dispatchers.IO) {
                     var last = 0L
                     var lastPhase: ScanPhase? = null
-                    Steward(rootPath, settings.value, app.environment, app.hashCacheFile).scan(space) { p ->
+                    var phaseStarted = started
+                    val result = Steward(rootPath, settings.value, app.environment, app.hashCacheFile).scan(space) { p ->
                         val now = SystemClock.uptimeMillis()
                         if (p.phase != lastPhase || now - last >= 120) {
+                            if (p.phase != lastPhase) {
+                                lastPhase?.let { phases += it to now - phaseStarted }
+                                phaseStarted = now
+                            }
                             last = now
                             lastPhase = p.phase
                             _state.update { it.copy(progress = p) }
                             KeepAlive.update(app, "Scanning storage", p.phase.label, (p.overall * 100).toInt(), 100)
                         }
                     }
+                    lastPhase?.takeIf { it != ScanPhase.DONE }?.let { phases += it to SystemClock.uptimeMillis() - phaseStarted }
+                    result
                 } }
+                app.settings.lastScanAt = System.currentTimeMillis()
+                StewardLog.i(RunLog.scan(report, phases))
                 _state.update {
                     it.copy(
                         scanning = false,
@@ -170,14 +188,23 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
             } catch (e: CancellationException) {
+                StewardLog.i("scan cancelled after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}")
                 _state.update { it.copy(scanning = false, progress = null) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("scan failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } catch (e: OutOfMemoryError) {
+                StewardLog.w("scan ran out of memory after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed("Not enough memory to map this much storage.")) }
             }
         }
+    }
+
+    fun shouldAskForNotifications(): Boolean = !app.settings.askedForNotifications
+
+    fun markAskedForNotifications() {
+        app.settings.askedForNotifications = true
     }
 
     fun cancelScan() {
@@ -222,6 +249,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         session.applyJob = scope.launch {
             val total = items.sumOf { it.operations.size }
             _state.update { it.copy(applying = ApplyProgress(title, 0, total, ""), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("run \"$title\" ($kind) started: ${items.size} items, $total operations")
             try {
                 keepAlive(title) {
                     val s = settings.value
@@ -237,6 +266,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                                 }
                             }
                     }
+                    StewardLog.i(RunLog.applied(title, kind, summary, SystemClock.uptimeMillis() - started))
                     _state.update {
                         it.copy(
                             applying = null,
@@ -250,9 +280,11 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
+                StewardLog.i("run \"$title\" cancelled after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}")
                 _state.update { it.copy(applying = null, stale = true) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("run \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, stale = true, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
                 refreshHistory()
@@ -277,6 +309,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         session.applyJob = scope.launch {
             val label = "Undoing: $title"
             _state.update { it.copy(applying = ApplyProgress(label, 0, 1, ""), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("undo \"$title\" started")
             try {
                 keepAlive(label) {
                     val summary = withContext(Dispatchers.IO) {
@@ -285,6 +319,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                             KeepAlive.update(app, label, current, done, total)
                         }
                     }
+                    StewardLog.i(RunLog.rolledBack(title, summary, SystemClock.uptimeMillis() - started))
                     _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
                     refreshHistory()
                     reindex(summary.changedPaths)
@@ -293,6 +328,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 _state.update { it.copy(applying = null, stale = true) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("undo \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, stale = true, outcome = Outcome.Failed(e.message ?: "Undo failed")) }
             } finally {
                 refreshHistory()
@@ -310,12 +346,15 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         if (_state.value.applying != null || _state.value.scanning) return
         session.applyJob = scope.launch {
             _state.update { it.copy(applying = ApplyProgress(title, 0, 1, ""), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("run \"$title\" started")
             try {
                 keepAlive(title) {
                     val outcome = block { done, total, current ->
                         _state.update { it.copy(applying = ApplyProgress(title, done, total, current)) }
                         KeepAlive.update(app, title, current, done, total)
                     }
+                    StewardLog.i(outcomeLine(title, outcome, SystemClock.uptimeMillis() - started))
                     _state.update { it.copy(applying = null, outcome = outcome, space = StorageAccess.space()) }
                     refreshHistory()
                     pendingReindex?.let {
@@ -324,14 +363,24 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             } catch (e: CancellationException) {
+                StewardLog.i("run \"$title\" cancelled after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}")
                 _state.update { it.copy(applying = null) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("run \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
                 refreshHistory()
             }
         }
+    }
+
+    private fun outcomeLine(title: String, outcome: Outcome, millis: Long): String = when (outcome) {
+        is Outcome.Applied -> RunLog.applied(title, "app data", outcome.summary, millis)
+        is Outcome.RolledBack -> RunLog.rolledBack(title, outcome.summary, millis)
+        is Outcome.Report -> "run \"$title\" done in ${RunLog.seconds(millis)}: ${outcome.lines.joinToString("; ")}"
+        is Outcome.Failed -> "run \"$title\" failed after ${RunLog.seconds(millis)}: ${outcome.message}"
+        is Outcome.Purged -> "run \"$title\" done in ${RunLog.seconds(millis)}: emptied ${outcome.bytes.humanBytes()}"
     }
 
     private var pendingReindex: List<String>? = null

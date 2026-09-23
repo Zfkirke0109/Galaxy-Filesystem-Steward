@@ -7,7 +7,9 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import com.galaxy.steward.BuildConfig
+import com.galaxy.steward.diagnostics.StewardLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -91,6 +93,16 @@ class ShizukuBridge(private val context: Context) {
         refresh()
         check(ready) { status.value.label }
         helper?.takeIf { it.asBinder().pingBinder() }?.let { return@withContext it }
+        val started = SystemClock.uptimeMillis()
+        try {
+            bind().also { StewardLog.i("Shizuku helper connected in ${SystemClock.uptimeMillis() - started} ms") }
+        } catch (e: Exception) {
+            StewardLog.w("Shizuku helper did not connect after ${SystemClock.uptimeMillis() - started} ms", e)
+            throw e
+        }
+    }
+
+    private suspend fun bind(): IStewardHelper =
         withTimeout(BIND_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val conn = object : ServiceConnection {
@@ -115,7 +127,6 @@ class ShizukuBridge(private val context: Context) {
                 }
             }
         }
-    }
 
     /**
      * Writes [request] into a pipe on a background thread and returns the read end for the helper. Binder

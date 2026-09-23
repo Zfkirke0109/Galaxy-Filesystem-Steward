@@ -6,10 +6,13 @@ import android.content.Intent
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.os.SystemClock
 import androidx.core.content.FileProvider
 import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.apps.AppStorage
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.SafetyPolicy
+import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.shizuku.ShizukuBridge
 import kotlinx.coroutines.CancellationException
@@ -59,15 +62,21 @@ class LogcatExporter(
         if (_state.value.running) return
         _state.value = LogcatExportState(running = true)
         scope.launch {
+            val started = SystemClock.uptimeMillis()
             val saved = try {
                 withContext(Dispatchers.IO) { write() }
             } catch (e: CancellationException) {
                 _state.value = LogcatExportState()
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("logcat export failed", e)
                 _state.value = LogcatExportState(error = "Couldn't save the log: ${e.message ?: e.javaClass.simpleName}")
                 return@launch
             }
+            StewardLog.i(
+                "logcat saved in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${saved.bytes.humanBytes()}, " +
+                    if (saved.wholeDevice) "whole device" else "own lines only",
+            )
             _state.value = LogcatExportState(saved = saved)
             // So the file also shows up over USB and in apps that browse the media index.
             StorageAccess.rescan(context, listOf(saved.file.path))

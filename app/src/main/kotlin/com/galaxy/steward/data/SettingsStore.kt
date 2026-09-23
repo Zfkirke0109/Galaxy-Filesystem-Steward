@@ -40,6 +40,16 @@ class SettingsStore(context: Context) {
         _app.value = next
     }
 
+    /** When the last full scan finished (yours or the weekly audit's), so the audit can skip a survey that's still fresh. */
+    var lastScanAt: Long
+        get() = prefs.getLong("lastScanAt", 0L)
+        set(value) = prefs.edit { putLong("lastScanAt", value) }
+
+    /** Android 13+: the notification permission is asked for once, with the first scan. */
+    var askedForNotifications: Boolean
+        get() = prefs.getBoolean("askedForNotifications", false)
+        set(value) = prefs.edit { putBoolean("askedForNotifications", value) }
+
     private fun readApp() = AppPreferences(
         weeklyAudit = prefs.getBoolean("weeklyAudit", false),
         dynamicColor = prefs.getBoolean("dynamicColor", true),

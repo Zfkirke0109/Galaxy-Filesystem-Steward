@@ -1,5 +1,6 @@
 package com.galaxy.steward
 
+import android.Manifest
 import android.app.AppOpsManager
 import android.app.Application
 import android.content.Context
@@ -25,6 +26,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.appdata.AppJunkKind
+import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.ui.MainActivity
 import com.galaxy.steward.ui.Outcome
 import com.galaxy.steward.ui.StewardViewModel
@@ -41,6 +43,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowEnvironment
+import org.robolectric.shadows.ShadowLog
 import org.robolectric.shadows.ShadowStatFs
 import java.io.File
 import kotlin.random.Random
@@ -86,6 +89,9 @@ class AppFlowTest {
     }
 
     private fun text(rel: String, s: String) = file(rel, s.toByteArray())
+
+    /** What the app wrote under its log tag, so a logcat export would show it. */
+    private fun stewardLog(): List<String> = ShadowLog.getLogsForTag(StewardLog.TAG).map { it.msg }
 
     @Before
     fun fixture() {
@@ -159,6 +165,12 @@ class AppFlowTest {
         compose.onNodeWithText("Start smart scan").performClick()
         awaitState("scan", vm) { vm.state.value.report != null }
         shot("02-home-after-scan")
+        // The first scan asks once for the notification permission (so progress shows in the shade) and is logged.
+        scenario.onActivity {
+            assertEquals(listOf(Manifest.permission.POST_NOTIFICATIONS), shadowOf(it).lastRequestedPermission?.requestedPermissions?.toList())
+        }
+        assertFalse(vm.shouldAskForNotifications())
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("scan done in ") && it.contains("; phases mapping ") })
 
         val report = vm.state.value.report!!
         assertEquals(1, report.duplicates.size)
@@ -194,6 +206,7 @@ class AppFlowTest {
 
         val outcome = vm.state.value.outcome
         assertTrue("expected an applied outcome, got $outcome", outcome is Outcome.Applied)
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("run \"Autopilot\" (autopilot) done in ") })
         // Verified duplicate removed, camera original kept.
         assertFalse(File(root, "Download/IMG_20240612_101500 (1).jpg").exists())
         assertTrue(File(root, "DCIM/Camera/IMG_20240612_101500.jpg").exists())
@@ -244,6 +257,8 @@ class AppFlowTest {
         assertTrue(log.contains("Contents: Galaxy Steward's own log lines only"))
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Share"))
         shot("13b-logcat-export")
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("undo \"Autopilot\" done in ") })
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("logcat saved in ") && it.endsWith("own lines only") })
         // Share hands the file to other apps through the FileProvider, which serves exactly this folder.
         compose.onNodeWithText("Share").performClick()
         val chooser = shadowOf(ApplicationProvider.getApplicationContext<Application>()).nextStartedActivity

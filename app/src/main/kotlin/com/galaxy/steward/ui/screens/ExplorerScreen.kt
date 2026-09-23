@@ -56,6 +56,7 @@ import com.galaxy.steward.ui.components.folderIcon
 import com.galaxy.steward.ui.components.kindColor
 import com.galaxy.steward.ui.components.kindIcon
 import com.galaxy.steward.ui.components.relativeTo
+import com.galaxy.steward.ui.components.rememberScanStarter
 import java.text.DateFormat
 import java.util.Date
 
@@ -66,12 +67,13 @@ fun ExplorerScreen(vm: StewardViewModel, state: UiState) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val goUp = { relPath = relPath.substringBeforeLast('/', "") }
     BackHandler(enabled = relPath.isNotEmpty()) { goUp() }
+    val startScan = rememberScanStarter(vm)
 
     Scaffold(topBar = { ReviewTopBar("Storage map", if (relPath.isNotEmpty()) goUp else null) }) { padding ->
         if (report == null) {
             Column(Modifier.padding(padding).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 EmptyState(Icons.Rounded.Explore, "No map yet", "Run a smart scan to see which folders and files use your space.")
-                Button(onClick = vm::startScan, enabled = !state.scanning) { Text(if (state.scanning) "Scanning…" else "Start smart scan") }
+                Button(onClick = startScan, enabled = !state.scanning) { Text(if (state.scanning) "Scanning…" else "Start smart scan") }
             }
             return@Scaffold
         }
