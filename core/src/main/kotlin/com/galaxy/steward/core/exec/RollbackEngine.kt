@@ -25,11 +25,19 @@ data class RollbackSummary(
  * only from a kept copy whose SHA-256 still matches, and nothing that reappeared at the original path is
  * ever overwritten.
  */
-class RollbackEngine(rootPath: String, private val journals: JournalStore) {
+class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
     private val guard = PathGuard(rootPath)
 
     suspend fun rollback(runId: String, listener: ExecutionListener? = null): RollbackSummary {
-        val entries = journals.entries(runId).asReversed()
+        val store = requireNotNull(journals) { "No journal store" }
+        val summary = rollbackEntries(store.entries(runId), listener)
+        store.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
+        return summary
+    }
+
+    /** Reverts [journalEntries] (in journal order) without touching any journal file - used by the Shizuku helper. */
+    suspend fun rollbackEntries(journalEntries: List<JournalEntry>, listener: ExecutionListener? = null): RollbackSummary {
+        val entries = journalEntries.asReversed()
         var restored = 0
         var skipped = 0
         var failed = 0
@@ -51,6 +59,8 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore) {
                     JournalAction.DEDUPED -> recreateDuplicate(e)
                     JournalAction.RMDIR -> recreateDir(e.a)
                     JournalAction.MKDIR -> removeCreatedDir(e.a)
+                    // Caches, logs and temp files were deleted for good; there is nothing to bring back.
+                    JournalAction.PURGED -> ""
                     else -> "Unknown journal action"
                 }
             } catch (ex: IOException) {
@@ -67,7 +77,6 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore) {
                 note("SKIPPED", result, e.a)
             }
         }
-        journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
         listener?.onProgress(entries.size, entries.size, "")
         return RollbackSummary(restored, skipped, failed, messages, changed.toList())
     }

@@ -19,6 +19,15 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keeps a scan or cleanup running when you switch apps (see KeepAliveService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Per-app storage sizes (StorageStatsManager); granted in Settings, or through Shizuku with one tap. -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Lets Termux run the steward's audited helper script inside its own home folder. -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <application
         android:name=".StewardApp"
@@ -43,5 +52,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".work.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Termux answers RUN_COMMAND requests through a PendingIntent aimed at this receiver. -->
+        <receiver
+            android:name=".termux.TermuxResultReceiver"
+            android:exported="false" />
+
+        <!-- Shizuku hands its binder to the app through this provider. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 </manifest>

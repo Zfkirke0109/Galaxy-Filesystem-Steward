@@ -99,12 +99,20 @@ fun HistoryScreen(vm: StewardViewModel, state: UiState) {
     when (val c = confirm) {
         is HistoryConfirm.Undo -> ConfirmDialog(
             title = "Undo \"${c.info.title}\"?",
-            lines = listOf(
-                "Moved files go back to where they were",
-                "Deleted duplicates are recreated from the kept copy",
-                "Quarantined items are restored",
-                "Anything changed since then is left alone",
-            ),
+            lines = if (c.info.kind == "appdata") {
+                listOf(
+                    "Quarantined game data and app folders go back where they were",
+                    "Caches, logs and temp files were removed for good and stay gone",
+                    "Needs Shizuku for Android/data and Android/obb",
+                )
+            } else {
+                listOf(
+                    "Moved files go back to where they were",
+                    "Deleted duplicates are recreated from the kept copy",
+                    "Quarantined items are restored",
+                    "Anything changed since then is left alone",
+                )
+            },
             confirmLabel = "Undo",
             footnote = "Each step is verified (size and SHA-256) before it is reverted.",
             onConfirm = {
@@ -146,6 +154,8 @@ private fun RunCard(info: JournalInfo, quarantined: Long, onUndo: () -> Unit, on
             )
             val facts = buildList {
                 if (info.stat("freed") > 0) add("freed ${info.stat("freed").humanBytes()}")
+                if (info.stat("apps") > 0) add("${info.stat("apps")} app caches cleared")
+                if (info.stat("cleared") > 0) add("${info.stat("cleared")} ${if (info.kind == "termux") "locations" else "files"} cleared")
                 if (info.stat("deduped") > 0) add("${info.stat("deduped")} deduped")
                 if (info.stat("moved") > 0) add("${info.stat("moved")} moved")
                 if (info.stat("quarantined") > 0) add("${info.stat("quarantined")} quarantined")

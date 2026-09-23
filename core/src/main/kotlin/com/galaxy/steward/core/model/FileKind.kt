@@ -24,7 +24,8 @@ enum class FileKind(val label: String) {
         val APK_EXT = setOf("apk", "apks", "apkm", "xapk")
         val CODE_EXT = setOf(
             "sh", "bash", "zsh", "fish", "py", "rb", "pl", "js", "ts", "kt", "kts", "java", "c", "cc", "cpp", "h",
-            "rs", "go", "lua", "ps1", "bat", "cmd", "gradle", "patch", "diff",
+            "rs", "go", "lua", "ps1", "bat", "cmd", "gradle", "patch", "diff", "smali", "class", "dex", "swift", "m", "mm",
+            "cs", "php", "scala", "dart", "proto", "aidl", "hpp", "cxx", "jsx", "tsx", "vue", "mjs", "cjs",
         )
 
         fun extensionOf(name: String): String {

@@ -11,7 +11,12 @@ import android.os.StatFs
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import com.galaxy.steward.core.exec.MediaRescan
 import com.galaxy.steward.core.optimize.VolumeSpace
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
 
 object StorageAccess {
     /** Primary shared storage, normally /storage/emulated/0. */
@@ -42,11 +47,27 @@ object StorageAccess {
         null
     }
 
-    /** Tells MediaStore about moved, removed and restored paths so galleries and music apps stay accurate. */
-    fun rescan(context: Context, paths: Collection<String>) {
-        if (paths.isEmpty()) return
-        paths.distinct().chunked(250).forEach { chunk ->
-            MediaScannerConnection.scanFile(context.applicationContext, chunk.toTypedArray(), null, null)
+    /**
+     * Tells MediaStore about moved, removed and restored paths so galleries and music apps stay accurate, and
+     * waits until it has finished. Android 10+ rescans a folder recursively and forgets files that are gone, so
+     * each affected folder is scanned once instead of every file on its own.
+     */
+    suspend fun rescan(context: Context, paths: Collection<String>) {
+        val targets = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaRescan.targets(rootPath, paths)
+        } else {
+            paths.distinct()
+        }
+        if (targets.isEmpty()) return
+        withTimeoutOrNull(RESCAN_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val remaining = AtomicInteger(targets.size)
+                MediaScannerConnection.scanFile(context.applicationContext, targets.toTypedArray(), null) { _, _ ->
+                    if (remaining.decrementAndGet() == 0 && cont.isActive) cont.resume(Unit)
+                }
+            }
         }
     }
+
+    private const val RESCAN_TIMEOUT_MS = 20 * 60_000L
 }

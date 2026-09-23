@@ -209,6 +209,23 @@ class OrganizeJunkOptimizeTest {
     }
 
     @Test
+    fun packagePathsInsideDecompiledTreesAreNeverFlattened() = runTest {
+        TestFs().use { fs ->
+            // Seen on a real phone: apktool output with a Java package that repeats its own name.
+            val pkg = "Download/Projects/QQ/extracted/qq_src/smali_classes17/com/tencent/qqexpand/userConfig"
+            fs.text("$pkg/userConfig/UserConfig\$Options.smali", ".class public Lcom/tencent/qqexpand/userConfig/userConfig/UserConfig;")
+            fs.text("Download/Projects/QQ/extracted/qq_src/apktool.yml", "version: 2.9.3")
+            // Same shape without apktool.yml or smali files: a plain package folder in a source checkout.
+            fs.text("Download/lib-src/src/main/java/org/demo/model/model/Model.java", "class Model {}")
+            // Resources below a code-tree folder are left alone too.
+            fs.text("Download/tool/node_modules/pkg/pkg/readme.txt", "x")
+            fs.ageDirectories()
+            val report = scan(fs)
+            assertTrue(report.optimize.none { it.kind == OptimizeKind.FLATTEN_WRAPPER })
+        }
+    }
+
+    @Test
     fun oversizedFlatFolderIsBucketedByYear() = runTest {
         TestFs().use { fs ->
             val settings = testSettings.copy(flatDirThreshold = 10)

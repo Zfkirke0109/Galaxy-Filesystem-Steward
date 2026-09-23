@@ -3,4 +3,8 @@
     <string name="app_name">Galaxy Steward</string>
     <string name="audit_channel_name">Weekly storage audit</string>
     <string name="audit_channel_description">A read-only weekly survey of what can be cleaned or organised.</string>
+    <string name="work_channel_name">Running cleanups</string>
+    <string name="work_channel_description">Shown while a scan or cleanup is running so Android does not stop it halfway.</string>
+    <string name="work_default_title">Galaxy Steward is working</string>
+    <string name="work_keep_open">Keeps running if you switch apps.</string>
 </resources>

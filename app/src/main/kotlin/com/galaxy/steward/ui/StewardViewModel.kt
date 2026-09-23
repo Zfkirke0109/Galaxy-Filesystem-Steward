@@ -3,12 +3,13 @@ package com.galaxy.steward.ui
 import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import com.galaxy.steward.StewardApp
+import com.galaxy.steward.apps.AppsController
 import com.galaxy.steward.core.ScanPhase
 import com.galaxy.steward.core.ScanProgress
 import com.galaxy.steward.core.Steward
 import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.appdata.AppJunkItem
 import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.ExecutorOptions
@@ -22,9 +23,14 @@ import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.work.AuditWorker
+import com.galaxy.steward.work.KeepAlive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,6 +48,9 @@ sealed interface Outcome {
     data class RolledBack(val title: String, val summary: RollbackSummary) : Outcome
     data class Purged(val bytes: Long) : Outcome
     data class Failed(val message: String) : Outcome
+
+    /** A permanent clean-up (app caches, Termux) summarised as plain lines, with the reasons for skips. */
+    data class Report(val title: String, val lines: List<String>, val details: List<String>) : Outcome
 }
 
 data class UiState(
@@ -59,7 +68,17 @@ data class UiState(
     val quarantineBytes: Long = 0,
     val quarantineByRun: Map<String, Long> = emptyMap(),
     val space: VolumeSpace? = null,
+    /** The media index is being refreshed after a run (in the background; nothing waits on it). */
+    val indexing: Boolean = false,
 )
+
+/** Process-wide state shared by every [StewardViewModel] instance; runs outlive the screen that started them. */
+class StewardSession {
+    val state = MutableStateFlow(UiState())
+    var scanJob: Job? = null
+    var applyJob: Job? = null
+    var started = false
+}
 
 class StewardViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as StewardApp
@@ -68,17 +87,45 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     val deviceLabel: String = app.environment.deviceLabel
     val rootPath: String = StorageAccess.rootPath
 
-    private val _state = MutableStateFlow(UiState())
-    val state: StateFlow<UiState> = _state.asStateFlow()
+    /** App data (per-app storage, caches, Android/data|obb|media) and Termux. */
+    val apps: AppsController = app.apps
+    val termux: TermuxController = app.termux
 
-    private var scanJob: Job? = null
-    private var applyJob: Job? = null
+    private val session = app.session
+    private val scope = app.appScope
+    private val _state = session.state
+    val state: StateFlow<UiState> = _state.asStateFlow()
 
     init {
         refreshAccess()
-        viewModelScope.launch(Dispatchers.IO) {
-            if (StorageAccess.hasAccess(app)) quarantine().purgeExpired(settings.value.quarantineRetentionDays)
-            refreshHistoryNow()
+        if (!session.started) {
+            session.started = true
+            scope.launch(Dispatchers.IO) {
+                if (StorageAccess.hasAccess(app)) quarantine().purgeExpired(settings.value.quarantineRetentionDays)
+                refreshHistoryNow()
+            }
+        }
+    }
+
+    /** Holds a foreground service for the duration of [block] so Android does not freeze or kill the run. */
+    private suspend fun <T> keepAlive(title: String, block: suspend () -> T): T {
+        KeepAlive.begin(app, title)
+        try {
+            return block()
+        } finally {
+            KeepAlive.end(app)
+        }
+    }
+
+    /** Refreshes the media index for [paths] in the background of an already kept-alive job. */
+    private suspend fun reindex(paths: Collection<String>) {
+        if (paths.isEmpty()) return
+        _state.update { it.copy(indexing = true) }
+        try {
+            KeepAlive.update(app, "Updating the media index", "Galleries and file pickers will show the new layout", 0, 0)
+            StorageAccess.rescan(app, paths)
+        } finally {
+            _state.update { it.copy(indexing = false) }
         }
     }
 
@@ -92,11 +139,11 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     fun startScan() {
         if (_state.value.scanning || _state.value.applying != null) return
-        scanJob = viewModelScope.launch {
+        session.scanJob = scope.launch {
             _state.update { it.copy(scanning = true, progress = ScanProgress(ScanPhase.MAPPING), outcome = null) }
             try {
                 val space = StorageAccess.space()
-                val report = withContext(Dispatchers.IO) {
+                val report = keepAlive("Scanning storage") { withContext(Dispatchers.IO) {
                     var last = 0L
                     var lastPhase: ScanPhase? = null
                     Steward(rootPath, settings.value, app.environment, app.hashCacheFile).scan(space) { p ->
@@ -105,9 +152,10 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                             last = now
                             lastPhase = p.phase
                             _state.update { it.copy(progress = p) }
+                            KeepAlive.update(app, "Scanning storage", p.phase.label, (p.overall * 100).toInt(), 100)
                         }
                     }
-                }
+                } }
                 _state.update {
                     it.copy(
                         scanning = false,
@@ -131,7 +179,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun cancelScan() {
-        scanJob?.cancel()
+        session.scanJob?.cancel()
     }
 
     // ------------------------------------------------------------------ selection
@@ -169,31 +217,35 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     fun apply(title: String, kind: String, items: List<PlanItem>) {
         if (items.isEmpty() || _state.value.applying != null || _state.value.scanning) return
-        applyJob = viewModelScope.launch {
+        session.applyJob = scope.launch {
             val total = items.sumOf { it.operations.size }
             _state.update { it.copy(applying = ApplyProgress(title, 0, total, ""), outcome = null) }
             try {
-                val s = settings.value
-                val summary = withContext(Dispatchers.IO) {
-                    var last = 0L
-                    ActionExecutor(rootPath, app.journals, ExecutorOptions(s.quarantineDuplicates, s.protectedFolders))
-                        .execute(title, kind, items) { done, count, current ->
-                            val now = SystemClock.uptimeMillis()
-                            if (now - last >= 80 || done == count) {
-                                last = now
-                                _state.update { it.copy(applying = ApplyProgress(title, done, count, current)) }
+                keepAlive(title) {
+                    val s = settings.value
+                    val summary = withContext(Dispatchers.IO) {
+                        var last = 0L
+                        ActionExecutor(rootPath, app.journals, ExecutorOptions(s.quarantineDuplicates, s.protectedFolders))
+                            .execute(title, kind, items) { done, count, current ->
+                                val now = SystemClock.uptimeMillis()
+                                if (now - last >= 80 || done == count) {
+                                    last = now
+                                    _state.update { it.copy(applying = ApplyProgress(title, done, count, current)) }
+                                    KeepAlive.update(app, title, current, done, count)
+                                }
                             }
-                        }
-                }
-                StorageAccess.rescan(app, summary.changedPaths)
-                _state.update {
-                    it.copy(
-                        applying = null,
-                        outcome = Outcome.Applied(title, summary),
-                        report = it.report?.without(summary.completedItemIds),
-                        selected = it.selected - summary.completedItemIds,
-                        space = StorageAccess.space(),
-                    )
+                    }
+                    _state.update {
+                        it.copy(
+                            applying = null,
+                            outcome = Outcome.Applied(title, summary),
+                            report = it.report?.without(summary.completedItemIds),
+                            selected = it.selected - summary.completedItemIds,
+                            space = StorageAccess.space(),
+                        )
+                    }
+                    refreshHistory()
+                    reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
                 _state.update { it.copy(applying = null, stale = true) }
@@ -207,21 +259,34 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun cancelApply() {
-        applyJob?.cancel()
+        session.applyJob?.cancel()
     }
 
     fun rollback(runId: String, title: String) {
         if (_state.value.applying != null || _state.value.scanning) return
-        applyJob = viewModelScope.launch {
-            _state.update { it.copy(applying = ApplyProgress("Undoing: $title", 0, 1, ""), outcome = null) }
+        if (app.journals.info(runId)?.kind == AppsController.KIND_FOLDERS) {
+            launchRun("Undoing: $title") { progress ->
+                val summary = apps.rollback(runId, progress)
+                reindexLater(summary.changedPaths)
+                Outcome.RolledBack(title, summary)
+            }
+            return
+        }
+        session.applyJob = scope.launch {
+            val label = "Undoing: $title"
+            _state.update { it.copy(applying = ApplyProgress(label, 0, 1, ""), outcome = null) }
             try {
-                val summary = withContext(Dispatchers.IO) {
-                    RollbackEngine(rootPath, app.journals).rollback(runId) { done, total, current ->
-                        _state.update { it.copy(applying = ApplyProgress("Undoing: $title", done, total, current)) }
+                keepAlive(label) {
+                    val summary = withContext(Dispatchers.IO) {
+                        RollbackEngine(rootPath, app.journals).rollback(runId) { done, total, current ->
+                            _state.update { it.copy(applying = ApplyProgress(label, done, total, current)) }
+                            KeepAlive.update(app, label, current, done, total)
+                        }
                     }
+                    _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
+                    refreshHistory()
+                    reindex(summary.changedPaths)
                 }
-                StorageAccess.rescan(app, summary.changedPaths)
-                _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
             } catch (e: CancellationException) {
                 _state.update { it.copy(applying = null, stale = true) }
                 throw e
@@ -233,9 +298,72 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // ------------------------------------------------------------------ app data and Termux
+
+    /**
+     * Runs [block] as the single active run: progress dialog, foreground service, outcome dialog and a history
+     * refresh. [block] reports progress through the callback it is given.
+     */
+    private fun launchRun(title: String, block: suspend (progress: (Int, Int, String) -> Unit) -> Outcome) {
+        if (_state.value.applying != null || _state.value.scanning) return
+        session.applyJob = scope.launch {
+            _state.update { it.copy(applying = ApplyProgress(title, 0, 1, ""), outcome = null) }
+            try {
+                keepAlive(title) {
+                    val outcome = block { done, total, current ->
+                        _state.update { it.copy(applying = ApplyProgress(title, done, total, current)) }
+                        KeepAlive.update(app, title, current, done, total)
+                    }
+                    _state.update { it.copy(applying = null, outcome = outcome, space = StorageAccess.space()) }
+                    refreshHistory()
+                    pendingReindex?.let {
+                        pendingReindex = null
+                        reindex(it)
+                    }
+                }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(applying = null) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(applying = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
+            } finally {
+                refreshHistory()
+            }
+        }
+    }
+
+    private var pendingReindex: List<String>? = null
+
+    /** Media paths to rescan once the outcome is on screen (Android/data and obb are never indexed). */
+    private fun reindexLater(paths: List<String>) {
+        pendingReindex = paths.filterNot { it.startsWith("$rootPath/Android/data/") || it.startsWith("$rootPath/Android/obb/") }
+    }
+
+    fun applyAppFolders(items: List<AppJunkItem>) = launchRun("App folder clean-up") { progress ->
+        val summary = apps.applyFolders("App folder clean-up", items, progress)
+        reindexLater(summary.changedPaths)
+        Outcome.Applied("App folder clean-up", summary)
+    }
+
+    fun clearAppCaches(packages: List<String>, stopFirst: Boolean) = launchRun("Clearing app caches") { progress ->
+        val result = apps.clearCaches(packages, stopFirst, progress)
+        Outcome.Report("App caches", AppsController.describe(result), result.unchanged.map { "No verified change: $it" })
+    }
+
+    fun cleanTermux(items: List<TermuxItem>) = launchRun("Termux clean-up") { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val (_, summary) = termux.clean(items)
+        val lines = buildList {
+            add("Freed ${summary.freed.humanBytes()} inside Termux")
+            add("${summary.cleared.plural("location")} cleaned")
+            if (summary.skipped.isNotEmpty()) add("${summary.skipped.size.plural("location")} left alone for safety")
+        }
+        Outcome.Report("Termux cleaned", lines, summary.skipped.map { "${it.status.lowercase().replace('_', ' ')}: ${it.path.ifEmpty { it.targetId }} ${it.note}".trim() })
+    }
+
     /** Empties one run's quarantine, or all of it when [runId] is null. */
     fun purgeQuarantine(runId: String?) {
-        viewModelScope.launch {
+        scope.launch {
             val freed = withContext(Dispatchers.IO) {
                 val q = quarantine()
                 if (runId == null) q.purgeAll() else q.purge(runId)
@@ -248,7 +376,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     fun dismissOutcome() = _state.update { it.copy(outcome = null) }
 
     fun refreshHistory() {
-        viewModelScope.launch(Dispatchers.IO) { refreshHistoryNow() }
+        scope.launch(Dispatchers.IO) { refreshHistoryNow() }
     }
 
     private fun refreshHistoryNow() {

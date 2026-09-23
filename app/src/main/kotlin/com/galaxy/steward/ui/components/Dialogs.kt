@@ -91,6 +91,7 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
             val s = outcome.summary
             val lines = buildList {
                 if (s.bytesFreed > 0) add("Freed ${s.bytesFreed.humanBytes()}")
+                if (s.cleared > 0) add("${s.cleared.plural("cache, log or temp file", "cache, log and temp files")} removed for good")
                 if (s.deduped > 0) add("${s.deduped.plural("verified duplicate", "verified duplicates")} removed")
                 if (s.quarantined > 0) add("${s.quarantined.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
                 if (s.moved > 0) add("${s.moved.plural("item", "items")} organised")
@@ -113,6 +114,7 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
         }
         is Outcome.Purged -> Outcome5("Quarantine emptied", listOf("Freed ${outcome.bytes.humanBytes()}"), emptyList(), null, "")
         is Outcome.Failed -> Outcome5("Something went wrong", listOf(outcome.message), emptyList(), null, "")
+        is Outcome.Report -> Outcome5(outcome.title, outcome.lines, outcome.details, null, "")
     }
     AlertDialog(
         onDismissRequest = onDismiss,

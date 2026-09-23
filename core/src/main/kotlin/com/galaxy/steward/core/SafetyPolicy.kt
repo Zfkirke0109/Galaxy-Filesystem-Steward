@@ -26,7 +26,15 @@ object SafetyPolicy {
     private val PROJECT_MARKERS = setOf(
         ".git", "settings.gradle", "settings.gradle.kts", "gradlew", "gradlew.bat", "build.gradle", "build.gradle.kts",
         "pyproject.toml", "setup.py", "Cargo.toml", "go.mod", "pom.xml", "CMakeLists.txt", "Makefile", ".project",
+        // Decompiled and other build trees: apktool output, Flutter, Ant, Meson, SwiftPM, PHP, Ruby, Deno.
+        "apktool.yml", "pubspec.yaml", "build.xml", "meson.build", "Package.swift", "composer.json", "Gemfile", "deno.json",
     )
+
+    /**
+     * Folder names that only appear inside source or build trees. Below one of these, a folder name is part of
+     * a package path (`com/acme/userConfig/userConfig`), so a repeated name is never a redundant wrapper.
+     */
+    private val CODE_TREE_DIR = Regex("""^(src|smali(_classes\d+)?|java|kotlin|sources|jni|node_modules|site-packages|vendor|third_party)$""")
 
     private val CREDENTIAL_EXT = setOf(
         "jks", "keystore", "p12", "pfx", "pem", "key", "crt", "cer", "der", "kdbx", "kdb", "ovpn",
@@ -66,9 +74,11 @@ object SafetyPolicy {
     fun isProjectRoot(childNames: Collection<String>): Boolean {
         if (childNames.any { it in PROJECT_MARKERS }) return true
         if ("package.json" in childNames && ("src" in childNames || "node_modules" in childNames)) return true
-        if ("AndroidManifest.xml" in childNames && ("src" in childNames || "res" in childNames)) return true
+        if ("AndroidManifest.xml" in childNames && ("src" in childNames || "res" in childNames || childNames.any { it.startsWith("smali") })) return true
         return false
     }
+
+    fun isCodeTreeDir(name: String): Boolean = CODE_TREE_DIR.matches(name)
 
     /** Names containing record separators would corrupt TSV journals, so the steward never touches them. */
     fun isUnsafeName(name: String): Boolean = name.any { it == '\t' || it == '\n' || it == '\r' || it == '\u0000' }
