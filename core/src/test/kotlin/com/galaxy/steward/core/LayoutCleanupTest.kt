@@ -247,6 +247,50 @@ class LayoutCleanupTest {
     }
 
     @Test
+    fun pinnedFoldersAndKeysAreNeverPlannedSoRunsDoNotSkipThemForever() = runTest {
+        TestFs().use { fs ->
+            // Seen on a phone: two Autopilot runs in a row skipped the same 1,685 moves, and the log didn't say why.
+            val pinned = "Download/Projects/Pinned/app/jadx/sources/defpackage"
+            fs.text("$pinned/2026-08/A.java", "class A {}")
+            fs.text("$pinned/2026-08/B.java", "class B {}")
+            val open = "Download/Projects/Open/app/jadx/sources/defpackage"
+            fs.text("$open/a.java", "class a {}")
+            fs.text("$open/2026-08/A.java", "class A {}") // a.java is taken on shared storage, which ignores case
+            fs.text("$open/2026-08/C.java", "class C {}")
+            fs.text("$open/2026-08/ClientSecret.java", "class K {}") // a credential-like name never moves
+            fs.ageDirectories()
+
+            val settings = testSettings.copy(minDuplicateBytes = 1L shl 40, protectedFolders = listOf("Download/Projects/Pinned"))
+            val report = Steward(fs.rootPath, settings, TestEnv, File(fs.stateDir, "hash-cache.tsv")).scan()
+            val repairs = report.optimize.filter { it.kind == OptimizeKind.REPAIR_DATE_FOLDERS }
+            assertEquals(listOf(fs.path("$open/2026-08")), repairs.map { it.path })
+            val moves = repairs.single().operations.filterIsInstance<com.galaxy.steward.core.plan.MoveFileOp>()
+            assertEquals(listOf(fs.path("$open/2026-08/C.java")), moves.map { it.src })
+
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Optimize", "optimize", repairs)
+            assertEquals(0, summary.skipped + summary.failed)
+            assertTrue(fs.exists("$open/C.java"))
+            assertTrue(fs.exists("$pinned/2026-08/A.java"))
+        }
+    }
+
+    @Test
+    fun skippedStepsAreCountedByReason() = runTest {
+        TestFs().use { fs ->
+            fs.text("Download/Projects/x/jadx/sources/p/2026-08/A.java", "class A {}")
+            fs.text("Download/Projects/x/jadx/sources/p/2026-08/B.java", "class B {}")
+            fs.ageDirectories()
+            val repairs = scan(fs).optimize.filter { it.kind == OptimizeKind.REPAIR_DATE_FOLDERS }
+            File(fs.root, "Download/Projects/x/jadx/sources/p/2026-08/A.java").delete()
+            File(fs.root, "Download/Projects/x/jadx/sources/p/2026-08/B.java").delete()
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Optimize", "optimize", repairs)
+            assertEquals(2, summary.skipped)
+            assertEquals(mapOf("Source is gone" to 2), summary.reasons)
+            assertTrue(RunLog.applied("Optimize", "optimize", summary, 10).endsWith("skipped 2, failed 0; why: source is gone 2"))
+        }
+    }
+
+    @Test
     fun dateFoldersOfLibrariesAreOnlySuggested() = runTest {
         TestFs().use { fs ->
             val october2020 = java.time.LocalDate.of(2020, 10, 12).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()

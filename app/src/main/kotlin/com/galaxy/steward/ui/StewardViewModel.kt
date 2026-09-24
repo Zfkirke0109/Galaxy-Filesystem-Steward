@@ -275,7 +275,9 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                             applying = null,
                             outcome = Outcome.Applied(title, summary),
                             report = it.report?.without(summary.completedItemIds),
-                            selected = it.selected - summary.completedItemIds,
+                            // Items that were only partly done stay listed but unticked: running them again before a
+                            // new scan only skips the same files again.
+                            selected = it.selected - summary.completedItemIds - summary.partialItemIds,
                             space = StorageAccess.space(),
                         )
                     }

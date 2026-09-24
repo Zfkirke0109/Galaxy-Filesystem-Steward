@@ -37,7 +37,16 @@ object RunLog {
         "run \"$title\" ($kind) done in ${seconds(millis)}: moved ${count(s.moved)} (${s.bytesMoved.humanBytes()}), " +
             "deduplicated ${count(s.deduped)}, quarantined ${count(s.quarantined)} (${s.bytesQuarantined.humanBytes()}), " +
             "cleared ${count(s.cleared)}, removed ${count(s.removedDirs)} empty folders, freed ${s.bytesFreed.humanBytes()}; " +
-            "skipped ${count(s.skipped)}, failed ${count(s.failed)}"
+            "skipped ${count(s.skipped)}, failed ${count(s.failed)}" + reasons(s.reasons)
+
+    /** "; why: source is gone 1,685, protected (pinned folder) 3": the most common reasons first, at most five. */
+    fun reasons(reasons: Map<String, Int>): String {
+        if (reasons.isEmpty()) return ""
+        val top = reasons.entries.sortedByDescending { it.value }.take(5)
+        val rest = reasons.size - top.size
+        return "; why: " + top.joinToString(", ") { "${it.key.replaceFirstChar(Char::lowercase)} ${count(it.value)}" } +
+            if (rest > 0) " and $rest more" else ""
+    }
 
     /**
      * Where Termux's space goes (home, packages, proot distributions) and what the audit can clean, by group. Folder

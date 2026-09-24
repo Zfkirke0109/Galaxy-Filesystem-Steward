@@ -46,6 +46,8 @@ data class ExecutionSummary(
     val changedPaths: List<String>,
     /** Regenerable files (caches, logs, temp) deleted for good. */
     val cleared: Int = 0,
+    /** Why files were skipped or failed, with how many each: "Source is gone" to 12. Counts files, also inside merges. */
+    val reasons: Map<String, Int> = emptyMap(),
 ) {
     val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs > 0
 
@@ -86,6 +88,7 @@ class ActionExecutor(
     private var bytesQuarantined = 0L
     private var bytesMoved = 0L
     private val messages = ArrayList<String>()
+    private val reasons = LinkedHashMap<String, Int>()
     private val changed = LinkedHashSet<String>()
     private val touchedParents = LinkedHashSet<Path>()
 
@@ -115,9 +118,9 @@ class ActionExecutor(
                         val outcome = try {
                             run(op)
                         } catch (e: IOException) {
-                            Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}")
+                            Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
                         } catch (e: SecurityException) {
-                            Outcome(Status.FAILED, "Permission denied")
+                            fail("Permission denied")
                         }
                         when (outcome.status) {
                             Status.DONE, Status.NOOP -> Unit
@@ -151,6 +154,7 @@ class ActionExecutor(
         return ExecutionSummary(
             runId, completed, partial, moved, deduped, quarantined, removedDirs, skipped, failed,
             bytesFreed, bytesQuarantined, bytesMoved, messages.toList(), changed.toList(),
+            reasons = reasons.toMap(),
         )
     }
 
@@ -172,8 +176,13 @@ class ActionExecutor(
         is RemoveEmptyDirOp -> removeEmptyDir(op.path)
     }
 
-    private fun skip(message: String) = Outcome(Status.SKIPPED, message)
-    private fun fail(message: String) = Outcome(Status.FAILED, message)
+    private fun skip(message: String) = Outcome(Status.SKIPPED, message).also { tally(message) }
+    private fun fail(message: String) = Outcome(Status.FAILED, message).also { tally(message) }
+
+    /** Counted by reason, so a run that skips thousands of files says why in one line of the log. */
+    private fun tally(message: String) {
+        reasons[message] = (reasons[message] ?: 0) + 1
+    }
 
     private fun record(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) {
         journal.entry(JournalEntry(action, a, b, size, mtime, sha))
@@ -306,8 +315,8 @@ class ActionExecutor(
         }
         for (dir in dirs.sortedByDescending { it.nameCount }) removeEmptyDir(dir.toString())
         return when {
-            problems > 0 -> skip("$problems file(s) could not be merged")
-            leftBehind > 0 -> skip("$leftBehind protected item(s) left in place")
+            problems > 0 -> Outcome(Status.SKIPPED, "$problems file(s) could not be merged")
+            leftBehind > 0 -> Outcome(Status.SKIPPED, "$leftBehind protected item(s) left in place").also { tally("Protected items left in place") }
             else -> Outcome(Status.DONE)
         }
     }

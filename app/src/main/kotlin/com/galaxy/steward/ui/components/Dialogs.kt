@@ -149,7 +149,9 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
                 if (s.failed > 0) add("${s.failed.plural("step", "steps")} failed")
                 if (isEmpty()) add("Nothing needed changing.")
             }
-            Outcome5(outcome.title, lines, s.messages, s.runId.takeIf { s.changedAnything }, outcome.title)
+            // The counts by reason first: a long list of paths hides that they were all skipped for one reason.
+            val reasons = s.reasons.entries.sortedByDescending { it.value }.map { "${it.key}: ${it.value.plural("file")}" }
+            Outcome5(outcome.title, lines, reasons + s.messages, s.runId.takeIf { s.changedAnything }, outcome.title)
         }
         is Outcome.RolledBack -> {
             val s = outcome.summary

@@ -4,6 +4,7 @@ import com.galaxy.steward.core.dedupe.DuplicateFinder
 import com.galaxy.steward.core.dedupe.FolderAnalyzer
 import com.galaxy.steward.core.dedupe.HashListener
 import com.galaxy.steward.core.dedupe.HashStage
+import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.hash.HashCache
 import com.galaxy.steward.core.junk.JunkPlanner
 import com.galaxy.steward.core.model.FileKind
@@ -14,6 +15,7 @@ import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.organize.OrganizePlanner
 import com.galaxy.steward.core.plan.KindStat
 import com.galaxy.steward.core.plan.LargeFile
+import com.galaxy.steward.core.plan.PlanHygiene
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.plan.StorageSummary
 import com.galaxy.steward.core.scan.TreeScanner
@@ -99,13 +101,14 @@ class Steward(
         onProgress(ScanProgress(ScanPhase.PLANNING, filesSeen = filesSeen, bytesSeen = bytesSeen))
         val organize = OrganizePlanner(settings, environment).plan(tree)
         val optimize = OptimizePlanner(settings, environment).plan(tree, space)
+        val hygiene = PlanHygiene(PathGuard(rootPath, settings.protectedFolders))
 
         // Something already proposed for dedupe or cleanup should not also be filed: drop conflicting moves.
         val claimed = HashSet<String>()
         fileGroups.forEach { g -> g.removals.forEach { claimed += it.path } }
         folders.exact.forEach { g -> g.removals.forEach { claimed += it.path } }
         junk.forEach { claimed += it.path }
-        val moves = organize.moves.filterNot { move ->
+        val moves = hygiene.organize(organize.moves).filterNot { move ->
             var path = move.source
             var hit = false
             while (!hit && path.length > rootPath.length) {
@@ -123,9 +126,9 @@ class Steward(
             duplicates = fileGroups,
             folderDuplicates = folders.exact,
             folderMerges = folders.merges,
-            junk = junk,
+            junk = hygiene.junk(junk),
             organize = moves,
-            optimize = optimize.items,
+            optimize = hygiene.optimize(optimize.items),
             insights = optimize.insights + organize.insights.take(50),
         )
         onProgress(ScanProgress(ScanPhase.DONE, 1, 1, "", filesSeen, bytesSeen))

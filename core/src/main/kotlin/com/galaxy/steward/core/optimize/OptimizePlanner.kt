@@ -353,6 +353,8 @@ class OptimizePlanner(
     private fun datedSourceFolder(dir: DirNode): OptimizeItem? {
         val home = dir.parent ?: return null
         if (!dateFolder.matches(dir.name) || dateFolder.matches(home.name) || dir.hidden) return null
+        // A folder you pinned is never changed: planning moves there only made every run skip them (seen on a phone).
+        if (dir.zone == Zone.USER_PROTECTED || !dir.zone.durable) return null
         val code = insideCodeTree(home) || home.insideFlagged(NodeFlags.CODE_TREE)
         if (!code) return datedLibraryFolder(dir, home)
         if (dir.subtreeHas(NodeFlags.HAS_SYMLINK or NodeFlags.HAS_SPECIAL or NodeFlags.UNREADABLE or NodeFlags.HAS_UNSAFE_NAME)) return null
@@ -366,8 +368,11 @@ class OptimizePlanner(
         }
         if (files.isEmpty() || files.count { it.kind == FileKind.CODE } * 10 < files.size * 8) return null
         if (files.any { it.mtime > recentCutoff }) return null
-        val taken = home.files.mapTo(HashSet()) { it.name } + home.dirs.map { it.name }
-        val movable = files.groupBy { it.name }.filter { (name, same) -> same.size == 1 && name !in taken }.values.map { it.single() }
+        // Shared storage ignores case: A.java and a.java are one name there.
+        val taken = takenNames(home)
+        val movable = files.groupBy { it.name.lowercase() }
+            .filter { (name, same) -> same.size == 1 && name !in taken && !SafetyPolicy.isCredentialName(same.single().name) }
+            .values.map { it.single() }
         if (movable.isEmpty()) return null
         val kept = files.size - movable.size
         return OptimizeItem(
@@ -382,6 +387,9 @@ class OptimizePlanner(
             operations = movable.map { MoveFileOp(it.path, "${home.path}/${it.name}", it.size, it.mtime) },
         )
     }
+
+    private fun takenNames(dir: DirNode): Set<String> =
+        dir.files.mapTo(HashSet()) { it.name.lowercase() }.apply { dir.dirs.mapTo(this) { it.name.lowercase() } }
 
     /**
      * The same mistake outside source code: 1.2.0 also sorted preset and document libraries by date (a phone showed
@@ -401,8 +409,8 @@ class OptimizePlanner(
             dir.name == date.year.toString() || dir.name == "%04d-%02d".format(date.year, date.monthValue)
         }
         if (!inPeriod) return null
-        val taken = home.files.mapTo(HashSet()) { it.name } + home.dirs.map { it.name }
-        val movable = files.filter { it.name !in taken }
+        val taken = takenNames(home)
+        val movable = files.filter { it.name.lowercase() !in taken && !SafetyPolicy.isCredentialName(it.name) }
         if (movable.isEmpty()) return null
         return OptimizeItem(
             id = "undate:${dir.path.hashCode().toString(16)}:${dir.path.length}",
