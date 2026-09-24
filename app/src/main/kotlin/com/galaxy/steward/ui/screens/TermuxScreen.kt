@@ -46,6 +46,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.learn.LearnedChoice
 import com.galaxy.steward.core.termux.TermuxGroup
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.core.termux.TermuxProtocol
@@ -187,11 +188,12 @@ fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () ->
                     ) { navigate(Routes.TERMUX_PROJECTS) }
                 }
                 item { TermuxCopies(vm) }
+                item { TermuxForeign(vm) }
                 if (report.prootActive) {
                     item { InlineNotice("A proot distribution is running, so distro caches were only measured. Stop it and scan again to clean them.") }
                 }
                 for ((group, list) in groups) {
-                    item(key = group.name) { GroupCard(group, list, state.selected, group.name in expanded, vm, report.home, report.prefix) { expanded = if (group.name in expanded) expanded - group.name else expanded + group.name } }
+                    item(key = group.name) { GroupCard(group, list, state.selected, state.learned, group.name in expanded, vm, report.home, report.prefix) { expanded = if (group.name in expanded) expanded - group.name else expanded + group.name } }
                 }
                 if (report.rootfs.isNotEmpty()) {
                     item { SectionHeader("Linux distributions") }
@@ -261,6 +263,7 @@ private fun GroupCard(
     group: TermuxGroup,
     list: List<TermuxItem>,
     selected: Set<String>,
+    learned: Map<String, LearnedChoice>,
     open: Boolean,
     vm: StewardViewModel,
     home: String,
@@ -290,7 +293,8 @@ private fun GroupCard(
                         onCheckedChange = { vm.termux.toggle(item.spec) },
                         title = item.title,
                         subtitle = listOf(TermuxProtocol.relative(item.path, home, prefix), item.files.plural("file"), item.note)
-                            .filter { it.isNotEmpty() }.joinToString(" · "),
+                            .filter { it.isNotEmpty() }.joinToString(" · ") + (learned[item.spec]?.let { "\n${it.note}" } ?: ""),
+                        subtitleLines = 3,
                         trailing = { SizeText(item.bytes) },
                     )
                 }

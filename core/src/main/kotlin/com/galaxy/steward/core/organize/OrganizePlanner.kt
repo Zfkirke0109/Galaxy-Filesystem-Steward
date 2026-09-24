@@ -4,6 +4,8 @@ import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.learn.YourMoves
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.FileNode
@@ -41,14 +43,26 @@ class OrganizePlanner(
     private val plannedSources = HashSet<String>()
     private var model: FilingModel? = null
     private var learnedMoves = 0
+    private var yours: Set<String> = emptySet()
+    private var holdsYours: Set<String> = emptySet()
+    private var leftForYou = 0
 
-    fun plan(tree: StorageTree): OrganizePlan {
+    /** [yours]: what you moved yourself since the last scan; it teaches the model and isn't suggested to move again. */
+    fun plan(tree: StorageTree, yours: YourMoves = YourMoves.NONE): OrganizePlan {
         rootPath = tree.rootPath
         moves.clear()
         insights.clear()
         plannedSources.clear()
         learnedMoves = 0
-        model = if (settings.learnFromFolders) FilingModel.train(tree, settings.flatDirThreshold) else null
+        leftForYou = 0
+        this.yours = if (settings.learnFromFolders) yours.paths else emptySet()
+        holdsYours = HashSet<String>().apply {
+            for (y in this@OrganizePlanner.yours) {
+                var p = y.substringBeforeLast('/')
+                while (p.length > rootPath.length && add(p)) p = p.substringBeforeLast('/')
+            }
+        }
+        model = if (settings.learnFromFolders) FilingModel.train(tree, settings.flatDirThreshold, this.yours) else null
 
         tree.find("Download")?.takeIf { it.zone == Zone.USER_MANAGED }?.let { download ->
             for (f in download.files) planFile(f)
@@ -60,6 +74,18 @@ class OrganizePlanner(
             planHomeChildren(documents)
         }
         planTopLevel(tree.root)
+        if (settings.learnFromFolders && yours.files > 0) {
+            insights.add(
+                0,
+                Insight(
+                    Severity.INFO,
+                    "You moved ${yours.files.plural("file")} yourself since the last scan",
+                    "Where you put things is the best lesson there is: each counts ${FilingModel.YOURS_WEIGHT.toInt()} times when the " +
+                        "steward learns where things like it belong, and nothing you placed is suggested to move again" +
+                        (if (leftForYou > 0) " (${leftForYou.plural("suggestion")} left out this time)" else "") + ".",
+                ),
+            )
+        }
         if (learnedMoves > 0) {
             insights.add(
                 0,
@@ -374,6 +400,18 @@ class OrganizePlanner(
         )
     }
 
+    /** You moved [source] (or something in it, or a folder it is in) yourself since the last scan. */
+    private fun placedByYou(source: String): Boolean {
+        if (yours.isEmpty()) return false
+        if (source in holdsYours) return true
+        var p = source
+        while (p.length > rootPath.length) {
+            if (p in yours) return true
+            p = p.substringBeforeLast('/')
+        }
+        return false
+    }
+
     private fun leftInPlace(dir: DirNode, why: String) {
         insights.add(Insight(Severity.INFO, "Left in place: ${dir.name}", "This folder $why, so it keeps its exact path.", dir.path))
     }
@@ -389,6 +427,10 @@ class OrganizePlanner(
         selected: Boolean,
         op: Operation,
     ) {
+        if (placedByYou(source)) {
+            leftForYou++
+            return
+        }
         if (!plannedSources.add(source)) return
         moves.add(
             OrganizeMove(

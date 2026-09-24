@@ -10,6 +10,7 @@ import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.OptimizeItem
 import com.galaxy.steward.core.plan.OrganizeMove
 import com.galaxy.steward.core.plan.PlanItem
+import com.galaxy.steward.core.termux.TermuxItem
 import java.io.File
 import java.io.IOException
 import kotlin.math.exp
@@ -94,12 +95,7 @@ object PreferenceFeatures {
                 add("dest:$d")
                 add("c|dest:$kind|$d")
             }
-            add("size:" + when {
-                bytes < MIB -> "s"
-                bytes < 16 * MIB -> "m"
-                bytes < 256 * MIB -> "l"
-                else -> "xl"
-            })
+            add("size:" + sizeBucket(bytes))
             if (mtime > 0) {
                 val days = (now - mtime) / DAY_MS
                 add("age:" + when {
@@ -111,6 +107,38 @@ object PreferenceFeatures {
             }
             add("def:${item.defaultSelected}")
         }
+    }
+
+    /**
+     * A Termux clean-up suggestion: its target ("termux:decompiled"), where it is (the folder in the home or $PREFIX,
+     * or in a distribution, and the level below), how big it is and whether the rules tick it.
+     */
+    fun ofTermux(item: TermuxItem, home: String, prefix: String): List<String> {
+        val kind = "termux:${item.targetId}"
+        val rel = when {
+            item.path.startsWith("$home/") -> "~/" + item.path.removePrefix("$home/")
+            item.path.startsWith("$prefix/") -> "\$PREFIX/" + item.path.removePrefix("$prefix/")
+            else -> item.path.trimStart('/')
+        }.replace(WHITESPACE, "_")
+        // "~/work", not "~": the folder in the home (or $PREFIX) is what a top folder is in shared storage.
+        val parts = rel.split('/')
+        val depth = if (parts.first() == "~" || parts.first() == "\$PREFIX") 2 else 1
+        val top = parts.take(depth).joinToString("/")
+        return buildList {
+            add("c:$kind")
+            add("top:$top")
+            add("c|top:$kind|$top")
+            if (parts.size > depth) add("c|p2:$kind|${parts.take(depth + 1).joinToString("/")}")
+            add("size:" + sizeBucket(item.bytes))
+            add("def:${item.defaultSelected}")
+        }
+    }
+
+    private fun sizeBucket(bytes: Long) = when {
+        bytes < MIB -> "s"
+        bytes < 16 * MIB -> "m"
+        bytes < 256 * MIB -> "l"
+        else -> "xl"
     }
 
     private val WHITESPACE = Regex("\\s")
@@ -139,13 +167,17 @@ class PreferenceModel private constructor(
     fun choiceFor(item: PlanItem, root: String, now: Long): LearnedChoice? {
         // Merging folders is always your call.
         if (item is FolderMerge) return null
-        val f = PreferenceFeatures.of(item, root, now)
-        val n = supportOf(f)
+        return choiceFor(PreferenceFeatures.of(item, root, now), item.defaultSelected)
+    }
+
+    /** A confident, well-supported choice for a suggestion described by [features], or null to keep [defaultSelected]. */
+    fun choiceFor(features: List<String>, defaultSelected: Boolean): LearnedChoice? {
+        val n = supportOf(features)
         if (n < MIN_SUPPORT) return null
-        val p = probability(f)
+        val p = probability(features)
         return when {
-            p >= SELECT_AT && !item.defaultSelected -> LearnedChoice(true, p, n)
-            p <= 1 - SELECT_AT && item.defaultSelected -> LearnedChoice(false, p, n)
+            p >= SELECT_AT && !defaultSelected -> LearnedChoice(true, p, n)
+            p <= 1 - SELECT_AT && defaultSelected -> LearnedChoice(false, p, n)
             else -> null
         }
     }
@@ -192,13 +224,18 @@ class PreferenceModel private constructor(
  */
 class DecisionLog(private val file: File) {
     @Synchronized
-    fun record(runId: String, offered: List<PlanItem>, chosen: Set<String>, root: String, now: Long) {
+    fun record(runId: String, offered: List<PlanItem>, chosen: Set<String>, root: String, now: Long) =
+        recordFeatures(runId, offered.map { PreferenceFeatures.of(it, root, now) to (it.id in chosen) }, now)
+
+    /** One line per suggestion: its features, and whether it was run. */
+    @Synchronized
+    fun recordFeatures(runId: String, offered: List<Pair<List<String>, Boolean>>, now: Long) {
         if (offered.isEmpty()) return
-        val lines = offered.map { item ->
-            val features = PreferenceFeatures.of(item, root, now).joinToString(" ") { it.replace(' ', '_').replace('\t', '_') }
-            "D\t$now\t$runId\t${if (item.id in chosen) 1 else 0}\t$features"
-        }
-        append(lines)
+        append(
+            offered.map { (features, chosen) ->
+                "D\t$now\t$runId\t${if (chosen) 1 else 0}\t" + features.joinToString(" ") { it.replace(' ', '_').replace('\t', '_') }
+            },
+        )
     }
 
     @Synchronized

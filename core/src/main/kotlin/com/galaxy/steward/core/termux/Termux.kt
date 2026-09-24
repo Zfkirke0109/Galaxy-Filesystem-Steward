@@ -199,6 +199,19 @@ data class TermuxRepo(
     val remoteLabel: String get() = remote.removeSuffix(".git").replace(Regex("^[a-z+]+://"), "").replace(Regex("^[^@/]+@([^:/]+):"), "$1/")
 }
 
+/**
+ * A big program (8 MiB or more) built for another processor: x86-64 or x86 Linux, or Windows, on an ARM phone with
+ * no x86 emulator installed. It can't run here, whatever needs it.
+ */
+data class TermuxForeignFile(val path: String, val cpu: String, val bytes: Long) {
+    val cpuLabel: String get() = when (cpu) {
+        "x86-64" -> "x86-64 PC program"
+        "x86" -> "32-bit PC program"
+        "windows" -> "Windows program"
+        else -> cpu
+    }
+}
+
 /** An installed Termux package, as dpkg describes it. [manual] is false for packages pulled in as dependencies. */
 data class TermuxPackage(
     val name: String,
@@ -247,6 +260,8 @@ data class TermuxReport(
     val sketches: List<TermuxSketch> = emptyList(),
     /** Size-map entries under $PREFIX that packages installed or hold files in: path to (package count, some names). */
     val owners: Map<String, Pair<Int, String>> = emptyMap(),
+    /** Big programs for another processor, largest first. */
+    val foreign: List<TermuxForeignFile> = emptyList(),
 ) {
     private val byParent: Map<String, List<TermuxEntry>> by lazy {
         entries.groupBy { it.path.substringBeforeLast('/') }.mapValues { (_, list) -> list.sortedByDescending { it.bytes } }
@@ -284,6 +299,7 @@ data class TermuxReport(
                 d.copy(paths = d.paths.filterNot { p -> gone.any { p == it || p.startsWith("$it/") } }).takeIf { it.paths.size > 1 }
             },
             sketches = sketches.filterNot { k -> gone.any { k.path == it || k.path.startsWith("$it/") } },
+            foreign = foreign.filterNot { f -> gone.any { f.path == it || f.path.startsWith("$it/") } },
         )
     }
 
@@ -395,6 +411,7 @@ object TermuxProtocol {
         val copies = LinkedHashMap<Pair<Long, String>, MutableList<String>>()
         val sketches = ArrayList<TermuxSketch>()
         val owners = HashMap<String, Pair<Int, String>>()
+        val foreign = ArrayList<TermuxForeignFile>()
         for (p in parsed.records) {
             when (p[0]) {
                 "V" -> if (p.size >= 5) {
@@ -436,6 +453,7 @@ object TermuxProtocol {
                     copies.getOrPut(size to p[2]) { ArrayList() } += p[3]
                 }
                 "O" -> if (p.size >= 4) owners[p[3]] = (p[1].toIntOrNull() ?: 1) to p[2]
+                "F" -> if (p.size >= 4) foreign += TermuxForeignFile(p[3], p[1], p[2].toLongOrNull() ?: 0)
                 "H" -> if (p.size >= 5) {
                     val hashes = p[3].split(',').mapNotNull { it.toLongOrNull() }.toLongArray()
                     if (hashes.isNotEmpty()) sketches += TermuxSketch(p[4], p[1].toIntOrNull() ?: 0, p[2].toLongOrNull() ?: 0, hashes)
@@ -454,7 +472,7 @@ object TermuxProtocol {
         }
         return TermuxReport(
             home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries, duplicates, sketches,
-            owners,
+            owners, foreign.sortedByDescending { it.bytes },
         )
     }
 

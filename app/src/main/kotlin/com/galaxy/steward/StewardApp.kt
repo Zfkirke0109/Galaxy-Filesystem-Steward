@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import com.galaxy.steward.core.learn.DecisionLog
+import com.galaxy.steward.core.learn.ScanMemory
 import com.galaxy.steward.diagnostics.StewardLog
 import java.io.File
 
@@ -52,6 +53,9 @@ class StewardApp : Application() {
     /** Which suggestions you ran and which you left, for learning your defaults (Settings → Learning). */
     val decisions: DecisionLog by lazy { DecisionLog(File(filesDir, "decisions.tsv")) }
 
+    /** Where your files were at the last scan (to learn from your own moves) and how full storage was after each scan. */
+    val memory: ScanMemory by lazy { ScanMemory(File(filesDir, "memory"), journals) }
+
     override fun onCreate() {
         super.onCreate()
         StewardLog.init(File(filesDir, "steward-history.log"))
@@ -60,7 +64,7 @@ class StewardApp : Application() {
         journals = JournalStore(File(filesDir, "journals"))
         val shizuku = ShizukuBridge(this)
         apps = AppsController(this, journals, shizuku, appScope)
-        termux = TermuxController(this, journals, appScope)
+        termux = TermuxController(this, journals, appScope) { decisions.takeIf { settings.settings.value.learnFromChoices } }
         logcat = LogcatExporter(this, shizuku, appScope)
         storageReport = StorageReportExporter(this, appScope)
         val manager = getSystemService(NotificationManager::class.java)

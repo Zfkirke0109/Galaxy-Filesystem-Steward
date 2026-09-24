@@ -78,6 +78,34 @@ class PreferenceModelTest {
     }
 
     @Test
+    fun termuxPicksAreLearnedLikeTheRest() {
+        val dir = Files.createTempDirectory("prefs").toFile()
+        try {
+            val home = "/data/data/com.termux/files/home"
+            val prefix = "/data/data/com.termux/files/usr"
+            fun item(target: String, path: String, def: Boolean) =
+                com.galaxy.steward.core.termux.TermuxItem("$target=$path", target, target, com.galaxy.steward.core.termux.TermuxGroup.DEV, path, 50 * MIB, 10, def, "")
+            val log = DecisionLog(File(dir, "decisions.tsv"))
+            // Six clean-ups: the npm cache (ticked by the rules) always left, decompiled apps in ~/work always cleaned.
+            repeat(6) { run ->
+                val npm = item("npm-cache", "$home/.npm/_cacache", true)
+                val decompiled = item("decompiled", "$home/work/app$run", false)
+                val offered = listOf(npm, decompiled).map { com.galaxy.steward.core.learn.PreferenceFeatures.ofTermux(it, home, prefix) to (it === decompiled) }
+                log.recordFeatures("t$run", offered, now)
+            }
+            val model = PreferenceModel.train(log.load())
+            val features = { i: com.galaxy.steward.core.termux.TermuxItem -> com.galaxy.steward.core.learn.PreferenceFeatures.ofTermux(i, home, prefix) }
+            assertEquals(false, model.choiceFor(features(item("npm-cache", "$home/.npm/_cacache", true)), true)?.select)
+            assertEquals(true, model.choiceFor(features(item("decompiled", "$home/work/other", false)), false)?.select)
+            // Decompiled apps somewhere else: no decisions about that place yet.
+            assertNull(model.choiceFor(features(item("decompiled", "$home/re/other", false)), false))
+            assertTrue(features(item("pip-cache", "$prefix/tmp/pip", true)).contains("top:\$PREFIX/tmp"))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun theLogKeepsOnlyTheLatestDecisions() {
         val dir = Files.createTempDirectory("prefs").toFile()
         try {

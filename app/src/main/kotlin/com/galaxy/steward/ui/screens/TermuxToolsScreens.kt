@@ -35,6 +35,7 @@ import com.galaxy.steward.core.ageText
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.optimize.ProjectMoves
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.termux.TermuxLocks
 import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.core.termux.TermuxRepo
 import com.galaxy.steward.data.StorageAccess
@@ -385,6 +386,65 @@ fun TermuxCopies(vm: StewardViewModel) {
                 }, enabled = chosen.isNotEmpty() && (chosen.size < paths.size || paths.size == 1)) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { review = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/**
+ * Big programs built for another processor (x86-64 PCs, Windows) that this ARM phone can't run, from the last Termux
+ * scan. Ones a package installed stay locked (uninstall the package instead); the rest can be picked and deleted.
+ */
+@Composable
+fun TermuxForeign(vm: StewardViewModel) {
+    val state by vm.termux.state.collectAsStateWithLifecycle()
+    val report = state.report ?: return
+    if (report.foreign.isEmpty()) return
+    var picked by remember(report) { mutableStateOf(setOf<String>()) }
+    var confirm by remember { mutableStateOf(false) }
+    val free = report.foreign.filter { TermuxLocks.reason(it.path, report) == null }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Programs this phone can't run", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "${report.foreign.size.plural("program")} for another processor, ${report.foreign.sumOf { it.bytes }.humanBytes()}. " +
+                "Nothing here can start them without an x86 emulator such as box64.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        report.foreign.take(20).forEach { f ->
+            val lock = TermuxLocks.reason(f.path, report)
+            SelectRow(
+                checked = f.path in picked,
+                onCheckedChange = { picked = if (f.path in picked) picked - f.path else picked + f.path },
+                title = f.path.substringAfterLast('/'),
+                subtitle = "${f.cpuLabel} · ${f.bytes.humanBytes()} · ${TermuxProtocol.relative(f.path, report.home, report.prefix)}" +
+                    (lock?.let { "\n$it" } ?: ""),
+                subtitleLines = 3,
+                enabled = lock == null,
+            )
+        }
+        if (free.isNotEmpty()) {
+            TextButton(onClick = { confirm = true }, enabled = picked.isNotEmpty()) {
+                Text(if (picked.isEmpty()) "Pick programs to delete" else "Delete ${picked.size.plural("program")}")
+            }
+        }
+    }
+    if (confirm) {
+        val chosen = report.foreign.filter { it.path in picked }
+        IrreversibleDialog(
+            title = "Delete ${chosen.size.plural("program")}?",
+            names = chosen.map { it.path.substringAfterLast('/') },
+            lines = listOf(
+                "Frees ${chosen.sumOf { it.bytes }.humanBytes()}",
+                "Whatever tried to start them couldn't on this phone; reinstalling what they came with brings them back",
+                "Deleted for good: Termux has no recycle bin",
+            ),
+            confirmLabel = "Delete",
+            onConfirm = {
+                confirm = false
+                vm.deleteTermuxPaths(chosen.map { it.path })
+                picked = emptySet()
+            },
+            onDismiss = { confirm = false },
         )
     }
 }

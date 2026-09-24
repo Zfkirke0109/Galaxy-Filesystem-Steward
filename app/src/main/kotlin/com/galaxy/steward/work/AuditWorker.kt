@@ -62,7 +62,7 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
 
         val started = SystemClock.uptimeMillis()
         val report = coroutineScope {
-            val scan = async(Dispatchers.IO) { Steward(root, settings, app.environment, app.hashCacheFile).scan(StorageAccess.space()) }
+            val scan = async(Dispatchers.IO) { Steward(root, settings, app.environment, app.hashCacheFile, app.memory).scan(StorageAccess.space()) }
             val yieldToYou = launch {
                 app.session.state.first { it.scanning || it.applying != null }
                 scan.cancel()

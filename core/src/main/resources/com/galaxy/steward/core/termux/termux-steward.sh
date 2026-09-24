@@ -500,6 +500,30 @@ sketch_dirs() {
   rm -f -- "$tmp"
 }
 
+# F, CPU, bytes, path: big files (8 MiB or more) that are programs for another processor, from their first bytes (ELF
+# e_machine x86-64 or x86 on an ARM phone, or a Windows PE). They can't run here without an emulator; box64 or qemu
+# in Termux or a distribution means they might, and then nothing is reported.
+foreign_binaries() {
+  local f hex arch r
+  case "$ARCH" in aarch64|arm*) ;; *) return 0 ;; esac
+  [ -e "$PREFIX/bin/box64" ] || [ -e "$PREFIX/bin/qemu-x86_64" ] && return 0
+  for f in "${!BIG[@]}"; do
+    [ "${BIG[$f]}" -ge "$DUP_MIN_KIB" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
+    hex="$(head -c 20 -- "$f" 2>/dev/null | od -An -tx1 -v | tr -d ' \n')"
+    arch=""
+    case "$hex" in
+      7f454c46*)
+        case "${hex:36:4}" in 3e00) arch=x86-64 ;; 0300) arch=x86 ;; esac
+        ;;
+      4d5a*) case "$f" in *.exe|*.dll|*.EXE|*.DLL) arch=windows ;; esac ;;
+    esac
+    [ -n "$arch" ] || continue
+    # Inside a distribution with its own x86-64 emulator they may be in use.
+    r="$(rootfs_of "$f" 2>/dev/null)" && x86_emulator "$r" && continue
+    emit F "$arch" "$(stat -c %s -- "$f" 2>/dev/null || echo $(( ${BIG[$f]} * 1024 )))" "$f"
+  done
+}
+
 # O, number of packages, up to three of them, path: every file and folder of the size map under $PREFIX that packages
 # installed or hold files in, so the browser can lock them the way delete refuses them (one pass over dpkg's lists).
 emit_owners() {
@@ -670,6 +694,7 @@ audit() {
     dup_large_files
     sketch_dirs
     emit_owners
+    foreign_binaries
   fi
 
   # The size map itself, for browsing Termux folder by folder in the app: only into the --out file, because the

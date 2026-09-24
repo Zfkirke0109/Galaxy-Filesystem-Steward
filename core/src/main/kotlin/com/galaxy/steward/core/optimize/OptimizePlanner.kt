@@ -345,50 +345,59 @@ class OptimizePlanner(
 
     // ------------------------------------------------------------------ cold folders, packed
 
-    /** Text-like files deflate to about a quarter; photos, video, music and archives are compressed already. */
+    /** Guesses for types not measured: text-like files deflate to about a quarter; archives and PDFs not at all. */
     private val textLike = setOf(
         "txt", "log", "csv", "tsv", "json", "xml", "html", "htm", "md", "yaml", "yml", "ini", "cfg", "conf", "properties",
         "smali", "java", "kt", "js", "ts", "css", "svg", "sql", "sh", "py", "c", "h", "cpp", "rs", "go", "gradle", "vdc", "eel",
         "hprof", "trace", "dump", "bak", "out", "srt", "vtt", "rtf", "tex", "bib",
     )
 
+    private fun guessedRatio(f: FileNode): Double = when {
+        f.extension in textLike -> 0.25
+        f.kind == FileKind.ARCHIVE || f.kind == FileKind.APK || f.extension == "pdf" -> 1.0
+        else -> 0.7
+    }
+
     /**
      * Folders of yours nobody has touched in [COLD_DAYS] days, mostly text (logs, exports, reports, presets), packed into
      * one zip each: the same files, losslessly, in about a quarter of the space for text, and one file instead of
      * thousands for shared storage's slow file layer. Photos, videos and music are never packed, and nothing is ticked:
-     * you open a packed folder from its zip, or undo the run to unpack it.
+     * you open a packed folder from its zip, or undo the run to unpack it. What a folder would save is measured on a
+     * sample of its own files ([CompressionProbe]), not guessed from their names.
      */
     private fun coldFolders(root: DirNode, items: MutableList<OptimizeItem>) {
         val cutoff = environment.nowMillis() - COLD_DAYS * DAY_MS
+        val probe = CompressionProbe()
         fun visit(dir: DirNode) {
             for (d in dir.dirs) {
                 if (d.hidden || d.zone != Zone.USER_MANAGED) continue
-                val candidate = packCandidate(d, cutoff)
+                val candidate = packCandidate(d, cutoff, probe)
                 if (candidate != null) items += candidate else if (!d.hasFlag(NodeFlags.CODE_TREE)) visit(d)
             }
         }
         visit(root)
     }
 
-    private fun packCandidate(d: DirNode, cutoff: Long): OptimizeItem? {
+    private fun packCandidate(d: DirNode, cutoff: Long, probe: CompressionProbe): OptimizeItem? {
         if (d.depth < 2 || d.totalFiles < 20 || isHome(d) || d.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) return null
         if (insideCodeTree(d) || d.insideFlagged(NodeFlags.CODE_TREE or NodeFlags.PROJECT_ROOT)) return null
         // Already packed, or unpacked from a zip next to it.
         if (d.parent?.files?.any { it.name.equals(d.name + ".zip", ignoreCase = true) } == true) return null
         var newest = 0L
-        var media = 0L
-        var packedSize = 0.0
+        val files = ArrayList<FileNode>()
         d.walkFiles { f ->
             if (f.mtime > newest) newest = f.mtime
-            when {
-                f.kind == FileKind.IMAGE || f.kind == FileKind.VIDEO || f.kind == FileKind.AUDIO -> media += f.size
-                f.extension in textLike -> packedSize += f.size * 0.25
-                f.kind == FileKind.ARCHIVE || f.kind == FileKind.APK || f.extension == "pdf" -> packedSize += f.size.toDouble()
-                else -> packedSize += f.size * 0.7
-            }
+            files += f
         }
-        if (newest == 0L || newest > cutoff || media > 0) return null
-        val saves = d.totalBytes - packedSize.toLong()
+        if (newest == 0L || newest > cutoff) return null
+        if (files.any { it.kind == FileKind.IMAGE || it.kind == FileKind.VIDEO || it.kind == FileKind.AUDIO }) return null
+        fun saving(ratio: (FileNode) -> Double): Long =
+            d.totalBytes - files.sumOf { f -> f.size * ratio(f) + CompressionProbe.overhead(f.relPath.removePrefix(d.parent!!.relPath + "/")) }.toLong()
+        // Guesses first, with room either way; then the measured sample decides.
+        val guessed = saving(::guessedRatio)
+        if (guessed < 4 * MIB || guessed * 10 < d.totalBytes * 2) return null
+        val measured = probe.ratios(files)
+        val saves = saving { f -> measured[f.extension] ?: guessedRatio(f) }
         if (saves < 8 * MIB || saves * 10 < d.totalBytes * 3) return null
         val months = (environment.nowMillis() - newest) / (30 * DAY_MS)
         return OptimizeItem(
@@ -396,8 +405,9 @@ class OptimizePlanner(
             kind = OptimizeKind.PACK_COLD_FOLDER,
             path = d.path,
             title = d.relPath,
-            detail = "Pack ${d.totalFiles} files (${d.totalBytes.humanBytes()}) into ${d.name}.zip, about ${saves.humanBytes()} smaller. " +
-                "Untouched for $months months. The zip is checked file by file first; open files from it, or undo in History to unpack.",
+            detail = "Pack ${d.totalFiles} files (${d.totalBytes.humanBytes()}) into ${d.name}.zip, about ${saves.humanBytes()} smaller" +
+                (if (measured.isNotEmpty()) " (measured on a sample of its files)" else "") + ". Untouched for $months months. " +
+                "The zip is checked file by file first; open files from it, or undo in History to unpack.",
             fileCount = d.totalFiles,
             defaultSelected = false,
             operations = listOf(PackDirOp(d.path, "${d.path}.zip", newest)),

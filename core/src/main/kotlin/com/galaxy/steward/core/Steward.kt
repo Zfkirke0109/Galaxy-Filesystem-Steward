@@ -10,6 +10,8 @@ import com.galaxy.steward.core.dedupe.HashStage
 import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.hash.HashCache
 import com.galaxy.steward.core.junk.JunkPlanner
+import com.galaxy.steward.core.learn.ScanMemory
+import com.galaxy.steward.core.learn.YourMoves
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
@@ -70,6 +72,8 @@ class Steward(
     private val settings: StewardSettings,
     private val environment: DeviceEnvironment,
     private val hashCacheFile: File?,
+    /** Where your files were at the last scan and how full storage was: for learning your moves and storage growth. */
+    private val memory: ScanMemory? = null,
 ) {
     suspend fun scan(space: VolumeSpace? = null, onProgress: (ScanProgress) -> Unit = {}): ScanReport {
         val started = environment.nowMillis()
@@ -113,7 +117,8 @@ class Steward(
             exactPaths.any { p -> pair.a == p || pair.b == p || pair.a.startsWith("$p/") || pair.b.startsWith("$p/") }
         }
         val (nearJunk, nearInsights) = nearCopyItems(tree, sketches, nearCopies, junk)
-        val organize = OrganizePlanner(settings, environment).plan(tree)
+        val yours = if (settings.learnFromFolders) memory?.movesSince(tree) ?: YourMoves.NONE else YourMoves.NONE
+        val organize = OrganizePlanner(settings, environment).plan(tree, yours)
         val optimize = OptimizePlanner(settings, environment).plan(tree, space)
         val hygiene = PlanHygiene(PathGuard(rootPath, settings.protectedFolders))
 
@@ -132,6 +137,12 @@ class Steward(
             hit
         }
 
+        val growth = memory?.let { m ->
+            m.rememberPlaces(tree)
+            val point = ScanMemory.pointOf(tree, environment.nowMillis(), space?.freeBytes ?: -1, space?.totalBytes ?: -1)
+            ScanMemory.growthInsight(m.history(), point).also { m.record(point) }
+        }
+
         val report = ScanReport(
             tree = tree,
             startedAt = started,
@@ -143,7 +154,7 @@ class Steward(
             junk = hygiene.junk(junk + nearJunk),
             organize = moves,
             optimize = hygiene.optimize(optimize.items),
-            insights = optimize.insights + nearInsights + organize.insights.take(50),
+            insights = listOfNotNull(growth) + optimize.insights + nearInsights + organize.insights.take(50),
             sketches = sketches,
         )
         onProgress(ScanProgress(ScanPhase.DONE, 1, 1, "", filesSeen, bytesSeen))

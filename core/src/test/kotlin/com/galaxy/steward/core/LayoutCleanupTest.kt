@@ -438,6 +438,25 @@ class LayoutCleanupTest {
     }
 
     @Test
+    fun whatPackingSavesIsMeasuredNotGuessedFromNames() = runTest {
+        TestFs().use { fs ->
+            val longAgo = System.currentTimeMillis() - 200 * DAY_MS
+            // ".log" files that are encrypted (random bytes): the name says text, the bytes say nothing to gain.
+            repeat(30) { i -> fs.random("Documents/Vault/logs/session-$i.log", 600_000, i, mtime = longAgo) }
+            // ".dat" files that are plain text inside: the name says little, the bytes say a lot.
+            repeat(30) { i -> fs.text("Documents/GameSaves/slot-$i.dat", "score=$i;level=3;\n".repeat(40_000), mtime = longAgo) }
+            fs.ageDirectories()
+            val packs = scan(fs).optimize.filter { it.kind == OptimizeKind.PACK_COLD_FOLDER }
+            assertEquals(listOf(fs.path("Documents/GameSaves")), packs.map { it.path })
+            val item = packs.single()
+            assertTrue(item.detail, "measured" in item.detail)
+            // Measured: nearly all of it; a guess from ".dat" would have said 30%.
+            val total = File(fs.root, "Documents/GameSaves").listFiles()!!.sumOf { it.length() }
+            assertTrue("${item.savesBytes} of $total", item.savesBytes > total * 9 / 10)
+        }
+    }
+
+    @Test
     fun aFolderChangedAfterTheScanIsNotPacked() = runTest {
         TestFs().use { fs ->
             val longAgo = System.currentTimeMillis() - 200 * DAY_MS

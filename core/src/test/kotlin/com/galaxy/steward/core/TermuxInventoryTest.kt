@@ -185,6 +185,43 @@ class TermuxInventoryTest {
         assertNull(after.entry(File(home, "big/data.bin").path))
     }
 
+    /** A file of [bytes] that starts like a program: an ELF header for [machine], or a Windows "MZ" header when null. */
+    private fun program(f: File, bytes: Int, machine: Int?): File {
+        write(f, bytes, 9)
+        val head = if (machine == null) byteArrayOf(0x4d, 0x5a) else ByteArray(20).also { h ->
+            byteArrayOf(0x7f, 0x45, 0x4c, 0x46, 2, 1, 1).copyInto(h)
+            h[18] = (machine and 0xff).toByte()
+            h[19] = (machine shr 8).toByte()
+        }
+        java.io.RandomAccessFile(f, "rw").use { it.write(head) }
+        return f
+    }
+
+    @Test
+    fun programsForAnotherProcessorAreFoundUnlessSomethingCanRunThem() {
+        val x64 = program(File(prefix, "lib/code-server/extensions/copilot-linux-x64/copilot"), 3 * mib / 2, 0x3e)
+        val x86 = program(File(home, "old/tool32"), 3 * mib / 2, 0x03)
+        val exe = program(File(home, "games/setup.exe"), 2 * mib, null)
+        program(File(home, "bin/arm-tool"), 3 * mib / 2, 0xb7) // aarch64: runs here
+        program(File(home, "data/blob.bin"), 3 * mib / 2, null) // "MZ" by chance, not a Windows program
+        text(File(prefix, "var/lib/dpkg/info/code-server.list"), "${prefix.path}/lib/code-server\n${x64.path}\n")
+
+        val report = TermuxProtocol.parseAudit(run("audit", env = mapOf("STEWARD_FIXTURE_ARCH" to "aarch64")))
+        assertEquals(listOf(x64.path, exe.path, x86.path), report.foreign.map { it.path }.sortedBy { it.substringAfterLast('/') })
+        assertEquals(exe.path, report.foreign.first().path) // largest first
+        assertEquals("x86-64", report.foreign.single { it.path == x64.path }.cpu)
+        assertEquals("x86", report.foreign.single { it.path == x86.path }.cpu)
+        assertEquals(2L * mib, report.foreign.first().bytes)
+        // A package's own file stays locked; deleting a folder drops what was in it.
+        assertEquals("Installed by code-server: uninstall it under Packages", com.galaxy.steward.core.termux.TermuxLocks.reason(x64.path, report))
+        assertEquals(2, report.afterDeleting(mapOf(File(home, "games").path to 2L * mib)).foreign.size)
+
+        // On an x86 phone, or with box64 installed, they can run.
+        assertTrue(TermuxProtocol.parseAudit(run("audit", env = mapOf("STEWARD_FIXTURE_ARCH" to "x86_64"))).foreign.isEmpty())
+        tool("box64", "exit 0")
+        assertTrue(TermuxProtocol.parseAudit(run("audit", env = mapOf("STEWARD_FIXTURE_ARCH" to "aarch64"))).foreign.isEmpty())
+    }
+
     @Test
     fun keystoresAnAppShipsDontLockItsDecompiledFolderButYoursDo() {
         text(File(home, "mx_jadx/resources/AndroidManifest.xml"), "<manifest/>")

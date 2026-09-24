@@ -168,7 +168,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     var last = 0L
                     var lastPhase: ScanPhase? = null
                     var phaseStarted = started
-                    val result = Steward(rootPath, settings.value, app.environment, app.hashCacheFile).scan(space) { p ->
+                    val result = Steward(rootPath, settings.value, app.environment, app.hashCacheFile, app.memory).scan(space) { p ->
                         val now = SystemClock.uptimeMillis()
                         if (p.phase != lastPhase || now - last >= 120) {
                             if (p.phase != lastPhase) {
@@ -243,7 +243,10 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     suspend fun decisionCount(): Int = withContext(Dispatchers.IO) { app.decisions.load().size }
 
     fun forgetLearning() {
-        scope.launch(Dispatchers.IO) { app.decisions.clear() }
+        scope.launch(Dispatchers.IO) {
+            app.decisions.clear()
+            app.memory.forgetPlaces()
+        }
         _state.update { it.copy(learned = emptyMap()) }
     }
 

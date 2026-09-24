@@ -131,7 +131,8 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
             item {
                 SwitchRow(
                     "Learn from my folders",
-                    "Suggest homes from how your own folders are organised: something loose goes where things like it already are.",
+                    "Suggest homes from how your own folders are organised: something loose goes where things like it already are. " +
+                        "What you move yourself between scans counts extra, and stays where you put it.",
                     settings.learnFromFolders,
                 ) { v -> vm.updateSettings { it.copy(learnFromFolders = v) } }
             }
@@ -148,8 +149,9 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
                 val n = count ?: 0
                 ActionRow(
                     "Forget what it learned",
-                    if (n == 0) "Nothing learned yet. Everything stays on this phone." else "Learned from ${n.plural("choice")}. Everything stays on this phone.",
-                    enabled = n > 0,
+                    (if (n == 0) "No choices learned yet" else "Learned from ${n.plural("choice")}") +
+                        ", and where your files were at the last scan. Everything stays on this phone.",
+                    enabled = true,
                 ) {
                     vm.forgetLearning()
                     count = 0

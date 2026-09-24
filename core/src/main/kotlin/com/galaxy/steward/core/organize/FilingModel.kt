@@ -42,9 +42,22 @@ class FilingModel private constructor(
         }
     }
 
+    /**
+     * [counts] is what the folder holds, with what you moved there yourself counted [YOURS_WEIGHT] times ([weights]);
+     * [plain] counts everything once, for the phone-wide background.
+     */
     private class Home(val dir: DirNode, val rel: String, val prior: Double) {
         val counts = Counts()
+        val plain = Counts()
         val members = HashMap<String, Map<String, Double>>()
+        val weights = HashMap<String, Double>()
+
+        fun add(path: String, features: Map<String, Double>, weight: Double) {
+            plain.add(features)
+            counts.add(if (weight == 1.0) features else features.mapValues { it.value * weight })
+            members[path] = features
+            if (weight != 1.0) weights[path] = weight
+        }
     }
 
     val size: Int get() = homes.size
@@ -62,7 +75,7 @@ class FilingModel private constructor(
         if (features.isEmpty()) return null
         // A folder is never its own home, nor one inside itself; and what it holds is no evidence about where it goes.
         val inside = homes.filter { it.dir.path == self || it.dir.path.startsWith("$self/") }
-        val excluded = Counts().apply { inside.forEach { h -> add(h.counts.features); items += h.counts.items - 1 } }
+        val excluded = Counts().apply { inside.forEach { h -> add(h.plain.features); items += h.plain.items - 1 } }
         val out = homes.mapNotNull { h -> if (h in inside) null else evidence(h, features, self, excluded)?.let { h to it } }
             .sortedByDescending { it.second.first }
         val (home, best) = out.firstOrNull() ?: return null
@@ -77,7 +90,7 @@ class FilingModel private constructor(
         val parent = node.parent ?: return 0.0
         val home = homes.firstOrNull { it.dir === parent } ?: return 0.0
         val self = node.path
-        val excluded = Counts().apply { homes.filter { it.dir.path == self || it.dir.path.startsWith("$self/") }.forEach { add(it.counts.features) } }
+        val excluded = Counts().apply { homes.filter { it.dir.path == self || it.dir.path.startsWith("$self/") }.forEach { add(it.plain.features) } }
         return evidence(home, featuresOf(node), self, excluded)?.first ?: 0.0
     }
 
@@ -92,18 +105,20 @@ class FilingModel private constructor(
         self: String,
         excluded: Counts? = null,
     ): Triple<Double, List<String>, Int>? {
-        val own = self in h.members
-        val inModel = homes.any { self in it.members }
+        // What the item itself added to the counts: to its home's (more when you moved it there yourself), and to the phone's.
+        val own = h.members[self]
+        val ownWeight = h.weights[self] ?: 1.0
+        val counted = own ?: homes.firstNotNullOfOrNull { it.members[self] }
         val sum = features.values.sum()
-        val homeTotal = h.counts.total - if (own) sum else 0.0
-        val allTotal = background.total - (if (inModel) sum else 0.0) - (excluded?.total ?: 0.0)
+        val homeTotal = h.counts.total - (own?.values?.sum() ?: 0.0) * ownWeight
+        val allTotal = background.total - (counted?.values?.sum() ?: 0.0) - (excluded?.total ?: 0.0)
         var score = h.prior
         var matched = 0.0
         val reasons = ArrayList<Pair<String, Double>>()
         for ((f, w) in features) {
-            val inHome = (h.counts.features[f] ?: 0.0) - if (own) w else 0.0
+            val inHome = (h.counts.features[f] ?: 0.0) - (own?.get(f) ?: 0.0) * ownWeight
             if (inHome < 0.99) continue
-            val inAll = (background.features[f] ?: 0.0) - (if (inModel) w else 0.0) - (excluded?.features?.get(f) ?: 0.0)
+            val inAll = (background.features[f] ?: 0.0) - (counted?.get(f) ?: 0.0) - (excluded?.features?.get(f) ?: 0.0)
             val pAll = (inAll + ALPHA) / (allTotal + ALPHA * vocabulary)
             val pHome = (inHome + MU * pAll) / (homeTotal + MU)
             val lr = ln(pHome / pAll)
@@ -179,26 +194,33 @@ class FilingModel private constructor(
             return d.files.count { !it.hidden } + d.dirs.count { !it.hidden } >= 2
         }
 
-        fun train(tree: StorageTree, crowded: Int = 1000): FilingModel {
+        /**
+         * Something you moved into a folder yourself since the last scan counts this many times in that folder (once in
+         * the phone-wide background), so what it shares with the folder stands out more.
+         */
+        const val YOURS_WEIGHT = 3.0
+
+        /** [yours]: paths of files and folders you moved yourself since the last scan ([com.galaxy.steward.core.learn.ScanMemory]). */
+        fun train(tree: StorageTree, crowded: Int = 1000, yours: Set<String> = emptySet()): FilingModel {
             val homes = ArrayList<Home>()
             tree.root.walkDirs { d ->
                 if (!isHome(d)) return@walkDirs
                 val direct = d.files.size + d.dirs.size
                 val prior = -0.25 * maxOf(0, d.depth - 2) - if (direct > crowded) 2.0 else 0.0
                 val home = Home(d, d.relPath, prior)
-                for (f in d.files) if (!f.hidden) featuresOf(f).also { home.counts.add(it); home.members[f.path] = it }
-                for (c in d.dirs) if (!c.hidden) featuresOf(c).also { home.counts.add(it); home.members[c.path] = it }
+                for (f in d.files) if (!f.hidden) home.add(f.path, featuresOf(f), if (f.path in yours) YOURS_WEIGHT else 1.0)
+                for (c in d.dirs) if (!c.hidden) home.add(c.path, featuresOf(c), if (c.path in yours) YOURS_WEIGHT else 1.0)
                 homes += home
             }
             val background = Counts()
             val vocabulary = HashSet<String>()
             for (h in homes) {
-                for ((k, w) in h.counts.features) {
+                for ((k, w) in h.plain.features) {
                     background.features[k] = (background.features[k] ?: 0.0) + w
                     vocabulary += k
                 }
-                background.total += h.counts.total
-                background.items += h.counts.items
+                background.total += h.plain.total
+                background.items += h.plain.items
             }
             return FilingModel(homes, background, maxOf(1, vocabulary.size))
         }

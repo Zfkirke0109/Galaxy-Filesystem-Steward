@@ -10,6 +10,10 @@ import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.core.exec.JournalWriter
 import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.learn.DecisionLog
+import com.galaxy.steward.core.learn.LearnedChoice
+import com.galaxy.steward.core.learn.PreferenceFeatures
+import com.galaxy.steward.core.learn.PreferenceModel
 import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxException
 import com.galaxy.steward.core.termux.TermuxItem
@@ -60,12 +64,16 @@ data class TermuxState(
     val reposLoading: Boolean = false,
     val reposError: String? = null,
     val repoSelected: Set<String> = emptySet(),
+    /** Clean-up items whose starting tick comes from your past choices, by spec. */
+    val learned: Map<String, LearnedChoice> = emptyMap(),
 )
 
 class TermuxController(
     private val context: Context,
     private val journals: JournalStore,
     private val scope: CoroutineScope,
+    /** Your past clean-up choices, when Settings → Learn from my choices is on (null when it is off). */
+    private val decisions: () -> DecisionLog?,
 ) {
     val bridge = TermuxBridge(context)
     private val _state = MutableStateFlow(TermuxState(status = bridge.status()))
@@ -83,8 +91,18 @@ class TermuxController(
                 val output = run("audit", emptyList(), AUDIT_TIMEOUT_MS)
                 val report = withContext(Dispatchers.Default) { TermuxProtocol.parseAudit(output) }
                 StewardLog.i(RunLog.termux(report, SystemClock.uptimeMillis() - started))
+                val learned = withContext(Dispatchers.IO) { learnedChoices(report) }
+                if (learned.isNotEmpty()) {
+                    StewardLog.i("Termux, learned from your choices: ${learned.count { it.value.select }} ticked, ${learned.count { !it.value.select }} unticked")
+                }
+                val defaults = report.items.filter { i -> i.defaultSelected }.map { i -> i.spec }.toSet()
                 _state.update {
-                    it.copy(auditing = false, report = report, selected = report.items.filter { i -> i.defaultSelected }.map { i -> i.spec }.toSet())
+                    it.copy(
+                        auditing = false,
+                        report = report,
+                        selected = defaults + learned.filterValues { c -> c.select }.keys - learned.filterValues { c -> !c.select }.keys,
+                        learned = learned,
+                    )
                 }
             } catch (e: CancellationException) {
                 _state.update { it.copy(auditing = false) }
@@ -107,12 +125,33 @@ class TermuxController(
         it.copy(selected = if (selected) it.selected + specs else it.selected - specs.toSet())
     }
 
+    /** Starting ticks your past clean-up choices point to, where enough of them agree. */
+    private fun learnedChoices(report: TermuxReport): Map<String, LearnedChoice> {
+        val log = decisions() ?: return emptyMap()
+        val model = PreferenceModel.train(log.load())
+        if (model.decisions == 0) return emptyMap()
+        return report.items.mapNotNull { item ->
+            model.choiceFor(PreferenceFeatures.ofTermux(item, report.home, report.prefix), item.defaultSelected)?.let { item.spec to it }
+        }.toMap()
+    }
+
     /** Cleans [items] inside Termux and journals what was freed (Termux clean-ups are permanent). */
     suspend fun clean(items: List<TermuxItem>): Pair<String, TermuxCleanSummary> {
+        val offered = _state.value.report
         val output = run("clean", items.map { it.spec }, CLEAN_TIMEOUT_MS)
         val summary = TermuxProtocol.parseClean(output)
         val runId = journal("Termux clean-up", summary)
         val done = items.map { it.spec }.toSet()
+        // What was offered and what you picked, for learning your defaults.
+        if (offered != null) {
+            withContext(Dispatchers.IO) {
+                decisions()?.recordFeatures(
+                    runId,
+                    offered.items.map { PreferenceFeatures.ofTermux(it, offered.home, offered.prefix) to (it.spec in done) },
+                    System.currentTimeMillis(),
+                )
+            }
+        }
         _state.update { it.copy(report = it.report?.without(done), selected = it.selected - done) }
         return runId to summary
     }
