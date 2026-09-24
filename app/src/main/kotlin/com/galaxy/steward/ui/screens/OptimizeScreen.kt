@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.UnfoldLess
 import androidx.compose.material3.MaterialTheme
@@ -72,7 +73,11 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                             subtitle = "${item.kind.title}: ${item.detail}",
                             leading = {
                                 IconBadge(
-                                    if (item.kind == OptimizeKind.FLATTEN_WRAPPER) Icons.Rounded.UnfoldLess else Icons.Rounded.CalendarMonth,
+                                    when (item.kind) {
+                                        OptimizeKind.BUCKET_FLAT_DIR -> Icons.Rounded.CalendarMonth
+                                        OptimizeKind.LIFT_BUILD_OUTPUTS -> Icons.Rounded.Android
+                                        OptimizeKind.FLATTEN_WRAPPER, OptimizeKind.COLLAPSE_CHAIN -> Icons.Rounded.UnfoldLess
+                                    },
                                     MaterialTheme.colorScheme.primary,
                                     size = 32,
                                 )
@@ -101,6 +106,10 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
             lines = listOfNotNull(
                 list.count { it.kind == OptimizeKind.FLATTEN_WRAPPER }.takeIf { it > 0 }?.let { "${it.plural("redundant nested folder", "redundant nested folders")} collapsed" },
                 list.count { it.kind == OptimizeKind.BUCKET_FLAT_DIR }.takeIf { it > 0 }?.let { "${it.plural("large folder", "large folders")} sorted into date buckets" },
+                list.count { it.kind == OptimizeKind.LIFT_BUILD_OUTPUTS }.takeIf { it > 0 }?.let {
+                    "Installers in ${it.plural("downloaded build", "downloaded builds")} moved up to the top folder, Gradle's metadata quarantined"
+                },
+                list.count { it.kind == OptimizeKind.COLLAPSE_CHAIN }.takeIf { it > 0 }?.let { "${it.plural("chain", "chains")} of empty folders collapsed" },
             ),
             confirmLabel = "Apply",
             onConfirm = {

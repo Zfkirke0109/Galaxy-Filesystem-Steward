@@ -11,10 +11,12 @@ import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
+import com.galaxy.steward.core.organize.BuiltInRules
 import com.galaxy.steward.core.plan.Insight
 import com.galaxy.steward.core.plan.MoveDirOp
 import com.galaxy.steward.core.plan.MoveFileOp
 import com.galaxy.steward.core.plan.Operation
+import com.galaxy.steward.core.plan.QuarantineOp
 import com.galaxy.steward.core.plan.OptimizeItem
 import com.galaxy.steward.core.plan.OptimizeKind
 import com.galaxy.steward.core.plan.RemoveEmptyDirOp
@@ -45,9 +47,18 @@ class OptimizePlanner(
         var deepest: FileNode? = null
         var deepCount = 0
 
+        // Downloaded build outputs first: an empty-chain collapse inside one would fight over the same folders.
+        val artifacts = ArrayList<OptimizeItem>()
+        tree.root.walkDirs { dir ->
+            if (dir.zone == Zone.USER_MANAGED && dir.name == "outputs" && dir.parent?.name == "build") buriedBuildOutputs(dir)?.let(artifacts::add)
+        }
+        items += artifacts
+        val artifactRoots = artifacts.map { it.path + "/" }
+
         tree.root.walkDirs { dir ->
             if (!dir.zone.durable) return@walkDirs
             flattenCandidate(dir)?.let(items::add)
+            if (artifactRoots.none { (dir.path + "/").startsWith(it) || it.startsWith(dir.path + "/") }) emptyChain(dir)?.let(items::add)
             if (dir.files.size > settings.flatDirThreshold) {
                 val bucket = bucketCandidate(dir)
                 if (bucket != null) items.add(bucket) else if (!dir.hidden) flatReportOnly.add(dir)
@@ -151,6 +162,111 @@ class OptimizePlanner(
             fileCount = inner.totalFiles,
             defaultSelected = true,
             operations = ops,
+        )
+    }
+
+    private fun isHome(dir: DirNode) = BuiltInRules.isHome(dir.relPath, environment.deviceLabel, settings.customRules)
+
+    // ------------------------------------------------------------------ buried build outputs
+
+    private val installerExt = setOf("apk", "aab", "apks", "xapk", "apkm")
+
+    /** Files Gradle writes next to its outputs to describe them; they mean nothing once the installers move out. */
+    private fun isOutputMetadata(f: FileNode) = f.name == "output-metadata.json" || f.name == "output.json" || f.extension == "idsig"
+
+    /**
+     * A downloaded CI artifact keeps Gradle's layout, `Name/app/build/outputs/apk/<flavor>/<type>/Name.apk`: eight folders
+     * for one or two installers. The installers move up to the top folder of the download, Gradle's metadata files go to
+     * the quarantine, and the emptied folders are removed. [outputs] is a `build/outputs` folder outside any project.
+     */
+    private fun buriedBuildOutputs(outputs: DirNode): OptimizeItem? {
+        val build = outputs.parent ?: return null
+        // The top of the download: climb while each parent holds nothing but this one folder.
+        var top = build
+        while (true) {
+            val up = top.parent ?: break
+            if (up.depth < 2 || up.files.isNotEmpty() || up.dirs.size != 1 || isHome(up)) break
+            top = up
+        }
+        val root = if (top === build) build.parent ?: return null else top
+        if (root.depth < 2 || root.zone != Zone.USER_MANAGED || root.hidden || isHome(root)) return null
+        if (build.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) || root.insideFlagged(NodeFlags.PROJECT_ROOT or NodeFlags.CODE_TREE) || insideCodeTree(root)) return null
+        if (root.hasFlag(NodeFlags.PROJECT_ROOT) || root.subtreeHas(NodeFlags.PROJECT_ROOT or NodeFlags.GIT_DIR)) return null
+
+        val files = ArrayList<FileNode>()
+        outputs.walkFiles { files += it }
+        if (files.any { it.kind == FileKind.CODE || it.mtime > recentCutoff || it.hidden }) return null
+        val installers = files.filter { it.extension in installerExt }
+        if (installers.isEmpty()) return null
+
+        // Same-named installers (app-debug.apk in two flavors) are told apart by the folders they came from.
+        val taken = root.files.mapTo(HashSet()) { it.name.lowercase() } + root.dirs.map { it.name.lowercase() }
+        val clash = installers.groupingBy { it.name.lowercase() }.eachCount().filterValues { it > 1 }.keys
+        val ops = ArrayList<Operation>()
+        val names = HashSet<String>()
+        for (f in installers) {
+            val name = if (f.name.lowercase() in clash) {
+                f.dir.relPath.removePrefix(outputs.relPath + "/").split('/').drop(1).plus(f.name).joinToString("-")
+            } else {
+                f.name
+            }
+            if (name.lowercase() in taken || !names.add(name.lowercase())) continue
+            ops += MoveFileOp(f.path, "${root.path}/$name", f.size, f.mtime)
+        }
+        if (ops.isEmpty()) return null
+        files.filter(::isOutputMetadata).forEach { ops += QuarantineOp(it.path, false, it.size, it.mtime) }
+        val moved = ops.count { it is MoveFileOp }
+        return OptimizeItem(
+            id = "lift:${root.path.hashCode().toString(16)}:${root.path.length}",
+            kind = OptimizeKind.LIFT_BUILD_OUTPUTS,
+            path = root.path,
+            title = root.relPath,
+            detail = "Move $moved installer${if (moved == 1) "" else "s"} up from ${outputs.relPath.removePrefix(root.relPath + "/")} " +
+                "and remove the emptied build folders.",
+            fileCount = moved,
+            defaultSelected = true,
+            operations = ops,
+        )
+    }
+
+    // ------------------------------------------------------------------ chains of empty folders
+
+    /**
+     * `Folder/a/b/c/Content`: three or more folders that hold nothing but the next one, typical of archives unpacked
+     * into archives. The content moves up to `Folder/Content` and the chain goes. People do build single-branch trees on
+     * purpose (`Travel/2024/Japan/Tokyo`), so this is only suggested, never selected by default.
+     */
+    private fun emptyChain(dir: DirNode): OptimizeItem? {
+        if (dir.depth < 2 || dir.zone != Zone.USER_MANAGED || dir.hidden || dir.files.isNotEmpty() || dir.dirs.size != 1) return null
+        if (isHome(dir) || dir.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) || insideCodeTree(dir) || dir.insideFlagged(NodeFlags.CODE_TREE)) return null
+        // Only the top of a chain: a folder that is itself a link in one belongs to its parent's suggestion.
+        dir.parent?.let { p -> if (p.depth >= 2 && p.files.isEmpty() && p.dirs.size == 1 && !isHome(p) && p.zone == Zone.USER_MANAGED) return null }
+        val links = ArrayList<DirNode>()
+        var end = dir.dirs[0]
+        while (end.files.isEmpty() && end.dirs.size == 1) {
+            links += end
+            end = end.dirs[0]
+        }
+        if (links.size < 3 || (end.files.isEmpty() && end.dirs.isEmpty()) || end.hidden || links.any { it.hidden }) return null
+        if (links.any { it.name.equals(end.name, ignoreCase = true) }) return null
+        var newest = end.mtime
+        var hasCode = false
+        end.walkFiles {
+            if (it.mtime > newest) newest = it.mtime
+            if (it.kind == FileKind.CODE) hasCode = true
+        }
+        if (newest > recentCutoff || hasCode) return null
+        val chain = (links + end).joinToString("/") { it.name }
+        return OptimizeItem(
+            id = "chain:${dir.path.hashCode().toString(16)}:${dir.path.length}",
+            kind = OptimizeKind.COLLAPSE_CHAIN,
+            path = dir.path,
+            title = "${dir.relPath}/$chain",
+            detail = "Move ${end.name} up to ${dir.name} and remove the ${links.size} empty folders in between.",
+            fileCount = end.totalFiles,
+            defaultSelected = false,
+            operations = listOf(MoveDirOp(end.path, "${dir.path}/${end.name}", allowRename = true)) +
+                links.reversed().map { RemoveEmptyDirOp(it.path) },
         )
     }
 

@@ -179,6 +179,26 @@ object BuiltInRules {
 
     fun categoryFolderDestination(name: String): String? = categoryFolders[Text.normalize(name).trim()]
 
+    /** Homes [extensionDestination] and the media rules file into. */
+    private val FIXED_HOMES = listOf(
+        "Documents/Software/APKs", "Documents/Software/Installers", "Documents/Development/Build-Artifacts", "Documents/Archives",
+        "Documents/Development/Scripts", "Documents/Reference", "Documents/Spreadsheets", "Documents/Presentations", "Documents/Data",
+        "Documents/Books", "Documents/Personal/Contacts-Calendar", "Documents/Fonts", "Documents/Design", "Documents/3D-Models",
+        "Movies/Subtitles", "Documents/Torrents", "Documents/Inbox-Review", "Pictures/Screenshots", "Pictures/Imported",
+        "Pictures/Wallpapers", "Movies/Imported", "Movies/Screen-Recordings", "Music/Imported", "Recordings/Imported",
+    )
+
+    /**
+     * True for a folder the organizer files into ([relPath] relative to the storage root), or a parent of one
+     * (`Documents/Software` holds `Documents/Software/APKs`). Layout clean-ups never flatten or dissolve these.
+     */
+    fun isHome(relPath: String, deviceLabel: String, extra: List<KeywordRule> = emptyList()): Boolean {
+        val p = relPath.trim('/')
+        if (p.isEmpty()) return true
+        val homes = FIXED_HOMES + categoryFolders.values + (extra + rules).map { it.resolvedDestination(deviceLabel) }
+        return homes.any { it == p || it.startsWith("$p/") }
+    }
+
     /** Extension-based homes used when no keyword rule matched. */
     fun extensionDestination(ext: String): Pair<String, String>? = when (ext) {
         in FileKind.APK_EXT -> "Documents/Software/APKs" to "App installer"

@@ -177,6 +177,7 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
 
             item { SectionHeader("Diagnostics") }
             item { LogcatExportRow(vm.logcat, wholeDevice = shizuku == ShizukuStatus.READY) }
+            item { StorageReportRow(vm, state) }
 
             item { SectionHeader("About") }
             item {
@@ -252,6 +253,45 @@ private fun LogcatExportRow(exporter: LogcatExporter, wholeDevice: Boolean) {
             style = small,
             color = muted,
         )
+    }
+}
+
+/** Saves a map of the last scan (and Termux audit) to Documents/Galaxy Steward LogCat and offers to share it. */
+@Composable
+private fun StorageReportRow(vm: StewardViewModel, state: UiState) {
+    val report by vm.storageReport.state.collectAsState()
+    val termux by vm.termux.state.collectAsState()
+    val context = LocalContext.current
+    val small = MaterialTheme.typography.bodySmall
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Storage report", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (state.report == null) {
+                        "Run a scan first. The report maps your folders by size and says why each one stays where it is."
+                    } else {
+                        "Maps your folders by size, says why each one stays where it is, and adds the last Termux audit" +
+                            (if (termux.report == null) " (none yet)" else "") + "."
+                    },
+                    style = small,
+                    color = muted,
+                )
+            }
+            FilledTonalButton(
+                onClick = { vm.storageReport.export(state.report, termux.report) },
+                enabled = !report.running && state.report != null,
+            ) { Text(if (report.running) "Saving…" else "Save") }
+        }
+        report.saved?.let { file ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Saved ${file.name} (${file.length().humanBytes()})", Modifier.weight(1f), style = small)
+                TextButton(onClick = { context.startActivity(vm.storageReport.shareIntent(file)) }) { Text("Share") }
+            }
+        }
+        report.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error) }
+        Text("It names your folders, but nothing inside your files. Share it only with people you trust.", style = small, color = muted)
     }
 }
 

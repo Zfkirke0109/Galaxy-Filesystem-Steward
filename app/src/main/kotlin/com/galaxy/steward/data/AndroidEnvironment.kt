@@ -35,6 +35,16 @@ class AndroidEnvironment(context: Context) : DeviceEnvironment {
      */
     private val apkCache = ConcurrentHashMap<String, Pair<String, ApkInfo?>>()
 
+    private companion object {
+        /**
+         * Labels of every installed app, kept for the process: loading them reads each app's resources (a second or two
+         * for hundreds of apps), and they rarely change between scans.
+         */
+        @Volatile
+        var appLabels: Pair<Long, Map<String, String>>? = null
+        const val LABELS_TTL_MS = 6 * 60 * 60 * 1000L
+    }
+
     override fun apkInfo(path: String): ApkInfo? {
         val file = File(path)
         val stamp = "${file.length()}:${file.lastModified()}"
@@ -43,6 +53,20 @@ class AndroidEnvironment(context: Context) : DeviceEnvironment {
         if (apkCache.size > 2_000) apkCache.clear()
         apkCache[path] = stamp to info
         return info
+    }
+
+    override fun installedApps(): Map<String, String> {
+        appLabels?.takeIf { System.currentTimeMillis() - it.first < LABELS_TTL_MS }?.let { return it.second }
+        val labels = try {
+            @Suppress("DEPRECATION")
+            pm.getInstalledApplications(0).associate { info ->
+                info.packageName to (runCatching { info.loadLabel(pm).toString() }.getOrNull() ?: info.packageName)
+            }
+        } catch (_: RuntimeException) {
+            return emptyMap()
+        }
+        appLabels = System.currentTimeMillis() to labels
+        return labels
     }
 
     @Suppress("DEPRECATION")

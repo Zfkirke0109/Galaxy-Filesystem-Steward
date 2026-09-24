@@ -32,8 +32,20 @@ data class DeleteDuplicateOp(
     val sha256: String,
 ) : Operation
 
-/** Move a file or folder into the steward quarantine (reversible until the quarantine is emptied). */
-data class QuarantineOp(val path: String, val isDirectory: Boolean, val size: Long, val mtime: Long) : Operation
+/**
+ * Move a file or folder into the steward quarantine (reversible until the quarantine is emptied). With [extracted],
+ * the file is a zip that is only quarantined if its unpacked copy still matches it, entry by entry.
+ */
+data class QuarantineOp(
+    val path: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val mtime: Long,
+    val extracted: ExtractedCopy? = null,
+) : Operation
+
+/** Where a zip's files are unpacked: [folder] holds each entry's name, less [stripPrefix]. */
+data class ExtractedCopy(val folder: String, val stripPrefix: String)
 
 /** Remove a directory only if it is still empty at execution time. */
 data class RemoveEmptyDirOp(val path: String) : Operation
@@ -177,6 +189,12 @@ enum class JunkCategory(val title: String, val description: String, val defaultS
     OLD_LOGS("Old system logs", "Dumps in /log that Samsung and other OEMs leave behind.", true),
     EMPTY_FOLDERS("Empty folders", "Folders with nothing inside - often left by uninstalled apps.", true),
     INSTALLED_APKS("Installed APKs", "Installer files for apps that are already installed at the same or newer version.", false),
+    EXTRACTED_ARCHIVES(
+        "Zips already extracted",
+        "Zip files whose every file is already unpacked in the folder next to them. Each unpacked file is checked against " +
+            "the CRC-32 stored in the zip right before the zip moves to the quarantine. The folder stays.",
+        true,
+    ),
     THUMBNAIL_CACHES("Thumbnail caches", "Regenerable .thumbnails caches. Galleries rebuild them on demand.", false),
     TRASHED_MEDIA("Gallery trash", "Items already in the system trash (.trashed-*). Android deletes them after 30 days.", false),
     ZERO_BYTE_FILES("Empty files", "Zero-byte files. Occasionally used as markers, so review first.", false),
@@ -193,6 +211,8 @@ data class JunkItem(
     val note: String,
     /** For empty-folder trees: every directory to remove, deepest first (including [path]). */
     val emptyDirs: List<String> = emptyList(),
+    /** For an extracted zip: where its files are unpacked. */
+    val extracted: ExtractedCopy? = null,
 ) : PlanItem {
     override val title: String get() = path.substringAfterLast('/')
     override val reclaimBytes: Long get() = bytes
@@ -201,7 +221,7 @@ data class JunkItem(
         get() = if (category == JunkCategory.EMPTY_FOLDERS) {
             emptyDirs.ifEmpty { listOf(path) }.map { RemoveEmptyDirOp(it) }
         } else {
-            listOf(QuarantineOp(path, isDirectory, bytes, mtime))
+            listOf(QuarantineOp(path, isDirectory, bytes, mtime, extracted))
         }
 }
 
@@ -225,6 +245,8 @@ data class OrganizeMove(
 enum class OptimizeKind(val title: String) {
     FLATTEN_WRAPPER("Redundant nested folder"),
     BUCKET_FLAT_DIR("Oversized flat folder"),
+    LIFT_BUILD_OUTPUTS("Installers buried in build folders"),
+    COLLAPSE_CHAIN("Chain of empty folders"),
 }
 
 data class OptimizeItem(

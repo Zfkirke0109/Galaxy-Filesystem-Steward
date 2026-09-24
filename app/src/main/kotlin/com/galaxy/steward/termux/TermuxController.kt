@@ -8,7 +8,6 @@ import com.galaxy.steward.core.exec.JournalAction
 import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.core.exec.JournalWriter
-import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxException
 import com.galaxy.steward.core.termux.TermuxItem
@@ -59,10 +58,7 @@ class TermuxController(
             try {
                 val output = run("audit", emptyList(), AUDIT_TIMEOUT_MS)
                 val report = withContext(Dispatchers.Default) { TermuxProtocol.parseAudit(output) }
-                StewardLog.i(
-                    "Termux audit done in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: Termux uses ${report.totalBytes.humanBytes()}, " +
-                        "${report.items.size} cleanable items (${report.items.sumOf { it.bytes }.humanBytes()}), ${report.unsafe.size} unsafe paths skipped",
-                )
+                StewardLog.i(RunLog.termux(report, SystemClock.uptimeMillis() - started))
                 _state.update {
                     it.copy(auditing = false, report = report, selected = report.items.filter { i -> i.defaultSelected }.map { i -> i.spec }.toSet())
                 }

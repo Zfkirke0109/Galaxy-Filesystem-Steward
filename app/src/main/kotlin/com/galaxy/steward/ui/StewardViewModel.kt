@@ -30,6 +30,7 @@ import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.work.AuditWorker
@@ -97,6 +98,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     val apps: AppsController = app.apps
     val termux: TermuxController = app.termux
     val logcat: LogcatExporter = app.logcat
+    val storageReport: StorageReportExporter = app.storageReport
 
     private val session = app.session
     private val scope = app.appScope

@@ -120,6 +120,11 @@ object SafetyPolicy {
 
     fun isGenericWrapperName(name: String): Boolean = name.trim().lowercase() in GENERIC_WRAPPERS
 
+    private val PACKAGE_LIKE = Regex("^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$")
+
+    /** `com.example.app`: a folder named after an app, which the leftover-folder check looks after. */
+    fun isPackageLikeName(name: String): Boolean = PACKAGE_LIKE.matches(name)
+
     /** Wrappers that are redundant *inside Documents* (Documents/Documents, Documents/Download, ...). */
     fun isDocumentsWrapperName(name: String): Boolean =
         name.trim().lowercase() in setOf("documents", "document", "download", "downloads", "organized", "new folder", "untitled folder")

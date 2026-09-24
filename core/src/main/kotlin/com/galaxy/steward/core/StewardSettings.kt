@@ -47,6 +47,9 @@ interface DeviceEnvironment {
 
     /** Package metadata parsed from an APK file, or null when it cannot be parsed. */
     fun apkInfo(path: String): ApkInfo? = null
+
+    /** Every installed app, package name to label, for telling an app's own folder from yours. Empty when unknown. */
+    fun installedApps(): Map<String, String> = emptyMap()
 }
 
 data class ApkInfo(val packageName: String, val versionCode: Long, val versionName: String?)

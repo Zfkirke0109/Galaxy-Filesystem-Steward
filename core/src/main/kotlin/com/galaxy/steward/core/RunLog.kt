@@ -3,6 +3,7 @@ package com.galaxy.steward.core
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.RollbackSummary
 import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.termux.TermuxReport
 import java.util.Locale
 
 /**
@@ -37,6 +38,30 @@ object RunLog {
             "deduplicated ${count(s.deduped)}, quarantined ${count(s.quarantined)} (${s.bytesQuarantined.humanBytes()}), " +
             "cleared ${count(s.cleared)}, removed ${count(s.removedDirs)} empty folders, freed ${s.bytesFreed.humanBytes()}; " +
             "skipped ${count(s.skipped)}, failed ${count(s.failed)}"
+
+    /**
+     * Where Termux's space goes (home, packages, proot distributions) and what the audit can clean, by group. Folder
+     * sizes only: the report itself, with paths, stays on the phone.
+     */
+    fun termux(report: TermuxReport, millis: Long): String = buildString {
+        append("Termux audit done in ").append(seconds(millis)).append(": Termux uses ").append(report.totalBytes.humanBytes())
+        val home = report.usage.firstOrNull { it.path == report.home }?.bytes
+        val prefix = report.usage.firstOrNull { it.path == report.prefix }?.bytes
+        val distros = report.rootfs.sumOf { it.bytes }
+        val distrosInPrefix = report.rootfs.filter { it.path.startsWith(report.prefix + "/") }.sumOf { it.bytes }
+        val parts = buildList {
+            home?.let { add("home ${it.humanBytes()}") }
+            prefix?.let { add("packages ${(it - distrosInPrefix).coerceAtLeast(0).humanBytes()}") }
+            if (report.rootfs.isNotEmpty()) add("${report.rootfs.size} proot ${if (report.rootfs.size == 1) "distro" else "distros"} ${distros.humanBytes()}")
+        }
+        if (parts.isNotEmpty()) append(" (").append(parts.joinToString(", ")).append(')')
+        append("; ").append(count(report.items.size)).append(" cleanable items, ").append(report.reclaimableBytes.humanBytes())
+        val groups = report.items.groupBy { it.group }.toSortedMap()
+        if (groups.isNotEmpty()) {
+            append(" (").append(groups.entries.joinToString(", ") { (g, items) -> "${g.name.lowercase()} ${items.sumOf { it.bytes }.humanBytes()}" }).append(')')
+        }
+        append(", ").append(count(report.unsafe.size)).append(" unsafe paths skipped")
+    }
 
     fun rolledBack(title: String, s: RollbackSummary, millis: Long): String =
         "undo \"$title\" done in ${seconds(millis)}: restored ${count(s.restored)}, skipped ${count(s.skipped)}, failed ${count(s.failed)}"

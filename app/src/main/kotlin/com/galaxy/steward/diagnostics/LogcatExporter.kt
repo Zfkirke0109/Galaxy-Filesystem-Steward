@@ -1,13 +1,11 @@
 package com.galaxy.steward.diagnostics
 
-import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
-import androidx.core.content.FileProvider
 import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.apps.AppStorage
 import com.galaxy.steward.core.RunLog
@@ -84,16 +82,7 @@ class LogcatExporter(
     }
 
     /** A share sheet for [file], through this app's FileProvider (which only serves the logcat folder). */
-    fun shareIntent(file: File): Intent {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-        val send = Intent(Intent.ACTION_SEND)
-            .setType("text/plain")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .putExtra(Intent.EXTRA_SUBJECT, file.name)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        send.clipData = ClipData.newRawUri(file.name, uri)
-        return Intent.createChooser(send, "Share logcat")
-    }
+    fun shareIntent(file: File): Intent = shareTextFile(context, file, "Share logcat")
 
     private suspend fun write(): LogcatFile {
         val folder = File(StorageAccess.rootPath, SafetyPolicy.LOGCAT_DIR)

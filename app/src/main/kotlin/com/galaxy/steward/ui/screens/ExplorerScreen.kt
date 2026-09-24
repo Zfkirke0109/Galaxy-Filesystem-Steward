@@ -45,6 +45,9 @@ import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.NodeFlags
+import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.report.isEmptyStandardFolder
+import com.galaxy.steward.core.report.stewardNote
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.UiState
 import com.galaxy.steward.ui.components.EmptyState
@@ -116,7 +119,9 @@ private fun Breadcrumbs(relPath: String, onNavigate: (String) -> Unit) {
 
 @Composable
 private fun FolderList(dir: DirNode, onOpen: (DirNode) -> Unit) {
-    val dirs = remember(dir) { dir.dirs.sortedByDescending { it.totalBytes } }
+    // Empty Android folders (Alarms, Podcasts...) come back whenever they are removed: one line instead of a row each.
+    val emptyStandard = remember(dir) { dir.dirs.filter { it.isEmptyStandardFolder() }.map { it.name }.sorted() }
+    val dirs = remember(dir) { dir.dirs.filterNot { it.isEmptyStandardFolder() }.sortedByDescending { it.totalBytes } }
     val files = remember(dir) { dir.files.sortedByDescending { it.size } }
     val total = dir.totalBytes.coerceAtLeast(1)
     LazyColumn(contentPadding = PaddingValues(vertical = 6.dp)) {
@@ -156,8 +161,22 @@ private fun FolderList(dir: DirNode, onOpen: (DirNode) -> Unit) {
                     }
                     Spacer(Modifier.height(4.dp))
                     UsageBar(child.totalBytes.toFloat() / total, height = 5)
-                    Text("${child.totalFiles} files", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "${child.totalFiles.plural("file")}" + (child.stewardNote()?.let { " · $it" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
+            }
+        }
+        if (emptyStandard.isNotEmpty()) {
+            item {
+                Text(
+                    "Also here, empty: ${emptyStandard.joinToString(", ")}. Android creates these folders and brings them back, so they stay.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
             }
         }
         items(files.take(300), key = { "f:" + it.name }) { f ->

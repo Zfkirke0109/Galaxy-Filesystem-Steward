@@ -3,6 +3,7 @@ package com.galaxy.steward.core.exec
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.hash.FileIdentity
 import com.galaxy.steward.core.hash.Hashing
+import com.galaxy.steward.core.junk.ExtractedArchives
 import com.galaxy.steward.core.plan.DeleteDuplicateOp
 import com.galaxy.steward.core.plan.MoveDirOp
 import com.galaxy.steward.core.plan.MoveFileOp
@@ -372,6 +373,9 @@ class ActionExecutor(
             val id = FileIdentity.of(op.path) ?: return skip("No longer a regular file")
             if (id.size != op.size || id.mtime != op.mtime) return skip("Changed since the scan")
             mtime = id.mtime
+        }
+        if (op.extracted != null && !ExtractedArchives.verify(op.path, op.extracted)) {
+            return skip("The unpacked copy no longer matches the zip")
         }
         val q = quarantineTarget(op.path) ?: return fail("Quarantine unavailable")
         Files.move(p, q)

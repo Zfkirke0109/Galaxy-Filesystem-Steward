@@ -323,6 +323,18 @@ class AppFlowTest {
         assertEquals("${context.packageName}.files", uri.authority)
         context.contentResolver.openInputStream(uri)!!.use { assertEquals(log, it.readBytes().decodeToString()) }
 
+        // The storage report maps the last scan's folders and says how each is treated; it is saved beside the logcat.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Storage report"))
+        compose.onNodeWithText("Save").performClick()
+        awaitState("storage report", vm) { vm.storageReport.state.value.let { !it.running && (it.saved != null || it.error != null) } }
+        val storageReport = vm.storageReport.state.value.saved ?: error("storage report failed: ${vm.storageReport.state.value.error}")
+        assertEquals(File(root, SafetyPolicy.LOGCAT_DIR).path, storageReport.parent)
+        assertTrue(storageReport.name.matches(Regex("""storage-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.txt""")))
+        val reportText = storageReport.readText()
+        assertTrue(reportText, reportText.lines().first().endsWith(" storage report"))
+        assertTrue(reportText, reportText.lines().any { it.startsWith("Documents/  ") })
+        assertTrue(reportText, reportText.contains("WHAT THE LAST SCAN SUGGESTS"))
+
         // Apps tab: app sizes are read as soon as it opens.
         compose.onNodeWithText("Apps").performClick()
         // The tab reads app sizes when it resumes; Robolectric leaves the navigation entry short of RESUMED, so start

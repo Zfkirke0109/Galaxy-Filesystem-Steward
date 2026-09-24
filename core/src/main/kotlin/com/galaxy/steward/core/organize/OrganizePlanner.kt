@@ -1,5 +1,6 @@
 package com.galaxy.steward.core.organize
 
+import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
@@ -53,6 +54,7 @@ class OrganizePlanner(
             for (f in documents.files) planFile(f)
             for (d in documents.dirs) planDocumentsChild(d)
         }
+        planTopLevel(tree.root)
         return OrganizePlan(moves.sortedWith(compareBy({ it.destinationFolder }, { it.source })), insights.toList())
     }
 
@@ -121,6 +123,55 @@ class OrganizePlanner(
         if (file.mtime > recentCutoff) return false
         if (file.zone != Zone.USER_MANAGED) return false
         return true
+    }
+
+    // ------------------------------------------------------------------ top-level folders
+
+    private val appFolders by lazy { AppFolderIndex(environment.installedApps()) }
+
+    /**
+     * Folders at the top of shared storage besides Android's own. Those of installed apps stay: apps write to them by
+     * path. The rest (your own folders, unpacked downloads, leftovers of removed apps) get the home their name or
+     * content points to. They are only suggested: something may still write to them, and they are yours to decide on.
+     */
+    private fun planTopLevel(root: DirNode) {
+        val owned = ArrayList<String>()
+        for (d in root.dirs) {
+            if (d.zone != Zone.OTHER_SHARED || d.hidden || d.totalFiles == 0 || SafetyPolicy.isPackageLikeName(d.name)) continue
+            // Samsung writes its dumpstate logs to /log; the clutter check looks after old ones.
+            if (SafetyPolicy.isKeptTopDir(d.name)) continue
+            val owner = appFolders.owner(d.name)
+            if (owner != null) {
+                owned += if (owner.equals(d.name, ignoreCase = true)) d.name else "${d.name} ($owner)"
+                continue
+            }
+            var newest = d.mtime
+            d.walkFiles { if (it.mtime > newest) newest = it.mtime }
+            if (newest > now - IN_USE_DAYS * DAY_MS) {
+                insights.add(Insight(Severity.INFO, "Left in place: ${d.name}", "Something wrote to this folder in the last $IN_USE_DAYS days, so it may still be in use.", d.path))
+                continue
+            }
+            val category = BuiltInRules.categoryFolderDestination(d.name)
+            val rule = rules.firstOrNull { it.matchesFolder(d.name) }
+            when {
+                category != null -> planFolderTo(d, "$rootPath/$category", "Top-level folder → its category (merged)", merge = true, selected = false)
+                rule != null -> planFolderTo(d, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${d.name}", "Top-level folder: ${rule.name}", merge = false, selected = false)
+                else -> inferFromContent(d)?.let { (home, reason) ->
+                    planFolderTo(d, "$rootPath/$home/${d.name}", "Top-level folder: ${reason.lowercase()}", merge = false, selected = false)
+                }
+            }
+        }
+        if (owned.isNotEmpty()) {
+            // First: the report keeps only the first few dozen of these notes.
+            insights.add(
+                0,
+                Insight(
+                    Severity.INFO,
+                    "${owned.size} top-level ${if (owned.size == 1) "folder belongs" else "folders belong"} to installed apps",
+                    "They stay where the apps expect them: ${owned.sorted().joinToString(", ")}.",
+                ),
+            )
+        }
     }
 
     // ------------------------------------------------------------------ folders
@@ -259,6 +310,9 @@ class OrganizePlanner(
     }
 
     companion object {
+        /** A top-level folder written to this recently may still be some app's working folder. */
+        const val IN_USE_DAYS = 14
+
         fun yearOf(mtime: Long): Int = Instant.ofEpochMilli(mtime).atZone(ZoneId.systemDefault()).year
     }
 }

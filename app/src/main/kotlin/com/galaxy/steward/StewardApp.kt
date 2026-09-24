@@ -8,6 +8,7 @@ import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.data.AndroidEnvironment
 import com.galaxy.steward.data.SettingsStore
 import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.shizuku.ShizukuBridge
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.ui.StewardSession
@@ -34,6 +35,7 @@ class StewardApp : Application() {
 
     /** Saves the device log to Documents/Galaxy Steward LogCat (Settings > Diagnostics). */
     lateinit var logcat: LogcatExporter
+    lateinit var storageReport: StorageReportExporter
         private set
 
     /**
@@ -54,6 +56,7 @@ class StewardApp : Application() {
         apps = AppsController(this, journals, shizuku, appScope)
         termux = TermuxController(this, journals, appScope)
         logcat = LogcatExporter(this, shizuku, appScope)
+        storageReport = StorageReportExporter(this, appScope)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(AUDIT_CHANNEL, getString(R.string.audit_channel_name), NotificationManager.IMPORTANCE_LOW).apply {

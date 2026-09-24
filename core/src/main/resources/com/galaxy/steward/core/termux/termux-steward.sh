@@ -106,13 +106,22 @@ measure() {
       printf '%d\t%d\n' "$s" "$n"
       ;;
     old) find "$p" -xdev -type f -mtime +7 -printf '%s\n' 2>/dev/null | sum_sizes ;;
+    oldlog) find "$p" -xdev -type f -name '*.log' -mtime +7 -printf '%s\n' 2>/dev/null | sum_sizes ;;
+    pycache) pycache_dirs "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     *) find "$p" -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
   esac
 }
 
+# Python bytecode caches (__pycache__) below P, outside shared storage, Git internals and proot distributions.
+# Python ignores a cached .pyc whose source is gone and rebuilds the rest on the next import (PEP 3147).
+pycache_dirs() {
+  find "$1" -xdev \( -path "$HOME/storage" -o -name .git -o -iname '*-rootfs' -o -iname '*-fs' -o -name installed-rootfs \) -prune \
+    -o -type d -name __pycache__ -print0 -prune 2>/dev/null
+}
+
 # ---------------------------------------------------------------- known targets
 
-FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp npm-logs termux-app-cache npm-cache pip-cache uv-cache poetry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index rustup-downloads rustup-tmp bun-cache android-cache gradle-caches apt-lists"
+FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches apt-lists"
 
 # id -> path|allowed-root|mode
 target_info() {
@@ -122,27 +131,37 @@ target_info() {
     apt-lists) echo "$PREFIX/var/lib/apt/lists|$PREFIX|contents" ;;
     termux-tmp) echo "$PREFIX/tmp|$PREFIX|old" ;;
     var-tmp) echo "$PREFIX/var/tmp|$PREFIX|old" ;;
+    termux-var-log) echo "$PREFIX/var/log|$PREFIX|old" ;;
+    proot-dlcache) echo "$PREFIX/var/lib/proot-distro/dlcache|$PREFIX|contents" ;;
+    trash) echo "$HOME/.local/share/Trash|$HOME|contents" ;;
     npm-logs) echo "$HOME/.npm/_logs|$HOME|old" ;;
     termux-app-cache) echo "$APPDIR/cache|$APPDIR|contents" ;;
     npm-cache) echo "$HOME/.npm/_cacache|$HOME|contents" ;;
+    npx-cache) echo "$HOME/.npm/_npx|$HOME|contents" ;;
     pip-cache) echo "$HOME/.cache/pip|$HOME|contents" ;;
     uv-cache) echo "$HOME/.cache/uv|$HOME|contents" ;;
     poetry-cache) echo "$HOME/.cache/pypoetry|$HOME|contents" ;;
+    pycache) echo "$HOME|$FILES|pycache" ;;
+    yarn-cache) echo "$HOME/.cache/yarn|$HOME|contents" ;;
+    yarn-berry-cache) echo "$HOME/.yarn/berry/cache|$HOME|contents" ;;
     go-build) echo "$HOME/.cache/go-build|$HOME|contents" ;;
     go-mod-download) echo "$HOME/go/pkg/mod/cache/download|$HOME|contents-rw" ;;
     cargo-registry-cache) echo "$HOME/.cargo/registry/cache|$HOME|contents" ;;
     cargo-registry-src) echo "$HOME/.cargo/registry/src|$HOME|contents" ;;
     cargo-registry-index) echo "$HOME/.cargo/registry/index|$HOME|contents" ;;
+    cargo-git-db) echo "$HOME/.cargo/git/db|$HOME|contents" ;;
+    cargo-git-checkouts) echo "$HOME/.cargo/git/checkouts|$HOME|contents" ;;
     rustup-downloads) echo "$HOME/.rustup/downloads|$HOME|contents" ;;
     rustup-tmp) echo "$HOME/.rustup/tmp|$HOME|contents" ;;
     bun-cache) echo "$HOME/.bun/install/cache|$HOME|contents" ;;
     android-cache) echo "$HOME/.android/cache|$HOME|contents" ;;
+    gradle-daemon-logs) echo "$HOME/.gradle/daemon|$HOME|oldlog" ;;
     gradle-caches) echo "$HOME/.gradle/caches|$HOME|contents" ;;
     *) return 1 ;;
   esac
 }
 
-KNOWN_DOT_CACHE="pip uv pypoetry go-build"
+KNOWN_DOT_CACHE="pip uv pypoetry go-build yarn"
 
 # ---------------------------------------------------------------- proot distributions (rootfs_path_allowed_v18)
 
@@ -191,7 +210,7 @@ PROOT_PKG_CACHES="var/cache/apt/archives var/lib/apt/lists var/cache/dnf var/cac
 proot_cache_suffix_ok() {
   local s="$1" c
   for c in $PROOT_PKG_CACHES; do [ "$s" = "$c" ] && return 0; done
-  [[ "$s" =~ ^(root|home/[^/]+)/(\.cache/(pip|uv)|\.npm/_cacache|\.cargo/registry/(cache|src|index))$ ]]
+  [[ "$s" =~ ^(root|home/[^/]+)/(\.cache/(pip|uv|yarn|go-build)|\.npm/(_cacache|_npx)|\.cargo/(registry/(cache|src|index)|git/(db|checkouts)))$ ]]
 }
 
 # Prints the rootfs that contains PATH (and passes rootfs_allowed), or fails.
@@ -205,7 +224,7 @@ rootfs_of() {
 
 # ---------------------------------------------------------------- project build outputs (cleanup_git_rebuildables)
 
-GEN_NAMES="build node_modules target .gradle .cxx .externalNativeBuild __pycache__ .pytest_cache .mypy_cache .ruff_cache coverage .next .turbo .venv venv"
+GEN_NAMES="build node_modules target .gradle .cxx .externalNativeBuild .pytest_cache .mypy_cache .ruff_cache coverage .next .turbo .venv venv"
 
 is_gen_name() {
   local n
@@ -339,8 +358,9 @@ audit() {
       m="$(measure contents "$d")"
       [ "${m#*$'\t'}" -gt 0 ] && emit T proot-cache "${m%%$'\t'*}" "${m#*$'\t'}" "$d"
     done < <(find "$r/root" "$r/home" -xdev -mindepth 1 -maxdepth 5 -type d \( -path '*/.cache/pip' -o -path '*/.cache/uv' \
-      -o -path '*/.npm/_cacache' -o -path '*/.cargo/registry/cache' -o -path '*/.cargo/registry/src' -o -path '*/.cargo/registry/index' \) \
-      -print0 -prune 2>/dev/null)
+      -o -path '*/.cache/yarn' -o -path '*/.cache/go-build' -o -path '*/.npm/_cacache' -o -path '*/.npm/_npx' \
+      -o -path '*/.cargo/registry/cache' -o -path '*/.cargo/registry/src' -o -path '*/.cargo/registry/index' \
+      -o -path '*/.cargo/git/db' -o -path '*/.cargo/git/checkouts' \) -print0 -prune 2>/dev/null)
     for s in tmp var/tmp; do
       dir_beneath "$r/$s" "$r" || continue
       m="$(measure old "$r/$s")"
@@ -363,7 +383,7 @@ audit() {
         count=$((count + 1))
         [ "$count" -ge 150 ] && break 2
       done < <(find "$repo" -xdev -mindepth 1 -maxdepth 5 -name .git -prune -o -type d \( -name build -o -name node_modules \
-        -o -name target -o -name .gradle -o -name .cxx -o -name .externalNativeBuild -o -name __pycache__ -o -name .pytest_cache \
+        -o -name target -o -name .gradle -o -name .cxx -o -name .externalNativeBuild -o -name .pytest_cache \
         -o -name .mypy_cache -o -name .ruff_cache -o -name coverage -o -name .next -o -name .turbo -o -name .venv -o -name venv \) \
         -print0 -prune 2>/dev/null)
     done < <(find "$HOME" -xdev -maxdepth 4 \( -path "$HOME/storage" -o -path "$HOME/.*" \) -prune -o -name .git -print0 -prune 2>/dev/null)
@@ -408,6 +428,16 @@ clear_path() {
       while IFS= read -r -d '' d; do
         dir_beneath "$d" "$p" && rmdir -- "$d" 2>/dev/null
       done < <(find "$p" -xdev -mindepth 1 -depth -type d -empty -mtime +7 -print0 2>/dev/null)
+      ;;
+    oldlog)
+      while IFS= read -r -d '' f; do
+        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && rm -f -- "$f"
+      done < <(find "$p" -xdev -type f -name '*.log' -mtime +7 -print0 2>/dev/null)
+      ;;
+    pycache)
+      while IFS= read -r -d '' d; do
+        [ "${d##*/}" = __pycache__ ] && dir_beneath "$d" "$p" && rm -rf -- "$d"
+      done < <(pycache_dirs "$p")
       ;;
     contents|contents-rw)
       dir_beneath "$p" "$root" || return 1

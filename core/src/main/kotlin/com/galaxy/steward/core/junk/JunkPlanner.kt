@@ -9,6 +9,7 @@ import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
+import com.galaxy.steward.core.plan.ExtractedCopy
 import com.galaxy.steward.core.plan.JunkCategory
 import com.galaxy.steward.core.plan.JunkItem
 
@@ -21,6 +22,7 @@ class JunkPlanner(
     private val environment: DeviceEnvironment,
 ) {
     private val now = environment.nowMillis()
+    private val recentCutoff = now - settings.recentFileGuardMinutes * 60_000L
     private val items = ArrayList<JunkItem>()
 
     fun plan(tree: StorageTree): List<JunkItem> {
@@ -57,7 +59,24 @@ class JunkPlanner(
             f.size == 0L && !f.hidden && !insideHidden && !SafetyPolicy.isMarkerFile(name) && !name.lowercase().endsWith(".lock") ->
                 add(JunkCategory.ZERO_BYTE_FILES, f.path, false, 0, f.mtime, "0 bytes")
             f.extension == "apk" && dir.zone == Zone.USER_MANAGED -> installedApk(f)
+            f.extension == "zip" && dir.zone == Zone.USER_MANAGED && !f.hidden && !insideHidden && f.size > 0 && f.mtime < recentCutoff ->
+                extractedZip(f)
         }
+    }
+
+    /**
+     * A zip unpacked next to itself, with every file still there at the same size (checked again, by CRC, before it
+     * moves). Only in your own folders: an app may keep a zip and its unpacked copy side by side on purpose.
+     */
+    private fun extractedZip(f: FileNode) {
+        if (f.dir.dirs.isEmpty()) return
+        val entries = ExtractedArchives.entries(f.path) ?: return
+        val copy = ExtractedArchives.extractedCopy(f, entries) ?: return
+        add(
+            JunkCategory.EXTRACTED_ARCHIVES, f.path, false, f.size, f.mtime,
+            "All ${entries.size} files are unpacked in ${copy.folder.substringAfterLast('/')}",
+            extracted = copy,
+        )
     }
 
     private fun isAbandonedDownload(name: String): Boolean =
@@ -116,7 +135,10 @@ class JunkPlanner(
         mtime: Long,
         note: String,
         emptyDirs: List<String> = emptyList(),
+        extracted: ExtractedCopy? = null,
     ) {
-        items.add(JunkItem("junk:${category.name}:${path.hashCode().toString(16)}:${path.length}", category, path, isDirectory, bytes, mtime, note, emptyDirs))
+        items.add(
+            JunkItem("junk:${category.name}:${path.hashCode().toString(16)}:${path.length}", category, path, isDirectory, bytes, mtime, note, emptyDirs, extracted),
+        )
     }
 }
