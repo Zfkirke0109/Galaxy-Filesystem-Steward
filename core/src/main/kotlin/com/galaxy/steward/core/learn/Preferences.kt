@@ -74,7 +74,8 @@ object PreferenceFeatures {
                 directory = true
             }
         }
-        val rel = path.removePrefix("$root/")
+        // Stored space-separated, so no feature may hold a space (or a tab): "My Folder" is learned as "My_Folder".
+        val rel = path.removePrefix("$root/").replace(WHITESPACE, "_")
         val parts = rel.split('/')
         val top = parts.first()
         val two = parts.take(2).joinToString("/")
@@ -89,7 +90,7 @@ object PreferenceFeatures {
                 add("ext:$ext")
                 add("c|ext:$kind|$ext")
             }
-            dest?.removePrefix("$root/")?.split('/')?.take(2)?.joinToString("/")?.let { d ->
+            dest?.removePrefix("$root/")?.replace(WHITESPACE, "_")?.split('/')?.take(2)?.joinToString("/")?.let { d ->
                 add("dest:$d")
                 add("c|dest:$kind|$d")
             }
@@ -111,6 +112,8 @@ object PreferenceFeatures {
             add("def:${item.defaultSelected}")
         }
     }
+
+    private val WHITESPACE = Regex("\\s")
 
     /** The features that name one place and kind precisely; a choice counts as evidence only through these. */
     fun specific(features: List<String>): List<String> = features.filter { it.startsWith("c|") }

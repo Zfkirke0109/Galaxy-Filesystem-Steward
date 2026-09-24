@@ -488,6 +488,12 @@ class ActionExecutor(
         bytesPacked += zipSize
         changed += op.zip
         val moved = quarantineOp(QuarantineOp(op.path, isDirectory = true, size = bytes, mtime = -1))
+        if (moved.status != Status.DONE) {
+            // The folder stays, so its zip would only be a second copy: remove it (undo finds nothing to remove).
+            Files.deleteIfExists(zip)
+            packed--
+            bytesPacked -= zipSize
+        }
         return if (moved.status == Status.DONE) Outcome(Status.DONE) else moved
     }
 

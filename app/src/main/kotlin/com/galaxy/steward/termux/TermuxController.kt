@@ -280,6 +280,10 @@ class TermuxController(
      */
     suspend fun moveIntoTermux(folder: String): TermuxCleanSummary {
         val summary = TermuxProtocol.parseClean(run("relocate", listOf(folder), RELOCATE_TIMEOUT_MS))
+        _state.update { s ->
+            val moved = summary.results.filter { it.status == "MOVED" }.map { it.path }.toSet()
+            s.copy(repos = s.repos?.filterNot { r -> moved.any { r.path == it || r.path.startsWith("$it/") } }, repoSelected = s.repoSelected - moved)
+        }
         summary.results.filter { it.status == "MOVED" }.forEach { r ->
             val runId = journals.newId()
             withContext(Dispatchers.IO) {
@@ -328,8 +332,15 @@ class TermuxController(
 
     /** Drops what is gone from the size map, so the browser shows the space as free without a new audit. */
     private fun forget(summary: TermuxCleanSummary) {
-        val gone = summary.results.filter { it.status == "CLEARED" && it.path.isNotEmpty() }.associate { it.path to it.before }
-        _state.update { it.copy(report = it.report?.afterDeleting(gone)) }
+        val gone = summary.results.filter { (it.status == "CLEARED" || it.status == "MOVED") && it.path.isNotEmpty() }.associate { it.path to it.before }
+        _state.update { s ->
+            s.copy(
+                report = s.report?.afterDeleting(gone),
+                // A deleted or moved repository is gone from the list too.
+                repos = s.repos?.filterNot { r -> gone.keys.any { r.path == it || r.path.startsWith("$it/") } },
+                repoSelected = s.repoSelected.filterTo(HashSet()) { p -> gone.keys.none { p == it || p.startsWith("$it/") } },
+            )
+        }
     }
 
     /** Shows [report] as if Termux had just been scanned: the end-to-end test has no Termux to ask. */
@@ -393,6 +404,26 @@ class TermuxController(
         private const val CLEAN_TIMEOUT_MS = 20 * 60_000L
         private const val PACKAGES_TIMEOUT_MS = 3 * 60_000L
         private const val REMOVE_TIMEOUT_MS = 30 * 60_000L
+
+        /**
+         * Why things stayed, counted: "installed by a package 40, holds a key 3". Goes into the run's log line too, so a
+         * run that left everything alone says why without the details on screen.
+         */
+        fun reasonTally(summary: TermuxCleanSummary): String? = summary.results.filter { !it.ok && it.status != "REMOVED" }
+            .groupingBy { r ->
+                when (r.status) {
+                    "SKIP_PACKAGE" -> "installed by a package"
+                    "SKIP_PROTECTED" -> "Termux needs it"
+                    "SKIP_KEYS" -> "holds a key"
+                    "SKIP_ACTIVE" -> "in use"
+                    "SKIP_EXISTS" -> "already there"
+                    "SKIP_SPACE" -> "not enough space"
+                    "PARTIAL" -> "partly removed"
+                    "FAILED" -> "failed"
+                    else -> r.note.ifEmpty { r.status.lowercase().replace('_', ' ') }.substringBefore(';').take(60)
+                }
+            }.eachCount().entries.sortedByDescending { it.value }.take(4)
+            .takeIf { it.isNotEmpty() }?.joinToString(", ", prefix = "why: ") { "${it.key} ${it.value}" }
 
         /** One line per result that stayed, with why: "lib/chromium: owned by chromium - uninstall it under Packages". */
         fun skippedNotes(summary: TermuxCleanSummary, home: String, prefix: String): List<String> =

@@ -173,6 +173,8 @@ class FilingModel private constructor(
             if (d.zone != Zone.USER_MANAGED && d.zone != Zone.MEDIA_LIBRARY) return false
             val rel = d.relPath
             if (rel == "Download" || rel.startsWith("Download/") || rel == "Documents" || rel.startsWith("Documents/Inbox-Review")) return false
+            // The camera and the screenshot tool write to DCIM themselves; nothing downloaded belongs among their shots.
+            if (rel == "DCIM" || rel.startsWith("DCIM/")) return false
             if (DATE_BUCKET.matches(d.name) || d.insideFlagged(NodeFlags.CODE_TREE or NodeFlags.PROJECT_ROOT)) return false
             return d.files.count { !it.hidden } + d.dirs.count { !it.hidden } >= 2
         }

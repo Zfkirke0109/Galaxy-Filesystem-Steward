@@ -131,6 +131,7 @@ measure() {
     oldlog) find "$p" -xdev -type f -name '*.log' -mtime +7 -printf '%s\n' 2>/dev/null | sum_sizes ;;
     pycache) pycache_dirs "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     oldversions) old_versions "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
+    oldversions-unsure) old_versions "$p" unsure | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     *) find "$p" -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
   esac
 }
@@ -139,15 +140,17 @@ measure() {
 # ones ~/.local/bin/claude runs. That launcher is a link to one version, or (on Termux, where Claude Code runs through
 # glibc) a small script: every version it names stays. Nothing goes when there is no launcher to tell.
 old_versions() {
-  local p="$1" launcher="$HOME/.local/bin/claude" used="" named="" newest e v
+  local p="$1" unsure="${2:-}" launcher="$HOME/.local/bin/claude" used="" named="" newest e v known=1
   if [ -L "$launcher" ]; then
-    used="$(readlink -f -- "$launcher" 2>/dev/null)" || return 0
-    case "$used" in "$p"/*) ;; *) return 0 ;; esac
+    used="$(readlink -f -- "$launcher" 2>/dev/null)" || known=0
+    case "$used" in "$p"/*) ;; *) known=0 ;; esac
   elif [ -f "$launcher" ] && [ "$(stat -c %s -- "$launcher" 2>/dev/null || echo 0)" -le 65536 ]; then
     named=" $(grep -ao 'versions/[A-Za-z0-9._+-]*' -- "$launcher" 2>/dev/null | sed 's#^versions/##' | tr '\n' ' ')"
   else
-    return 0
+    known=0
   fi
+  # Sure: the launcher says which version runs. Unsure: it doesn't, so only the newest is kept, and you review.
+  if [ "$unsure" = unsure ]; then [ "$known" = 0 ] || return 0; else [ "$known" = 1 ] || return 0; fi
   newest="$(find "$p" -mindepth 1 -maxdepth 1 -printf '%T@\t%f\n' 2>/dev/null | sort -rn | head -n 1 | cut -f2)"
   for e in "$p"/*; do
     [ -e "$e" ] && [ ! -L "$e" ] || continue
@@ -168,7 +171,7 @@ pycache_dirs() {
 
 # ---------------------------------------------------------------- known targets
 
-FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches claude-versions koa-archives apt-lists home-node-modules"
+FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches claude-versions claude-versions-unsure koa-archives apt-lists home-node-modules"
 
 # id -> path|allowed-root|mode
 target_info() {
@@ -204,6 +207,7 @@ target_info() {
     android-cache) echo "$HOME/.android/cache|$HOME|contents" ;;
     gradle-daemon-logs) echo "$HOME/.gradle/daemon|$HOME|oldlog" ;;
     claude-versions) echo "$HOME/.local/share/claude/versions|$HOME|oldversions" ;;
+    claude-versions-unsure) echo "$HOME/.local/share/claude/versions|$HOME|oldversions-unsure" ;;
     koa-archives) echo "$HOME/.storage-autopilot-archives|$HOME|contents" ;;
     gradle-caches) echo "$HOME/.gradle/caches|$HOME|contents" ;;
     home-node-modules) echo "$HOME/node_modules|$HOME|contents" ;;
@@ -341,7 +345,7 @@ decompiled_ok() {
   [ -f "$d/apktool.yml" ] || { [ -f "$d/resources/AndroidManifest.xml" ] && [ -d "$d/sources" ]; } || return 1
   [ -e "$d/.git" ] && return 1
   repo_of "$d/x" > /dev/null && return 1
-  [ -z "$(private_key_in "$d")" ]
+  [ -z "$(private_key_in "$d" app)" ]
 }
 
 decompiled_dirs() {
@@ -439,7 +443,7 @@ foreign_ndks() {
 # browser deletes. At most 6 GiB is read.
 dup_large_files() {
   local f s ino sum budget=$((6 * 1024 * 1024 * 1024))
-  declare -A by=() seen=() count=()
+  declare -A by=() seen=() sizes=()
   for f in "${!BIG[@]}"; do
     [ "${BIG[$f]}" -ge "$DUP_MIN_KIB" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
     s="$(stat -c '%s:%i' -- "$f" 2>/dev/null)" || continue
@@ -447,10 +451,10 @@ dup_large_files() {
     [ -n "${seen[$ino]:-}" ] && continue
     seen["$ino"]=1
     by["$s"]+="$f"$'\n'
-    count["$s"]=$(( ${count[$s]:-0} + 1 ))
+    sizes["$s"]=$(( ${sizes[$s]:-0} + 1 ))
   done
   for s in "${!by[@]}"; do
-    [ "${count[$s]}" -ge 2 ] || continue
+    [ "${sizes[$s]}" -ge 2 ] || continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       [ "$budget" -ge "$s" ] || return 0
@@ -493,6 +497,32 @@ sketch_dirs() {
     sk="$(awk "$SKETCH_AWK" "$tmp" | sort -n -u | head -n 64 | paste -sd, -)"
     emit H "$n" "$(( k * 1024 ))" "$sk" "$p"
   done
+  rm -f -- "$tmp"
+}
+
+# O, number of packages, up to three of them, path: every file and folder of the size map under $PREFIX that packages
+# installed or hold files in, so the browser can lock them the way delete refuses them (one pass over dpkg's lists).
+emit_owners() {
+  local info="$PREFIX/var/lib/dpkg/info" tmp p
+  [ -d "$info" ] || return 0
+  tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/steward-owners.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)" || return 0
+  for p in "${!BIG[@]}"; do
+    case "$p" in "$PREFIX"/var/lib/proot-distro|"$PREFIX"/var/lib/proot-distro/*) ;; "$PREFIX"/*) printf '%s\n' "$p" ;; esac
+  done > "$tmp"
+  awk -v prefix="$PREFIX" 'FNR == NR { want[$0] = 1; next }
+    FNR == 1 { pkg = FILENAME; sub(/.*\//, "", pkg); sub(/\.list$/, "", pkg); sub(/:.*/, "", pkg) }
+    {
+      p = $0
+      while (length(p) > length(prefix)) {
+        if ((p in want) && !((p, pkg) in seen)) {
+          seen[p, pkg] = 1
+          n[p]++
+          if (n[p] <= 3) names[p] = (n[p] == 1) ? pkg : names[p] "," pkg
+        }
+        sub(/\/[^\/]*$/, "", p)
+      }
+    }
+    END { for (p in n) printf "O\t%d\t%s\t%s\n", n[p], names[p], p }' "$tmp" "$info"/*.list 2>/dev/null >&3
   rm -f -- "$tmp"
 }
 
@@ -639,6 +669,7 @@ audit() {
   if [ -n "$OUT" ]; then
     dup_large_files
     sketch_dirs
+    emit_owners
   fi
 
   # The size map itself, for browsing Termux folder by folder in the app: only into the --out file, because the
@@ -699,11 +730,11 @@ clear_path() {
         [ "${d##*/}" = __pycache__ ] && dir_beneath "$d" "$p" && rm -rf -- "$d"
       done < <(pycache_dirs "$p")
       ;;
-    oldversions)
+    oldversions|oldversions-unsure)
       dir_beneath "$p" "$root" || return 1
       while IFS= read -r -d '' e; do
         beneath "$e" "$p" && rm -rf -- "$e"
-      done < <(old_versions "$p")
+      done < <(if [ "$mode" = oldversions ]; then old_versions "$p"; else old_versions "$p" unsure; fi)
       ;;
     contents|contents-rw)
       dir_beneath "$p" "$root" || return 1
@@ -1194,10 +1225,28 @@ pkg_owners() {
 DISTRO_FREE='^(opt|root|home|tmp|var/tmp|var/cache|srv|usr/local)/.+'
 
 # The first private key or keystore below DIR, if any. Certificates (.pem, .der) don't count: decompiled apps are full
-# of them, and they are public.
+# of them, and they are public. With "app", DIR is a decompiled app: keystores the app itself ships (in its assets,
+# resources, code or libraries) came out of its APK and are no one's secret, so only keys outside those count.
 private_key_in() {
+  if [ "${2:-}" = app ]; then
+    find "$1" -xdev -maxdepth 8 \( -name assets -o -name res -o -name resources -o -name sources -o -name 'smali*' \
+      -o -name original -o -name unknown -o -name lib -o -name kotlin -o -name META-INF -o -name build \) -prune -o \
+      -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pfx' -o -name '*.kdbx' -o -name 'id_rsa' \
+      -o -name 'id_ed25519' -o -name 'id_ecdsa' -o -name '.env' \) -print -quit 2>/dev/null
+    return
+  fi
   find "$1" -xdev -maxdepth 8 -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pfx' \
     -o -name '*.kdbx' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name 'id_ecdsa' -o -name '.env' \) -print -quit 2>/dev/null
+}
+
+# DIR itself, or the folder above it, is the top of a decompiled app (apktool or jadx output).
+decompiled_root() {
+  local d="$1"
+  while [ -n "$d" ] && [ "$d" != "$HOME" ] && [ "$d" != / ]; do
+    if [ -f "$d/apktool.yml" ] || { [ -f "$d/resources/AndroidManifest.xml" ] && [ -d "$d/sources" ]; }; then return 0; fi
+    d="${d%/*}"
+  done
+  return 1
 }
 
 delete_one() {
@@ -1230,7 +1279,7 @@ delete_one() {
     result path SKIP_UNSAFE 0 0 "$p" "outside Termux or through a symlink"; return
   fi
   if [ -d "$p" ]; then
-    key="$(private_key_in "$p")"
+    if decompiled_root "$p"; then key="$(private_key_in "$p" app)"; else key="$(private_key_in "$p")"; fi
     if [ -n "$key" ]; then result path SKIP_KEYS 0 0 "$p" "holds ${key##*/}"; return; fi
   fi
   if [ -f "$p" ] && [[ "${p##*/}" =~ \.(jks|keystore|p12|pem|key|kdbx)$|^(id_rsa|id_ed25519|\.env) ]]; then

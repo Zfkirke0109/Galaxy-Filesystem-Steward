@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.galaxy.steward.BuildConfig
+import com.galaxy.steward.StewardApp
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plan.ScanReport
@@ -69,6 +70,14 @@ class StorageReportExporter(private val context: Context, private val scope: Cor
             "Saved:    ${now.format(HEADER_TIME)}",
             "Device:   ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             scan?.let { "Scanned:  ${Instant.ofEpochMilli(it.finishedAt).atZone(ZoneId.systemDefault()).format(HEADER_TIME)}" },
+            // A report saved after a clean-up still shows the scan's folders: say so, so the sizes aren't taken as current.
+            scan?.let { sc ->
+                val later = (context.applicationContext as? StewardApp)?.journals?.list().orEmpty().filter { it.startedAt > sc.finishedAt }
+                later.takeIf { it.isNotEmpty() }?.let { runs ->
+                    "Since:    ${runs.size} ${if (runs.size == 1) "run" else "runs"} after that scan (" +
+                        runs.sortedBy { it.startedAt }.take(4).joinToString { it.title } + "); the folders below are as they were before"
+                }
+            },
             "Contents: folder names and sizes; no file contents. Share it only with people you trust.",
         )
         file.writeText(StorageReportText.render(scan, termux, header))

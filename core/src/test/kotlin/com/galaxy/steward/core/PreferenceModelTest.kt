@@ -62,6 +62,22 @@ class PreferenceModelTest {
     }
 
     @Test
+    fun choicesInFoldersWithSpacesAreLearnedToo() {
+        val dir = Files.createTempDirectory("prefs").toFile()
+        try {
+            val log = DecisionLog(File(dir, "decisions.tsv"))
+            repeat(6) { run ->
+                log.record("run$run", listOf(junk(JunkCategory.OLD_LOGS, "Documents/My Logs/old $run.log", run)), emptySet(), root, now)
+            }
+            val model = PreferenceModel.train(log.load())
+            // The rules tick old logs; six times you left these: now they start unticked.
+            assertEquals(false, model.choiceFor(junk(JunkCategory.OLD_LOGS, "Documents/My Logs/new one.log", 9), root, now)?.select)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun theLogKeepsOnlyTheLatestDecisions() {
         val dir = Files.createTempDirectory("prefs").toFile()
         try {

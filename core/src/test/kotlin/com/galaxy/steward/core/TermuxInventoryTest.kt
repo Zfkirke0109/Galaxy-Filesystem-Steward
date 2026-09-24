@@ -157,6 +157,64 @@ class TermuxInventoryTest {
     }
 
     @Test
+    fun theBrowserKnowsWhichFoldersPackagesOwnAndTotalsFollowDeletions() {
+        // chromium's files, a folder you put in $PREFIX yourself, and dpkg's list of what chromium installed.
+        write(File(prefix, "lib/chromium/chrome"), 3 * mib / 2)
+        write(File(prefix, "lib/chromium/locales/en.pak"), 3 * mib / 2, 1)
+        write(File(prefix, "opt/mytool/tool.bin"), 3 * mib / 2, 2)
+        text(
+            File(prefix, "var/lib/dpkg/info/chromium.list"),
+            listOf("lib", "lib/chromium", "lib/chromium/chrome", "lib/chromium/locales", "lib/chromium/locales/en.pak")
+                .joinToString("\n", postfix = "\n") { "${prefix.path}/$it" },
+        )
+        text(File(prefix, "var/lib/dpkg/info/libc.list"), "${prefix.path}/lib\n${prefix.path}/lib/libc.so\n")
+        write(File(home, "big/data.bin"), 3 * mib, 3)
+        val report = TermuxProtocol.parseAudit(run("audit"))
+        fun lock(f: File) = com.galaxy.steward.core.termux.TermuxLocks.reason(f.path, report)
+        assertEquals("Installed by chromium: uninstall it under Packages", lock(File(prefix, "lib/chromium")))
+        assertEquals("Installed by chromium: uninstall it under Packages", lock(File(prefix, "lib/chromium/chrome")))
+        assertEquals("Files of 2 packages: uninstall them under Packages", lock(File(prefix, "lib")))
+        assertNull(lock(File(prefix, "opt/mytool")))
+
+        // What the app shows after deleting ~/big: the folder is gone and every total above it shrinks.
+        val before = report.totalBytes
+        val homeBefore = report.usage.first { it.path == home.path }.bytes
+        val after = report.afterDeleting(mapOf(File(home, "big").path to 3L * mib))
+        assertEquals(before - 3L * mib, after.totalBytes)
+        assertEquals(homeBefore - 3L * mib, after.usage.first { it.path == home.path }.bytes)
+        assertNull(after.entry(File(home, "big/data.bin").path))
+    }
+
+    @Test
+    fun keystoresAnAppShipsDontLockItsDecompiledFolderButYoursDo() {
+        text(File(home, "mx_jadx/resources/AndroidManifest.xml"), "<manifest/>")
+        write(File(home, "mx_jadx/sources/p/A.java"), 2000)
+        write(File(home, "mx_jadx/resources/assets/bundled-client.p12"), 300) // came out of the APK
+        text(File(home, "mine_apktool/apktool.yml"), "version: 2.9")
+        write(File(home, "mine_apktool/smali/A.smali"), 2000)
+        write(File(home, "mine_apktool/release.jks"), 300) // yours, next to the decompiled app
+        val items = TermuxProtocol.parseAudit(run("audit")).items.filter { it.targetId == "decompiled" }.map { it.path }
+        assertEquals(listOf(File(home, "mx_jadx").path), items)
+        val results = TermuxProtocol.parseClean(run("delete", listOf(File(home, "mx_jadx").path, File(home, "mine_apktool").path))).results
+        assertEquals(listOf("CLEARED", "SKIP_KEYS"), results.map { it.status })
+        assertEquals("holds release.jks", results.last().note)
+    }
+
+    @Test
+    fun olderClaudeCodeVersionsAreOfferedForReviewWhenNothingSaysWhichRuns() {
+        write(File(home, ".local/share/claude/versions/2.1.278"), 3 * mib / 2, 3).setLastModified(1_700_000_000_000L)
+        write(File(home, ".local/share/claude/versions/2.1.280"), 3 * mib / 2, 4).setLastModified(1_700_086_400_000L)
+        val items = TermuxProtocol.parseAudit(run("audit")).items.filter { it.targetId.startsWith("claude-versions") }
+        assertEquals(listOf("claude-versions-unsure"), items.map { it.targetId })
+        assertFalse(items.single().defaultSelected)
+        assertEquals(3L * mib / 2, items.single().bytes)
+        val done = TermuxProtocol.parseClean(run("clean", listOf("claude-versions-unsure"))).results.single()
+        assertEquals("CLEARED", done.status)
+        assertFalse(File(home, ".local/share/claude/versions/2.1.278").exists())
+        assertTrue(File(home, ".local/share/claude/versions/2.1.280").exists())
+    }
+
+    @Test
     fun leftoversAreCheckedAgainBeforeTheyGo() {
         text(File(home, "mx_jadx_bad/resources/AndroidManifest.xml"), "<manifest/>")
         write(File(home, "mx_jadx_bad/sources/A.java"), 1000)

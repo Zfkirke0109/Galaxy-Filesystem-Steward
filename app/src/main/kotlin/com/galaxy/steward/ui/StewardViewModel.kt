@@ -495,7 +495,9 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         val lines = buildList {
             add("Freed ${summary.freed.humanBytes()} inside Termux")
             add("${summary.cleared.plural("location")} cleaned")
-            if (summary.skipped.isNotEmpty()) add("${summary.skipped.size.plural("location")} left alone for safety")
+            if (summary.skipped.isNotEmpty()) {
+                add("${summary.skipped.size.plural("location")} left alone for safety (${TermuxController.reasonTally(summary)?.removePrefix("why: ")})")
+            }
         }
         Outcome.Report("Termux cleaned", lines, summary.skipped.map { "${it.status.lowercase().replace('_', ' ')}: ${it.path.ifEmpty { it.targetId }} ${it.note}".trim() })
     }
@@ -571,7 +573,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         val lines = buildList {
             add("Freed ${summary.freed.humanBytes()} inside Termux")
             add("${summary.cleared.plural(one, many)} gone")
-            if (skipped.isNotEmpty()) add("${skipped.size.plural(one, many)} left alone")
+            if (skipped.isNotEmpty()) add("${skipped.size.plural(one, many)} left alone (${TermuxController.reasonTally(summary)?.removePrefix("why: ")})")
         }
         return Outcome.Report(title, lines, skipped)
     }

@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import com.galaxy.steward.core.learn.DecisionLog
+import com.galaxy.steward.diagnostics.StewardLog
 import java.io.File
 
 class StewardApp : Application() {
@@ -53,6 +54,7 @@ class StewardApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        StewardLog.init(File(filesDir, "steward-history.log"))
         settings = SettingsStore(this)
         environment = AndroidEnvironment(this)
         journals = JournalStore(File(filesDir, "journals"))

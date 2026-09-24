@@ -247,7 +247,10 @@ fun TermuxProjectsScreen(vm: StewardViewModel, onBack: () -> Unit) {
     val ui by vm.state.collectAsStateWithLifecycle()
     val termux by vm.termux.state.collectAsStateWithLifecycle()
     val tree = ui.report?.tree
-    val candidates = remember(tree) { tree?.let { ProjectMoves.candidates(it) }.orEmpty() }
+    // The scan may be older than a move: what isn't in shared storage any more is no longer offered.
+    val candidates = remember(tree, ui.journals.size) {
+        tree?.let { ProjectMoves.candidates(it) }.orEmpty().filter { java.io.File(it.path).isDirectory }
+    }
     var picked by rememberSaveable { mutableStateOf(setOf<String>()) }
     var confirm by remember { mutableStateOf(false) }
     val now = remember { System.currentTimeMillis() }

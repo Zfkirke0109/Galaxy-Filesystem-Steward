@@ -143,6 +143,13 @@ class LogcatExporter(
                 "Shizuku: ${shizuku.status.value.label}",
         )
         appendLine()
+        // Android's log keeps only the last hour or so on a busy phone; the steward's own history goes further back.
+        val history = StewardLog.lines().takeLast(HISTORY_LINES)
+        if (history.isNotEmpty()) {
+            appendLine("--------- Galaxy Steward history (its last ${history.size} lines, kept by the app)")
+            history.forEach(::appendLine)
+            appendLine()
+        }
     }
 
     private fun yesNo(b: Boolean) = if (b) "yes" else "no"
@@ -164,6 +171,7 @@ class LogcatExporter(
     }
 
     companion object {
+        private const val HISTORY_LINES = 400
         private val FILE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
         private val HEADER_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss xxx")
         private const val BUFFER_BYTES = 256 * 1024

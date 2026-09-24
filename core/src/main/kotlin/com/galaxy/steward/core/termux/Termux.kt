@@ -1,6 +1,7 @@
 package com.galaxy.steward.core.termux
 
 import com.galaxy.steward.core.dedupe.DirSketch
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.dedupe.FolderSketch
 import com.galaxy.steward.core.dedupe.NearCopy
 
@@ -81,6 +82,10 @@ object TermuxCatalog {
         TermuxTargetInfo("gradle-daemon-logs", "Gradle daemon logs", TermuxGroup.DEV, true, "Only logs older than 7 days"),
         TermuxTargetInfo("gradle-caches", "Gradle caches", TermuxGroup.DEV, false, "Large and slow to download again"),
         TermuxTargetInfo("claude-versions", "Old Claude Code versions", TermuxGroup.DEV, true, "The version in use and the newest stay"),
+        TermuxTargetInfo(
+            "claude-versions-unsure", "Older Claude Code versions", TermuxGroup.DEV, false,
+            "The launcher doesn't say which version runs, so only the newest stays: check claude --version first",
+        ),
         TermuxTargetInfo(
             "koa-archives", "Termux steward archives", TermuxGroup.OTHER, false,
             "Backups the Koa Termux steward script made (~/.storage-autopilot-archives); only needed to undo its old runs",
@@ -240,6 +245,8 @@ data class TermuxReport(
     val duplicates: List<TermuxDuplicateSet> = emptyList(),
     /** Sketches of the biggest folders, for finding near-copies. */
     val sketches: List<TermuxSketch> = emptyList(),
+    /** Size-map entries under $PREFIX that packages installed or hold files in: path to (package count, some names). */
+    val owners: Map<String, Pair<Int, String>> = emptyMap(),
 ) {
     private val byParent: Map<String, List<TermuxEntry>> by lazy {
         entries.groupBy { it.path.substringBeforeLast('/') }.mapValues { (_, list) -> list.sortedByDescending { it.bytes } }
@@ -254,15 +261,21 @@ data class TermuxReport(
     /** The Termux files folder, the top of the size map. */
     val filesRoot: String get() = home.substringBeforeLast('/')
 
-    /** This report after [freed] (path to bytes freed) went: entries below them drop out, their parents shrink. */
+    /**
+     * This report after [freed] (path to bytes freed) went: entries below them drop out, and their parents shrink, the
+     * "where the space goes" totals too.
+     */
     fun afterDeleting(freed: Map<String, Long>): TermuxReport {
         if (freed.isEmpty()) return this
         val gone = freed.keys
+        fun lessBelow(path: String) = freed.entries.sumOf { (p, b) -> if (p.startsWith("$path/")) b else 0L }
         val kept = entries.filterNot { e -> gone.any { e.path == it || e.path.startsWith("$it/") } }.map { e ->
             val less = freed.entries.sumOf { (p, b) -> if (p.startsWith(e.path + "/")) b else 0L }
             if (less > 0) e.copy(bytes = (e.bytes - less).coerceAtLeast(0)) else e
         }
         return copy(
+            usage = usage.filterNot { it.path in gone }.map { u -> lessBelow(u.path).let { if (it > 0) u.copy(bytes = (u.bytes - it).coerceAtLeast(0)) else u } },
+            owners = owners.filterKeys { p -> gone.none { p == it || p.startsWith("$it/") } },
             entries = kept,
             rootfs = rootfs.filterNot { it.path in gone },
             largeFiles = largeFiles.filterNot { f -> gone.any { f.path == it || f.path.startsWith("$it/") } },
@@ -329,6 +342,9 @@ object TermuxLocks {
             if (top == "storage") return "Links to shared storage"
             if (top in setOf(".termux", ".ssh", ".gnupg")) return "Termux or your keys need it"
         }
+        report.owners[path]?.let { (count, names) ->
+            return if (count == 1) "Installed by $names: uninstall it under Packages" else "Files of ${count.plural("package")}: uninstall them under Packages"
+        }
         if (path.startsWith("$prefix/")) {
             val rel = path.removePrefix("$prefix/")
             if ('/' !in rel && rel in PACKAGE_DIRS) return "Package files: uninstall packages instead"
@@ -378,6 +394,7 @@ object TermuxProtocol {
         val entries = ArrayList<TermuxEntry>()
         val copies = LinkedHashMap<Pair<Long, String>, MutableList<String>>()
         val sketches = ArrayList<TermuxSketch>()
+        val owners = HashMap<String, Pair<Int, String>>()
         for (p in parsed.records) {
             when (p[0]) {
                 "V" -> if (p.size >= 5) {
@@ -418,6 +435,7 @@ object TermuxProtocol {
                     val size = p[1].toLongOrNull() ?: continue
                     copies.getOrPut(size to p[2]) { ArrayList() } += p[3]
                 }
+                "O" -> if (p.size >= 4) owners[p[3]] = (p[1].toIntOrNull() ?: 1) to p[2]
                 "H" -> if (p.size >= 5) {
                     val hashes = p[3].split(',').mapNotNull { it.toLongOrNull() }.toLongArray()
                     if (hashes.isNotEmpty()) sketches += TermuxSketch(p[4], p[1].toIntOrNull() ?: 0, p[2].toLongOrNull() ?: 0, hashes)
@@ -436,6 +454,7 @@ object TermuxProtocol {
         }
         return TermuxReport(
             home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries, duplicates, sketches,
+            owners,
         )
     }
 
