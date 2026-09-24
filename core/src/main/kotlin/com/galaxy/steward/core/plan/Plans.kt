@@ -188,12 +188,25 @@ enum class JunkCategory(val title: String, val description: String, val defaultS
     STALE_DOWNLOADS("Abandoned downloads", "Partial downloads (.crdownload, .part, .tmp) untouched for weeks.", true),
     OLD_LOGS("Old system logs", "Wi-Fi logs, dumps and bug reports that Samsung and other makers keep writing to /log.", true),
     EMPTY_FOLDERS("Empty folders", "Folders with nothing inside - often left by uninstalled apps.", true),
-    INSTALLED_APKS("Installed APKs", "Installer files for apps that are already installed at the same or newer version.", false),
-    EXTRACTED_ARCHIVES(
-        "Zips already extracted",
-        "Zip files whose every file is already unpacked in the folder next to them. Each unpacked file is checked against " +
-            "the CRC-32 stored in the zip right before the zip moves to the quarantine. The folder stays.",
+    HEAP_DUMPS(
+        "Heap dumps",
+        "Java heap dumps (.hprof) from LeakCanary and Android Studio, a few days old. A debug build writes new ones when it " +
+            "runs again.",
         true,
+    ),
+    INSTALLED_APKS("Installed APKs", "Installer files for apps that are already installed at the same or newer version.", false),
+    OLD_INSTALLERS("Older installers", "APKs of an app when a newer installer of the same app is also on the phone. The newest stays.", false),
+    EXTRACTED_ARCHIVES(
+        "Archives already extracted",
+        "Zip, tar and tar.gz files whose every file is already unpacked in the folder next to them. Each unpacked file is " +
+            "checked against its copy in the archive right before the archive moves to the quarantine. The folder stays.",
+        true,
+    ),
+    OLD_RUNS(
+        "Old run folders",
+        "Folders named by date and time that a tool writes on every run. The newest run, and any from the last two weeks, " +
+            "stay. If these are backups, older ones may hold something the newest doesn't, so review them.",
+        false,
     ),
     THUMBNAIL_CACHES("Thumbnail caches", "Regenerable .thumbnails caches. Galleries rebuild them on demand.", false),
     TRASHED_MEDIA("Gallery trash", "Items already in the system trash (.trashed-*). Android deletes them after 30 days.", false),

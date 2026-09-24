@@ -290,6 +290,116 @@ class LayoutCleanupTest {
         }
     }
 
+    /** Writes a tar (gzip-compressed when [gzip]) the way GNU tar does, with a long name for one entry. */
+    private fun tar(fs: TestFs, rel: String, entries: Map<String, ByteArray>, gzip: Boolean) {
+        val f = File(fs.root, rel)
+        f.parentFile.mkdirs()
+        val raw = java.io.ByteArrayOutputStream()
+        fun header(name: String, size: Int, type: Char) {
+            val h = ByteArray(512)
+            name.toByteArray().copyInto(h, 0, 0, minOf(100, name.length))
+            "0000644".toByteArray().copyInto(h, 100)
+            String.format("%011o", size).toByteArray().copyInto(h, 124)
+            String.format("%011o", old / 1000).toByteArray().copyInto(h, 136)
+            h[156] = type.code.toByte()
+            "ustar  ".toByteArray().copyInto(h, 257)
+            "        ".toByteArray().copyInto(h, 148)
+            val sum = h.sumOf { it.toInt() and 0xff }
+            String.format("%06o", sum).toByteArray().copyInto(h, 148)
+            h[154] = 0
+            raw.write(h)
+        }
+        fun pad(n: Int) = raw.write(ByteArray((512 - n % 512) % 512))
+        for ((name, bytes) in entries) {
+            if (name.length > 100) {
+                header("././@LongLink", name.length + 1, 'L')
+                raw.write(name.toByteArray() + 0)
+                pad(name.length + 1)
+            }
+            header(name, bytes.size, '0')
+            raw.write(bytes)
+            pad(bytes.size)
+        }
+        raw.write(ByteArray(1024))
+        if (gzip) java.util.zip.GZIPOutputStream(f.outputStream()).use { it.write(raw.toByteArray()) } else f.writeBytes(raw.toByteArray())
+        f.setLastModified(old)
+    }
+
+    @Test
+    fun tarBackupsOfFoldersThatAreStillThereAreQuarantinedOnlyWhileTheyMatch() = runTest {
+        TestFs().use { fs ->
+            val long = "deep/" + "x".repeat(120) + ".txt"
+            val files = mapOf("notes.txt" to bytes(1), "sub/data.bin" to bytes(2, 9000), long to bytes(3))
+            tar(fs, "Documents/Backups/Project.tar.gz", files.mapKeys { "Project/${it.key}" }, gzip = true)
+            tar(fs, "Documents/Backups/Other.tar", files, gzip = false)
+            files.forEach { (name, data) -> fs.file("Documents/Backups/Project/$name", data) }
+            files.forEach { (name, data) -> fs.file("Documents/Backups/Other/$name", data) }
+            fs.ageDirectories()
+
+            val found = scan(fs).junk.filter { it.category == JunkCategory.EXTRACTED_ARCHIVES }
+            assertEquals(setOf(fs.path("Documents/Backups/Project.tar.gz"), fs.path("Documents/Backups/Other.tar")), found.map { it.path }.toSet())
+
+            // The unpacked copy changed after the scan: that archive stays.
+            fs.file("Documents/Backups/Other/sub/data.bin", bytes(9, 9000))
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Clutter", "junk", found)
+            assertEquals(1, summary.quarantined)
+            assertFalse(fs.exists("Documents/Backups/Project.tar.gz"))
+            assertTrue(fs.exists("Documents/Backups/Other.tar"))
+            assertTrue(fs.exists("Documents/Backups/Project/$long"))
+        }
+    }
+
+    @Test
+    fun heapDumpsAndOldRunsOfAToolAreClutter() = runTest {
+        TestFs().use { fs ->
+            val now = System.currentTimeMillis()
+            fs.random("Documents/Reports/leakcanary-com.example/2026-09-01_heap.hprof", 4000, 1, mtime = now - 10 * DAY_MS)
+            fs.random("Documents/Reports/leakcanary-com.example/today.hprof", 4000, 2, mtime = now - 3_600_000)
+            // Three runs of one tool from three weeks ago, and one from yesterday.
+            listOf("20260901-101500-111", "20260902-101500-222", "20260903-101500-333").forEachIndexed { i, run ->
+                fs.random("Documents/Ultimate-Cleanup/runs/$run/report.log", 2000 + i, 10 + i, mtime = now - (30 - i) * DAY_MS)
+            }
+            fs.random("Documents/Ultimate-Cleanup/runs/20260923-080000-444/report.log", 2000, 20, mtime = now - DAY_MS)
+            // Dated folders of photos are not runs.
+            listOf("2024-01-01 10.00", "2024-02-01 10.00", "2024-03-01 10.00").forEachIndexed { i, d ->
+                fs.random("Pictures/Trips/$d/IMG_$i.jpg", 900, 30 + i)
+            }
+            fs.ageDirectories()
+            val junk = scan(fs).junk
+            assertEquals(listOf("2026-09-01_heap.hprof"), junk.filter { it.category == JunkCategory.HEAP_DUMPS }.map { it.title })
+            val runs = junk.filter { it.category == JunkCategory.OLD_RUNS }
+            assertEquals(listOf("20260901-101500-111", "20260902-101500-222", "20260903-101500-333"), runs.map { it.title }.sorted())
+            assertTrue(runs.all { !it.defaultSelected && it.note.contains("20260923-080000-444 is newer") })
+        }
+    }
+
+    @Test
+    fun installersOfInstalledAppsAnywhereAndOlderInstallersAreOffered() = runTest {
+        TestFs().use { fs ->
+            fs.random("MT2/apks/Layla.apk", 5000, 1)
+            fs.random("Documents/Software/APKs/tool-1.0.apk", 3000, 2)
+            fs.random("Documents/Software/APKs/tool-1.2.apk", 3000, 3)
+            fs.random("Download/tool-1.1.apk", 3000, 4)
+            fs.ageDirectories()
+            val env = object : DeviceEnvironment {
+                override val deviceLabel = "Test-Phone"
+                override fun installedVersionCode(packageName: String): Long? = if (packageName == "ai.layla") 40 else null
+                override fun apkInfo(path: String): ApkInfo? = when (path.substringAfterLast('/')) {
+                    "Layla.apk" -> ApkInfo("ai.layla", 40, "4.0")
+                    "tool-1.0.apk" -> ApkInfo("com.example.tool", 10, "1.0")
+                    "tool-1.1.apk" -> ApkInfo("com.example.tool", 11, "1.1")
+                    "tool-1.2.apk" -> ApkInfo("com.example.tool", 12, "1.2")
+                    else -> null
+                }
+            }
+            val junk = Steward(fs.rootPath, testSettings.copy(minDuplicateBytes = 1L shl 40), env, null).scan().junk
+            assertEquals(listOf(fs.path("MT2/apks/Layla.apk")), junk.filter { it.category == JunkCategory.INSTALLED_APKS }.map { it.path })
+            val older = junk.filter { it.category == JunkCategory.OLD_INSTALLERS }
+            assertEquals(setOf("tool-1.0.apk", "tool-1.1.apk"), older.map { it.title }.toSet())
+            assertTrue(older.all { it.note.endsWith("1.2 is in APKs") && !it.defaultSelected })
+        }
+    }
+
     @Test
     fun dateFoldersOfLibrariesAreOnlySuggested() = runTest {
         TestFs().use { fs ->

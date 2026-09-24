@@ -111,7 +111,9 @@ class OptimizePlanner(
                     "log holds ${log.totalBytes.humanBytes()}, none of it ${settings.oldLogDays} days old",
                     "Samsung keeps a rolling set of Wi-Fi, ewlogd and dump logs in /log and writes new ones as old ones go, so it " +
                         "fills up again after a clean-up. Logs count as clutter once they are ${settings.oldLogDays} days old " +
-                        "(Settings → System logs are old after).",
+                        "(Settings → System logs are old after). To stop the refill at its source on a Galaxy: dial *#9900#, tap " +
+                        "\"Delete dumpstate/logcat\" and set Silent log to Off; in Developer options, turn off Wi-Fi verbose " +
+                        "logging if it is on.",
                     log.path,
                 )
             }
