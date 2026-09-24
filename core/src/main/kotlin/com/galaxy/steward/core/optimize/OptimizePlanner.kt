@@ -1,5 +1,6 @@
 package com.galaxy.steward.core.optimize
 
+import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.MIB
 import com.galaxy.steward.core.SafetyPolicy
@@ -87,7 +88,8 @@ class OptimizePlanner(
 
         space?.let { insights += spaceInsight(it) }
         if (keys.isNotEmpty()) {
-            val names = keys.sortedBy { it.name.lowercase() }.map { it.name }
+            val names = keys.groupBy { it.name }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+                .map { (name, same) -> if (same.size > 1) "$name (${same.size})" else name }
             insights += Insight(
                 Severity.ADVICE,
                 "${keys.size} key or credential ${if (keys.size == 1) "file sits" else "files sit"} in shared storage",
@@ -97,6 +99,22 @@ class OptimizePlanner(
                     "makes them easier to find and harder to leak.",
                 keys.first().path,
             )
+        }
+        // A big /log with nothing old enough in it: Samsung keeps a rolling set there, so say why none of it is clutter.
+        tree.find("log")?.takeIf { it.totalBytes >= 500 * MIB }?.let { log ->
+            var oldest = Long.MAX_VALUE
+            log.walkFiles { if (it.mtime < oldest) oldest = it.mtime }
+            val days = (environment.nowMillis() - oldest) / DAY_MS
+            if (days < settings.oldLogDays) {
+                insights += Insight(
+                    Severity.INFO,
+                    "log holds ${log.totalBytes.humanBytes()}, none of it ${settings.oldLogDays} days old",
+                    "Samsung keeps a rolling set of Wi-Fi, ewlogd and dump logs in /log and writes new ones as old ones go, so it " +
+                        "fills up again after a clean-up. Logs count as clutter once they are ${settings.oldLogDays} days old " +
+                        "(Settings → System logs are old after).",
+                    log.path,
+                )
+            }
         }
         val totalFiles = tree.root.totalFiles
         if (codeFiles >= 20_000 && codeFiles * 2 >= totalFiles) {
@@ -335,7 +353,8 @@ class OptimizePlanner(
     private fun datedSourceFolder(dir: DirNode): OptimizeItem? {
         val home = dir.parent ?: return null
         if (!dateFolder.matches(dir.name) || dateFolder.matches(home.name) || dir.hidden) return null
-        if (!insideCodeTree(home) && !home.insideFlagged(NodeFlags.CODE_TREE)) return null
+        val code = insideCodeTree(home) || home.insideFlagged(NodeFlags.CODE_TREE)
+        if (!code) return datedLibraryFolder(dir, home)
         if (dir.subtreeHas(NodeFlags.HAS_SYMLINK or NodeFlags.HAS_SPECIAL or NodeFlags.UNREADABLE or NodeFlags.HAS_UNSAFE_NAME)) return null
         // Everything the sorting made: this folder and date folders nested in it, holding files only.
         val files = ArrayList<FileNode>()
@@ -360,6 +379,40 @@ class OptimizePlanner(
                 if (kept > 0) " $kept stay because the name is already taken." else "",
             fileCount = movable.size,
             defaultSelected = true,
+            operations = movable.map { MoveFileOp(it.path, "${home.path}/${it.name}", it.size, it.mtime) },
+        )
+    }
+
+    /**
+     * The same mistake outside source code: 1.2.0 also sorted preset and document libraries by date (a phone showed
+     * `ViPER4Android-Presets/Kernel/2020-10` with 1,047 presets). Today only photos and videos are sorted by date, so a
+     * date folder of other files, every one of them dated inside that period, was most likely made by it. People do
+     * make date folders themselves, so this is only a suggestion.
+     */
+    private fun datedLibraryFolder(dir: DirNode, home: DirNode): OptimizeItem? {
+        if (dir.zone != Zone.USER_MANAGED || dir.dirs.isNotEmpty() || dir.files.size < 20) return null
+        if (dir.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) || isHome(dir)) return null
+        val files = dir.files
+        if (files.count { it.kind == FileKind.IMAGE || it.kind == FileKind.VIDEO } * 5 > files.size) return null
+        if (files.any { it.mtime > recentCutoff }) return null
+        val zone = ZoneId.systemDefault()
+        val inPeriod = files.all { f ->
+            val date = Instant.ofEpochMilli(f.mtime).atZone(zone)
+            dir.name == date.year.toString() || dir.name == "%04d-%02d".format(date.year, date.monthValue)
+        }
+        if (!inPeriod) return null
+        val taken = home.files.mapTo(HashSet()) { it.name } + home.dirs.map { it.name }
+        val movable = files.filter { it.name !in taken }
+        if (movable.isEmpty()) return null
+        return OptimizeItem(
+            id = "undate:${dir.path.hashCode().toString(16)}:${dir.path.length}",
+            kind = OptimizeKind.REPAIR_DATE_FOLDERS,
+            path = dir.path,
+            title = dir.relPath,
+            detail = "Move ${movable.size} files back into ${home.name}? An earlier version sorted libraries like this by date; " +
+                "leave it if you made this folder yourself.",
+            fileCount = movable.size,
+            defaultSelected = false,
             operations = movable.map { MoveFileOp(it.path, "${home.path}/${it.name}", it.size, it.mtime) },
         )
     }

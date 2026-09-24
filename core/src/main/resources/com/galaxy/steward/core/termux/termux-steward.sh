@@ -3,6 +3,11 @@
 # Sent by the app through Termux's RUN_COMMAND bridge and run as the Termux user:
 #   bash -c "<this script>" steward audit [--out FILE]
 #   bash -c "<this script>" steward clean [--out FILE] TARGET...
+#   bash -c "<this script>" steward packages [--out FILE]
+#   bash -c "<this script>" steward pkg-plan [--out FILE] PACKAGE...
+#   bash -c "<this script>" steward pkg-remove [--out FILE] [--autoremove] PACKAGE...
+#   bash -c "<this script>" steward distro-remove [--out FILE] ROOTFS
+#   bash -c "<this script>" steward delete [--out FILE] PATH...
 #
 # Ported from the Koa Whole-Device Storage Steward v18 (safe_clean, dev_cache_clean,
 # deep_termux_known_cache_cleanup, clean_proot_rebuildable_caches, cleanup_git_rebuildables).
@@ -298,7 +303,7 @@ repo_of() {
 
 # ---------------------------------------------------------------- audit
 
-# Sizes (KiB) of everything of 50 MiB or more below the Termux files folder, from one walk. Earlier versions walked
+# Sizes (KiB) of everything of 1 MiB or more below the Termux files folder, from one walk. Earlier versions walked
 # the whole tree four or five times (du per level, per distro, then find for large files): about six minutes on a
 # real phone with proot distributions installed.
 declare -A BIG=()
@@ -306,7 +311,7 @@ load_sizes() {
   local k p
   while IFS=$'\t' read -r k p; do
     has_controls "$p" || BIG["$p"]="$k"
-  done < <(du -x -a -k -t 50M -- "$FILES" 2>/dev/null)
+  done < <(du -x -a -k -t 1M -- "$FILES" 2>/dev/null)
 }
 
 # Bytes used by a folder: from the one-walk map, or measured directly when it is smaller than the threshold.
@@ -408,6 +413,15 @@ audit() {
     done < <(find "$HOME" -xdev -maxdepth 4 \( -path "$HOME/storage" -o -path "$HOME/.*" \) -prune -o -name .git -print0 -prune 2>/dev/null)
   else
     emit W "git is not installed, so project build outputs were not checked"
+  fi
+
+  # The size map itself, for browsing Termux folder by folder in the app: only into the --out file, because the
+  # result bundle that carries stdout is too small for it.
+  if [ -n "$OUT" ]; then
+    for p in "${!BIG[@]}"; do
+      [ -L "$p" ] && continue
+      if [ -d "$p" ]; then emit S "$(( ${BIG[$p]} * 1024 ))" d "$p"; elif [ -f "$p" ]; then emit S "$(( ${BIG[$p]} * 1024 ))" f "$p"; fi
+    done
   fi
 
   # Largest files anywhere in Termux (report only), from the same walk.
@@ -544,8 +558,218 @@ clean() {
   finish ok
 }
 
+# ---------------------------------------------------------------- packages
+
+PKG_NAME='^[a-z0-9][a-z0-9+._-]*$'
+
+# Termux can't work without these, and this script needs them to run at all. Never removed, whatever apt allows.
+KEEP_PKGS=" apt bash coreutils dash dpkg findutils gawk grep libandroid-support ncurses readline sed tar termux-am termux-am-socket termux-core termux-exec termux-keyring termux-tools "
+
+declare -A PKG_SIZE=() PKG_PROTECTED=()
+
+# Fields are separated by the unit separator, not tabs: read collapses runs of tabs, which would shift every field
+# after an empty one.
+US=$'\037'
+
+# Installed packages: name, bytes, protected, version, dependencies and summary, from dpkg itself.
+load_packages() {
+  local name size status essential priority version deps predeps summary
+  while IFS="$US" read -r name size status essential priority version deps predeps summary; do
+    case "$status" in *" installed") ;; *) continue ;; esac
+    [[ "$name" =~ $PKG_NAME ]] || continue
+    PKG_SIZE["$name"]=$(( ${size:-0} * 1024 ))
+    PKG_PROTECTED["$name"]=0
+    if [ "$essential" = yes ] || [ "$priority" = required ]; then PKG_PROTECTED["$name"]=1; fi
+    case "$KEEP_PKGS" in *" $name "*) PKG_PROTECTED["$name"]=1 ;; esac
+    printf "%s$US%s$US%s$US%s$US%s$US%s\n" "$name" "${PKG_SIZE[$name]}" "${PKG_PROTECTED[$name]}" "$version" "$deps${predeps:+, $predeps}" "$summary"
+  done < <("$PREFIX/bin/dpkg-query" -W -f="\${Package}$US\${Installed-Size}$US\${Status}$US\${Essential}$US\${Priority}$US\${Version}$US\${Depends}$US\${Pre-Depends}$US\${binary:Summary}\n" 2>/dev/null | tr -d '\r')
+}
+
+packages() {
+  local name size protected version deps summary m
+  declare -A manual=()
+  emit V 1 "$HOME" "$PREFIX" 0
+  [ -x "$PREFIX/bin/dpkg-query" ] || refuse "dpkg-query is missing"
+  while IFS= read -r name; do manual["$name"]=1; done < <("$PREFIX/bin/apt-mark" showmanual 2>/dev/null)
+  while IFS="$US" read -r name size protected version deps summary; do
+    has_controls "$version$deps$summary" && continue
+    m=0; [ -n "${manual[$name]:-}" ] && m=1
+    emit K "$name" "$size" "$m" "$protected" "$version" "$deps" "$summary"
+  done < <(load_packages)
+  finish ok
+}
+
+valid_packages() {
+  local n
+  [ "$#" -gt 0 ] || refuse "no packages given"
+  for n in "$@"; do [[ "$n" =~ $PKG_NAME ]] || refuse "not a package name: $n"; done
+}
+
+# What apt would remove (one name per line), from its own dry run; fails with apt's message.
+simulate_remove() {
+  local out
+  out="$("$PREFIX/bin/apt-get" -s -q remove "$@" 2>&1)" || { printf '%s\n' "$out" | tail -n 1 >&2; return 1; }
+  printf '%s\n' "$out" | awk '$1 == "Remv" { print $2 }' | sed 's/:.*//'
+}
+
+# For each package apt would remove: P, name, bytes, why (requested / dependent: something you picked needs it gone
+# too / orphan: nothing needs it any more, only with --autoremove) and whether it is protected.
+pkg_plan() {
+  local n kind err
+  declare -A want=() base=()
+  emit V 1 "$HOME" "$PREFIX" 0
+  valid_packages "$@"
+  load_packages > /dev/null
+  for n in "$@"; do want["$n"]=1; done
+  if ! err="$(simulate_remove "$@" 2>&1 >/dev/null)"; then emit W "apt refused: $err"; finish ok; fi
+  while IFS= read -r n; do base["$n"]=1; done < <(simulate_remove "$@" 2>/dev/null)
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    if [ -n "${want[$n]:-}" ]; then kind=requested; elif [ -n "${base[$n]:-}" ]; then kind=dependent; else kind=orphan; fi
+    emit P "$n" "${PKG_SIZE[$n]:-0}" "$kind" "${PKG_PROTECTED[$n]:-0}"
+  done < <(simulate_remove --autoremove "$@" 2>/dev/null)
+  finish ok
+}
+
+pkg_remove() {
+  local auto="" n log refused=0
+  declare -A gone=()
+  emit V 1 "$HOME" "$PREFIX" 0
+  if [ "${1:-}" = --autoremove ]; then auto=--autoremove; shift; fi
+  valid_packages "$@"
+  load_packages > /dev/null
+  # Checked again here: the dry run decides, and one protected package stops the whole removal.
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    gone["$n"]=1
+    if [ "${PKG_PROTECTED[$n]:-0}" = 1 ]; then result "$n" SKIP_PROTECTED 0 0 "" "Termux needs it"; refused=1; fi
+  done < <(simulate_remove $auto "$@" 2>/dev/null)
+  [ "${#gone[@]}" -gt 0 ] || { emit W "apt would not remove anything"; finish ok; }
+  [ "$refused" = 1 ] && finish ok
+  log="$(DEBIAN_FRONTEND=noninteractive "$PREFIX/bin/apt-get" -y -q remove $auto "$@" 2>&1)" || emit W "apt: $(printf '%s\n' "$log" | grep -E '^(E|W):' | tail -n 1)"
+  for n in "${!gone[@]}"; do
+    if "$PREFIX/bin/dpkg-query" -W -f='${Status}\n' "$n" 2>/dev/null | grep -q ' installed$'; then
+      result "$n" FAILED "${PKG_SIZE[$n]:-0}" "${PKG_SIZE[$n]:-0}" "" "still installed"
+    else
+      result "$n" REMOVED "${PKG_SIZE[$n]:-0}" 0 "" ""
+    fi
+  done
+  finish ok
+}
+
+# ---------------------------------------------------------------- whole distributions and chosen folders
+
+# Removes one proot distribution, the way proot-distro does, when it isn't running.
+distro_remove() {
+  local r="${1:-}" known="" c name="" before after
+  emit V 1 "$HOME" "$PREFIX" 0
+  while IFS= read -r -d '' c; do [ "$c" = "$r" ] && rootfs_allowed "$c" && known=1; done < <(list_rootfs)
+  if [ -z "$known" ]; then result distro SKIP_UNSAFE 0 0 "$r" "not a known proot distribution"; finish ok; fi
+  if proot_running; then result distro SKIP_ACTIVE 0 0 "$r" "a proot distribution is running"; finish ok; fi
+  before="$(size_now "$r")"
+  case "$r" in
+    "$PREFIX"/var/lib/proot-distro/installed-rootfs/*) name="${r##*/}" ;;
+    "$PREFIX"/var/lib/proot-distro/containers/*/rootfs) name="${r%/rootfs}"; name="${name##*/}" ;;
+  esac
+  if [ -n "$name" ] && [ -x "$PREFIX/bin/proot-distro" ]; then
+    "$PREFIX/bin/proot-distro" remove "$name" < /dev/null > /dev/null 2>&1
+  fi
+  # Distros keep read-only files; make them writable, as proot-distro does, before removing what is left.
+  if [ -e "$r" ] && dir_beneath "$r" "$FILES"; then
+    chmod -R u+rwX -- "$r" 2>/dev/null
+    rm -rf -- "$r" 2>/dev/null
+  fi
+  if [ -e "$r" ]; then
+    after="$(size_now "$r")"
+    result distro PARTIAL "$before" "$after" "$r" "some files could not be removed"
+  else
+    result distro CLEARED "$before" 0 "$r" "${name:-distribution} removed"
+  fi
+  finish ok
+}
+
+size_now() { du -x -sk -- "$1" 2>/dev/null | awk '{ print $1 * 1024; exit }'; }
+
+# Packages that installed anything at or below PATH, comma separated (empty when none).
+pkg_owners() {
+  local p="$1" dir="$PREFIX/var/lib/dpkg/info"
+  [ -d "$dir" ] || return 0
+  { grep -lFx -- "$p" "$dir"/*.list; grep -lF -- "$p/" "$dir"/*.list; } 2>/dev/null |
+    sed 's#.*/##; s#\.list$##; s#:.*##' | sort -u | head -n 6 | paste -sd, -
+}
+
+# Where inside a distribution you may delete: your data and add-ons, not its system (remove the whole distribution
+# for that).
+DISTRO_FREE='^(opt|root|home|tmp|var/tmp|var/cache|srv|usr/local)/.+'
+
+# The first private key or keystore below DIR, if any. Certificates (.pem, .der) don't count: decompiled apps are full
+# of them, and they are public.
+private_key_in() {
+  find "$1" -xdev -maxdepth 8 -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pfx' \
+    -o -name '*.kdbx' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name 'id_ecdsa' -o -name '.env' \) -print -quit 2>/dev/null
+}
+
+delete_one() {
+  local p="$1" rel r c owners before after key inside=""
+  if has_controls "$p"; then result path SKIP_UNSAFE 0 0 "" "control characters"; return; fi
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then result path NO_CHANGE 0 0 "$p" "already gone"; return; fi
+  while IFS= read -r -d '' c; do
+    case "$p" in "$c"/*) rootfs_allowed "$c" && inside="$c" ;; esac
+  done < <(list_rootfs)
+  if [ -n "$inside" ]; then
+    rel="${p#"$inside"/}"
+    if ! beneath "$p" "$inside" || ! [[ "$rel" =~ $DISTRO_FREE ]]; then
+      result path SKIP_UNSAFE 0 0 "$p" "part of the distribution's system; remove the whole distribution instead"; return
+    fi
+    if proot_running; then result path SKIP_ACTIVE 0 0 "$p" "a proot distribution is running"; return; fi
+  elif beneath "$p" "$HOME"; then
+    rel="${p#"$HOME"/}"
+    case "$rel" in
+      storage|storage/*|.termux|.termux/*|.ssh|.ssh/*|.gnupg|.gnupg/*)
+        result path SKIP_UNSAFE 0 0 "$p" "Termux or your keys need it"; return ;;
+    esac
+  elif beneath "$p" "$PREFIX"; then
+    case "$p" in
+      "$PREFIX"/var/lib/proot-distro|"$PREFIX"/var/lib/proot-distro/installed-rootfs*|"$PREFIX"/var/lib/proot-distro/containers*)
+        result path SKIP_UNSAFE 0 0 "$p" "remove whole distributions under Linux distributions"; return ;;
+    esac
+    owners="$(pkg_owners "$p")"
+    if [ -n "$owners" ]; then result path SKIP_PACKAGE 0 0 "$p" "$owners"; return; fi
+  else
+    result path SKIP_UNSAFE 0 0 "$p" "outside Termux or through a symlink"; return
+  fi
+  if [ -d "$p" ]; then
+    key="$(private_key_in "$p")"
+    if [ -n "$key" ]; then result path SKIP_KEYS 0 0 "$p" "holds ${key##*/}"; return; fi
+  fi
+  if [ -f "$p" ] && [[ "${p##*/}" =~ \.(jks|keystore|p12|pem|key|kdbx)$|^(id_rsa|id_ed25519|\.env) ]]; then
+    result path SKIP_KEYS 0 0 "$p" "a key or credential"; return
+  fi
+  before="$(size_now "$p")"
+  [ -d "$p" ] && chmod -R u+rwX -- "$p" 2>/dev/null
+  rm -rf -- "$p" 2>/dev/null
+  if [ -e "$p" ]; then
+    after="$(size_now "$p")"
+    result path PARTIAL "$before" "$after" "$p" "some files could not be removed"
+  else
+    result path CLEARED "$before" 0 "$p" ""
+  fi
+}
+
+delete_paths() {
+  local p
+  emit V 1 "$HOME" "$PREFIX" 0
+  for p in "$@"; do delete_one "$p"; done
+  finish ok
+}
+
 case "$MODE" in
   audit) audit ;;
   clean) clean "$@" ;;
+  packages) packages ;;
+  pkg-plan) pkg_plan "$@" ;;
+  pkg-remove) pkg_remove "$@" ;;
+  distro-remove) distro_remove "$@" ;;
+  delete) delete_paths "$@" ;;
   *) refuse "unknown mode: $MODE" ;;
 esac

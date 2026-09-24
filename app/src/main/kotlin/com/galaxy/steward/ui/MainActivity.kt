@@ -48,6 +48,8 @@ import com.galaxy.steward.ui.screens.OptimizeScreen
 import com.galaxy.steward.ui.screens.OrganizeScreen
 import com.galaxy.steward.ui.screens.PermissionScreen
 import com.galaxy.steward.ui.screens.SettingsScreen
+import com.galaxy.steward.ui.screens.TermuxBrowserScreen
+import com.galaxy.steward.ui.screens.TermuxPackagesScreen
 import com.galaxy.steward.ui.screens.TermuxScreen
 import com.galaxy.steward.ui.theme.StewardTheme
 
@@ -65,6 +67,8 @@ object Routes {
     const val APP_FOLDERS = "app-folders"
     const val APP_BROWSER = "app-browser"
     const val TERMUX = "termux"
+    const val TERMUX_BROWSER = "termux-browser"
+    const val TERMUX_PACKAGES = "termux-packages"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
@@ -149,7 +153,9 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.APP_STORAGE) { AppStorageScreen(vm) { nav.popBackStack() } }
             composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm, { nav.navigate(Routes.APP_BROWSER) }) { nav.popBackStack() } }
             composable(Routes.APP_BROWSER) { AppFolderBrowserScreen(vm) { nav.popBackStack() } }
-            composable(Routes.TERMUX) { TermuxScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX) { TermuxScreen(vm, { nav.navigate(it) }) { nav.popBackStack() } }
+            composable(Routes.TERMUX_BROWSER) { TermuxBrowserScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX_PACKAGES) { TermuxPackagesScreen(vm) { nav.popBackStack() } }
         }
     }
 

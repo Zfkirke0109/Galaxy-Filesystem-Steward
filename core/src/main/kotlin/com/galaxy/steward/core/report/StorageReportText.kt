@@ -66,15 +66,25 @@ object StorageReportText {
         val emptyStandard = root.dirs.filter { it.isEmptyStandardFolder() }.map { it.name }
         // Newest file below each folder, in one pass: how fresh a folder is says whether something still writes to it.
         val newest = HashMap<DirNode, Long>()
+        val oldest = HashMap<DirNode, Long>()
         val order = ArrayList<DirNode>()
         root.walkDirs { order += it }
-        for (d in order.asReversed()) newest[d] = maxOf(d.files.maxOfOrNull { it.mtime } ?: 0L, d.dirs.maxOfOrNull { newest[it] ?: 0L } ?: 0L)
+        for (d in order.asReversed()) {
+            newest[d] = maxOf(d.files.maxOfOrNull { it.mtime } ?: 0L, d.dirs.maxOfOrNull { newest[it] ?: 0L } ?: 0L)
+            oldest[d] = minOf(d.files.minOfOrNull { it.mtime } ?: Long.MAX_VALUE, d.dirs.minOfOrNull { oldest[it] ?: Long.MAX_VALUE } ?: Long.MAX_VALUE)
+        }
         fun visit(dir: DirNode, level: Int) {
             val children = dir.dirs.filter { !it.isEmptyStandardFolder() }.sortedByDescending { it.totalBytes }
             val shown = if (level == 0) children else children.filter { it.totalBytes >= minBytes || it.totalFiles >= minFiles }.take(perFolder)
             for (child in shown) {
                 val note = child.stewardNote()?.let { "  [$it]" } ?: ""
-                val age = newest[child]?.takeIf { it > 0 }?.let { ", newest ${ageText(it, scan.finishedAt)}" } ?: ""
+                val newAge = newest[child]?.takeIf { it > 0 }?.let { ageText(it, scan.finishedAt) }
+                val oldAge = oldest[child]?.takeIf { it in 1 until Long.MAX_VALUE }?.let { ageText(it, scan.finishedAt) }
+                val age = when {
+                    newAge == null -> ""
+                    oldAge == null || oldAge == newAge -> ", newest $newAge"
+                    else -> ", newest $newAge, oldest $oldAge"
+                }
                 appendLine("${"  ".repeat(level)}${child.name}/  ${child.totalBytes.humanBytes()}, ${files(child.totalFiles)}$age$note")
                 if (level + 1 < depth && !child.hasFlag(NodeFlags.CODE_TREE) && child.zone != Zone.STEWARD) visit(child, level + 1)
             }

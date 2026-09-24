@@ -254,7 +254,7 @@ private fun describe(e: AppFolderEntry): String = listOfNotNull(
 
 /** A row that opens on tap; [checked] null means it can't be picked. */
 @Composable
-private fun BrowserRow(
+internal fun BrowserRow(
     icon: ImageVector,
     title: String,
     subtitle: String,

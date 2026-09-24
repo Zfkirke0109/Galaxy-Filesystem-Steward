@@ -26,6 +26,7 @@ import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
@@ -439,6 +440,35 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             if (summary.skipped.isNotEmpty()) add("${summary.skipped.size.plural("location")} left alone for safety")
         }
         Outcome.Report("Termux cleaned", lines, summary.skipped.map { "${it.status.lowercase().replace('_', ' ')}: ${it.path.ifEmpty { it.targetId }} ${it.note}".trim() })
+    }
+
+    fun removeTermuxPackages(names: List<String>, autoremove: Boolean) = launchRun("Removing Termux packages") { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.removePackages(names, autoremove)
+        termuxOutcome("Termux packages removed", summary, "package", "packages")
+    }
+
+    fun removeTermuxDistro(rootfs: String) = launchRun("Removing a Linux distribution") { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.removeDistro(rootfs)
+        termuxOutcome("Linux distribution removed", summary, "distribution", "distributions")
+    }
+
+    fun deleteTermuxPaths(paths: List<String>) = launchRun("Deleting in Termux") { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.deletePaths(paths)
+        termuxOutcome("Deleted in Termux", summary, "item", "items")
+    }
+
+    private fun termuxOutcome(title: String, summary: TermuxCleanSummary, one: String, many: String): Outcome.Report {
+        val report = termux.state.value.report
+        val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        val lines = buildList {
+            add("Freed ${summary.freed.humanBytes()} inside Termux")
+            add("${summary.cleared.plural(one, many)} gone")
+            if (skipped.isNotEmpty()) add("${skipped.size.plural(one, many)} left alone")
+        }
+        return Outcome.Report(title, lines, skipped)
     }
 
     /** Empties one run's quarantine, or all of it when [runId] is null. */

@@ -35,6 +35,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.appdata.AppJunkKind
+import com.galaxy.steward.core.termux.TermuxEntry
+import com.galaxy.steward.core.termux.TermuxReport
+import com.galaxy.steward.core.termux.TermuxRootfs
+import com.galaxy.steward.core.termux.TermuxUsage
 import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.ui.MainActivity
 import com.galaxy.steward.ui.Outcome
@@ -416,6 +420,50 @@ class AppFlowTest {
         compose.onNodeWithText("Open").performClick()
         compose.onNodeWithText("Connect Termux").assertExists()
         shot("17-termux-setup")
+
+        // With a Termux scan: browse its folders, see what can't be picked, and remove a distribution only after
+        // "I understand".
+        val files = "/data/data/com.termux/files"
+        val debian = "$files/usr/var/lib/proot-distro/containers/debian/rootfs"
+        vm.termux.showReport(
+            TermuxReport(
+                home = "$files/home", prefix = "$files/usr", prootActive = false,
+                usage = listOf(TermuxUsage(files, 32L shl 30), TermuxUsage("$files/home", 9L shl 30), TermuxUsage("$files/usr", 23L shl 30)),
+                items = emptyList(),
+                rootfs = listOf(TermuxRootfs(debian, 4700L shl 20, false)),
+                largeFiles = emptyList(), warnings = emptyList(), unsafe = emptyList(),
+                entries = listOf(
+                    TermuxEntry("$files/home", 9L shl 30, true),
+                    TermuxEntry("$files/usr", 23L shl 30, true),
+                    TermuxEntry("$files/home/mx_jadx_bad", 515L shl 20, true),
+                    TermuxEntry("$files/home/mx_jadx_bad/out.zip", 400L shl 20, false),
+                    TermuxEntry("$files/home/.termux", 2L shl 20, true),
+                    TermuxEntry("$files/usr/lib", 7300L shl 20, true),
+                    TermuxEntry("$files/usr/opt", 4100L shl 20, true),
+                ),
+            ),
+        )
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Browse Termux"))
+        shot("18-termux-report")
+        compose.onNodeWithText("Browse").performClick()
+        compose.onNodeWithText("home").performClick() // open the folder
+        compose.onNodeWithText("Termux or your keys need it").assertExists() // .termux can't be picked
+        compose.onNodeWithText("mx_jadx_bad").performClick()
+        compose.onNodeWithText("out.zip").assertExists()
+        compose.onNodeWithContentDescription("Back").performClick() // up to home
+        compose.onAllNodes(isToggleable())[0].performClick() // mx_jadx_bad
+        assertEquals(setOf("$files/home/mx_jadx_bad"), vm.termux.state.value.browseSelected)
+        shot("19-termux-browser")
+        compose.onNodeWithText("Delete").performClick()
+        compose.onNodeWithText("Delete 1 item in Termux?").assertExists()
+        compose.onNode(hasText("Delete") and hasAnyAncestor(isDialog())).assertIsNotEnabled()
+        compose.onNodeWithText("Cancel").performClick()
+        repeat(2) { compose.onNodeWithContentDescription("Back").performClick() } // home, then the browser
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Remove"))
+        compose.onNodeWithText("Remove").performClick()
+        compose.onNodeWithText("Remove the debian distribution?").assertExists()
+        shot("20-termux-remove-distro")
+        compose.onNodeWithText("Cancel").performClick()
         scenario.close()
     }
 }

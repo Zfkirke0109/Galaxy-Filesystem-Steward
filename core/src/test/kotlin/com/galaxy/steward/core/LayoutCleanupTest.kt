@@ -247,6 +247,33 @@ class LayoutCleanupTest {
     }
 
     @Test
+    fun dateFoldersOfLibrariesAreOnlySuggested() = runTest {
+        TestFs().use { fs ->
+            val october2020 = java.time.LocalDate.of(2020, 10, 12).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+            repeat(25) { fs.random("Documents/Archives/ViPER4Android-Presets/Full/Kernel/2020-10/preset$it.vdc", 300, it, mtime = october2020) }
+            // Someone's own month folder, with files from other months: not the old sorting.
+            repeat(25) { fs.text("Documents/Invoices/2024-03/invoice$it.pdf", "i$it", mtime = october2020 + it * 40 * DAY_MS) }
+            fs.ageDirectories()
+            val repairs = scan(fs).optimize.filter { it.kind == OptimizeKind.REPAIR_DATE_FOLDERS }
+            assertEquals(listOf(fs.path("Documents/Archives/ViPER4Android-Presets/Full/Kernel/2020-10")), repairs.map { it.path })
+            assertFalse(repairs.single().defaultSelected)
+            assertEquals(25, repairs.single().fileCount)
+        }
+    }
+
+    @Test
+    fun aBigFreshLogFolderIsExplained() = runTest {
+        TestFs().use { fs ->
+            val big = File(fs.root, "log/dumpstate.zip")
+            big.parentFile.mkdirs()
+            java.io.RandomAccessFile(big, "rw").use { it.setLength(600L * 1024 * 1024) } // sparse: size without the bytes
+            fs.ageDirectories()
+            val insights = scan(fs).insights
+            assertTrue(insights.any { it.title == "log holds 600 MiB, none of it 3 days old" })
+        }
+    }
+
+    @Test
     fun aDateFolderIsNeverSortedIntoItself() = runTest {
         TestFs().use { fs ->
             val august = java.time.LocalDate.of(2026, 8, 6).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()

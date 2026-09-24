@@ -106,6 +106,32 @@ data class TermuxRootfs(val path: String, val bytes: Long, val active: Boolean)
 
 data class TermuxLargeFile(val path: String, val size: Long, val mtime: Long)
 
+/** A file or folder of 1 MiB or more in Termux, from the audit's size map. */
+data class TermuxEntry(val path: String, val bytes: Long, val isDirectory: Boolean) {
+    val name: String get() = path.substringAfterLast('/')
+}
+
+/** An installed Termux package, as dpkg describes it. [manual] is false for packages pulled in as dependencies. */
+data class TermuxPackage(
+    val name: String,
+    val bytes: Long,
+    val manual: Boolean,
+    /** Termux or the steward can't work without it: never offered for removal. */
+    val protected: Boolean,
+    val version: String,
+    val depends: Set<String>,
+    val summary: String,
+)
+
+/** One package apt would remove: [kind] is requested, dependent (it needs a requested one) or orphan (nothing needs it after). */
+data class PlannedRemoval(val name: String, val bytes: Long, val kind: String, val protected: Boolean)
+
+data class TermuxRemovalPlan(val packages: List<PlannedRemoval>, val warnings: List<String>) {
+    /** Something Termux needs would go: nothing is removed. */
+    val blocked: Boolean get() = packages.any { it.protected }
+    fun withoutOrphans(): List<PlannedRemoval> = packages.filter { it.kind != "orphan" }
+}
+
 data class TermuxReport(
     val home: String,
     val prefix: String,
@@ -117,7 +143,38 @@ data class TermuxReport(
     val warnings: List<String>,
     /** Known cache paths that were skipped because they are symlinked or out of bounds. */
     val unsafe: List<String>,
+    /** Every file and folder of 1 MiB or more, for browsing (only when the report came through shared storage). */
+    val entries: List<TermuxEntry> = emptyList(),
 ) {
+    private val byParent: Map<String, List<TermuxEntry>> by lazy {
+        entries.groupBy { it.path.substringBeforeLast('/') }.mapValues { (_, list) -> list.sortedByDescending { it.bytes } }
+    }
+    private val byPath: Map<String, TermuxEntry> by lazy { entries.associateBy { it.path } }
+
+    /** The files and folders of 1 MiB or more directly inside [path], largest first. */
+    fun children(path: String): List<TermuxEntry> = byParent[path].orEmpty()
+
+    fun entry(path: String): TermuxEntry? = byPath[path]
+
+    /** The Termux files folder, the top of the size map. */
+    val filesRoot: String get() = home.substringBeforeLast('/')
+
+    /** This report after [freed] (path to bytes freed) went: entries below them drop out, their parents shrink. */
+    fun afterDeleting(freed: Map<String, Long>): TermuxReport {
+        if (freed.isEmpty()) return this
+        val gone = freed.keys
+        val kept = entries.filterNot { e -> gone.any { e.path == it || e.path.startsWith("$it/") } }.map { e ->
+            val less = freed.entries.sumOf { (p, b) -> if (p.startsWith(e.path + "/")) b else 0L }
+            if (less > 0) e.copy(bytes = (e.bytes - less).coerceAtLeast(0)) else e
+        }
+        return copy(
+            entries = kept,
+            rootfs = rootfs.filterNot { it.path in gone },
+            largeFiles = largeFiles.filterNot { f -> gone.any { f.path == it || f.path.startsWith("$it/") } },
+            items = items.filterNot { i -> gone.any { i.path == it || i.path.startsWith("$it/") } },
+        )
+    }
+
     val reclaimableBytes: Long get() = items.sumOf { it.bytes }
 
     /** Total size of the Termux files folder (home + packages). */
@@ -127,17 +184,54 @@ data class TermuxReport(
 }
 
 data class TermuxCleanResult(val targetId: String, val status: String, val before: Long, val after: Long, val path: String, val note: String) {
-    val freed: Long get() = if (status == "CLEARED" || status == "PARTIAL") (before - after).coerceAtLeast(0) else 0
-    val ok: Boolean get() = status == "CLEARED" || status == "NO_CHANGE"
+    /** REMOVED is an uninstalled package: its installed size, as dpkg reports it. */
+    val freed: Long get() = if (status == "CLEARED" || status == "PARTIAL" || status == "REMOVED") (before - after).coerceAtLeast(0) else 0
+    val ok: Boolean get() = status == "CLEARED" || status == "NO_CHANGE" || status == "REMOVED"
 }
 
 data class TermuxCleanSummary(val results: List<TermuxCleanResult>) {
     val freed: Long get() = results.sumOf { it.freed }
-    val cleared: Int get() = results.count { it.status == "CLEARED" || it.status == "PARTIAL" }
+    val cleared: Int get() = results.count { it.status == "CLEARED" || it.status == "PARTIAL" || it.status == "REMOVED" }
     val skipped: List<TermuxCleanResult> get() = results.filter { it.status.startsWith("SKIP") || it.status == "PARTIAL" }
 }
 
 class TermuxException(message: String) : Exception(message)
+
+/**
+ * Why a path in the Termux browser can't be picked, or null when it can. It mirrors the script's own checks so the
+ * browser doesn't offer what the script would refuse; the script still checks everything again (packages that own a
+ * folder are only known to dpkg, inside Termux).
+ */
+object TermuxLocks {
+    /** Inside a distribution only your data and add-ons may go, not its system. */
+    private val DISTRO_FREE = Regex("""^(opt|root|home|tmp|var/tmp|var/cache|srv|usr/local)/.+""")
+    private val PACKAGE_DIRS = setOf("bin", "lib", "libexec", "include", "share", "etc", "var", "glibc", "tmp")
+
+    fun reason(path: String, report: TermuxReport): String? {
+        val home = report.home
+        val prefix = report.prefix
+        report.rootfs.firstOrNull { path == it.path }?.let { return "A Linux distribution: remove it on the Termux screen" }
+        report.rootfs.firstOrNull { path.startsWith(it.path + "/") }?.let { r ->
+            return if (DISTRO_FREE.matches(path.removePrefix(r.path + "/"))) null else "Part of the distribution's system"
+        }
+        if (path == home || path == prefix || path == report.filesRoot) return "Termux itself"
+        if (path.startsWith("$home/")) {
+            val top = path.removePrefix("$home/").substringBefore('/')
+            if (top == "storage") return "Links to shared storage"
+            if (top in setOf(".termux", ".ssh", ".gnupg")) return "Termux or your keys need it"
+        }
+        if (path.startsWith("$prefix/")) {
+            val rel = path.removePrefix("$prefix/")
+            if ('/' !in rel && rel in PACKAGE_DIRS) return "Package files: uninstall packages instead"
+            if (rel == "var/lib/proot-distro" || rel.startsWith("var/lib/proot-distro/installed-rootfs") ||
+                rel.startsWith("var/lib/proot-distro/containers")
+            ) {
+                return "Linux distributions: remove them on the Termux screen"
+            }
+        }
+        return null
+    }
+}
 
 /** Parses the records printed by termux-steward.sh. */
 object TermuxProtocol {
@@ -172,6 +266,7 @@ object TermuxProtocol {
         val large = ArrayList<TermuxLargeFile>()
         val warnings = ArrayList<String>()
         val unsafe = ArrayList<String>()
+        val entries = ArrayList<TermuxEntry>()
         for (p in parsed.records) {
             when (p[0]) {
                 "V" -> if (p.size >= 5) {
@@ -207,6 +302,7 @@ object TermuxProtocol {
                 "L" -> if (p.size >= 4) large += TermuxLargeFile(p[3], p[1].toLongOrNull() ?: 0, (p[2].toLongOrNull() ?: 0) * 1000)
                 "W" -> warnings += p.getOrElse(1) { "" }
                 "X" -> if (p.size >= 3) unsafe += p[2]
+                "S" -> if (p.size >= 4) entries += TermuxEntry(p[3], p[1].toLongOrNull() ?: 0, p[2] == "d")
             }
         }
         // "debian: var/cache/apt/archives" reads better than the full proot-distro path.
@@ -216,7 +312,40 @@ object TermuxProtocol {
             val info = TermuxCatalog.targets.getValue(item.targetId)
             item.copy(title = "${info.title}: ${r.path.substringAfterLast('/')}/${item.path.removePrefix(r.path + "/")}")
         }
-        return TermuxReport(home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe)
+        return TermuxReport(home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries)
+    }
+
+    fun parsePackages(output: String): List<TermuxPackage> {
+        val parsed = parse(output)
+        check(parsed)
+        return parsed.records.filter { it[0] == "K" && it.size >= 8 }.map { p ->
+            TermuxPackage(
+                name = p[1],
+                bytes = p[2].toLongOrNull() ?: 0,
+                manual = p[3] == "1",
+                protected = p[4] == "1",
+                version = p[5],
+                depends = dependencyNames(p[6]),
+                summary = p[7],
+            )
+        }.sortedByDescending { it.bytes }
+    }
+
+    /** "libc++, openssl (>= 3), zlib | libz" -> libc++, openssl, zlib, libz. */
+    fun dependencyNames(field: String): Set<String> =
+        field.split(',', '|').map { it.substringBefore('(').substringBefore(':').trim() }.filter { it.isNotEmpty() }.toSet()
+
+    fun parsePlan(output: String): TermuxRemovalPlan {
+        val parsed = parse(output)
+        check(parsed)
+        val packages = parsed.records.filter { it[0] == "P" && it.size >= 5 }.map { p ->
+            PlannedRemoval(p[1], p[2].toLongOrNull() ?: 0, p[3], p[4] == "1")
+        }
+        val order = listOf("requested", "dependent", "orphan")
+        return TermuxRemovalPlan(
+            packages.sortedWith(compareBy<PlannedRemoval> { order.indexOf(it.kind) }.thenByDescending { it.bytes }),
+            parsed.records.filter { it[0] == "W" }.map { it.getOrElse(1) { "" } },
+        )
     }
 
     fun parseClean(output: String): TermuxCleanSummary {
