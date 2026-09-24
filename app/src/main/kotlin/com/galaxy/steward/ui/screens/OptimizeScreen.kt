@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Android
+import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.UnfoldLess
 import androidx.compose.material3.MaterialTheme
@@ -77,6 +78,7 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                                         OptimizeKind.BUCKET_FLAT_DIR -> Icons.Rounded.CalendarMonth
                                         OptimizeKind.LIFT_BUILD_OUTPUTS -> Icons.Rounded.Android
                                         OptimizeKind.FLATTEN_WRAPPER, OptimizeKind.COLLAPSE_CHAIN -> Icons.Rounded.UnfoldLess
+                                        OptimizeKind.REPAIR_DATE_FOLDERS -> Icons.Rounded.Build
                                     },
                                     MaterialTheme.colorScheme.primary,
                                     size = 32,
@@ -110,6 +112,9 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                     "Installers in ${it.plural("downloaded build", "downloaded builds")} moved up to the top folder, Gradle's metadata quarantined"
                 },
                 list.count { it.kind == OptimizeKind.COLLAPSE_CHAIN }.takeIf { it > 0 }?.let { "${it.plural("chain", "chains")} of empty folders collapsed" },
+                list.filter { it.kind == OptimizeKind.REPAIR_DATE_FOLDERS }.takeIf { it.isNotEmpty() }?.let { r ->
+                    "${r.sumOf { it.fileCount }} source files moved out of date folders, back into their packages"
+                },
             ),
             confirmLabel = "Apply",
             onConfirm = {

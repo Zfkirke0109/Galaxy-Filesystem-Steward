@@ -12,6 +12,7 @@ import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.organize.BuiltInRules
+import com.galaxy.steward.core.organize.Text
 import com.galaxy.steward.core.plan.Insight
 import com.galaxy.steward.core.plan.MoveDirOp
 import com.galaxy.steward.core.plan.MoveFileOp
@@ -46,6 +47,9 @@ class OptimizePlanner(
         val flatReportOnly = ArrayList<DirNode>()
         var deepest: FileNode? = null
         var deepCount = 0
+        val keys = ArrayList<FileNode>()
+        var codeFiles = 0
+        val codeByFolder = HashMap<String, Int>()
 
         // Downloaded build outputs first: an empty-chain collapse inside one would fight over the same folders.
         val artifacts = ArrayList<OptimizeItem>()
@@ -57,13 +61,23 @@ class OptimizePlanner(
 
         tree.root.walkDirs { dir ->
             if (!dir.zone.durable) return@walkDirs
+            datedSourceFolder(dir)?.let(items::add)
             flattenCandidate(dir)?.let(items::add)
             if (artifactRoots.none { (dir.path + "/").startsWith(it) || it.startsWith(dir.path + "/") }) emptyChain(dir)?.let(items::add)
+            // Source code is flat and deep by nature (packages); saying so about every decompiled app is only noise.
+            val code = insideCodeTree(dir) || dir.insideFlagged(NodeFlags.CODE_TREE or NodeFlags.PROJECT_ROOT)
+            if (code && dir.files.isNotEmpty()) {
+                codeFiles += dir.files.size
+                val top = dir.relPath.split('/').take(2).joinToString("/")
+                codeByFolder[top] = (codeByFolder[top] ?: 0) + dir.files.size
+            }
+            // Certificates inside decompiled apps and projects are part of that code, not your keys.
+            if (!code && dir.hasFlag(NodeFlags.HAS_CREDENTIAL)) dir.files.filterTo(keys) { SafetyPolicy.isCredentialName(it.name) }
             if (dir.files.size > settings.flatDirThreshold) {
                 val bucket = bucketCandidate(dir)
-                if (bucket != null) items.add(bucket) else if (!dir.hidden) flatReportOnly.add(dir)
+                if (bucket != null) items.add(bucket) else if (!dir.hidden && !code) flatReportOnly.add(dir)
             }
-            for (f in dir.files) {
+            if (!code) for (f in dir.files) {
                 if (f.depth > 12 || f.path.length > 240) {
                     deepCount++
                     if (deepest == null || f.depth > deepest!!.depth) deepest = f
@@ -72,6 +86,31 @@ class OptimizePlanner(
         }
 
         space?.let { insights += spaceInsight(it) }
+        if (keys.isNotEmpty()) {
+            val names = keys.sortedBy { it.name.lowercase() }.map { it.name }
+            insights += Insight(
+                Severity.ADVICE,
+                "${keys.size} key or credential ${if (keys.size == 1) "file sits" else "files sit"} in shared storage",
+                "Any app with All files access can read ${if (keys.size == 1) "it" else "them"}: ${names.take(8).joinToString(", ")}" +
+                    (if (names.size > 8) " and ${names.size - 8} more" else "") + ". The steward never moves keys, because build " +
+                    "scripts point at them by path. Keeping them in one folder you pin in Settings, or in Termux's private home, " +
+                    "makes them easier to find and harder to leak.",
+                keys.first().path,
+            )
+        }
+        val totalFiles = tree.root.totalFiles
+        if (codeFiles >= 20_000 && codeFiles * 2 >= totalFiles) {
+            val (folder, inFolder) = codeByFolder.maxByOrNull { it.value }!!.toPair()
+            insights += Insight(
+                Severity.ADVICE,
+                "${codeFiles * 100 / totalFiles}% of your files are source code",
+                "${"%,d".format(codeFiles)} of ${"%,d".format(totalFiles)} files are projects and decompiled apps " +
+                    "(${"%,d".format(inFolder)} in $folder). Shared storage goes through Android's storage layer (FUSE), which is " +
+                    "slow with many small files: jadx, apktool, Git and every scan run several times faster on these trees inside " +
+                    "Termux's own home. The steward never moves them itself, because your tools know them by path.",
+                tree.find(folder)?.path,
+            )
+        }
         for (dir in flatReportOnly.sortedByDescending { it.files.size }.take(5)) {
             insights += Insight(
                 Severity.INFO,
@@ -134,7 +173,10 @@ class OptimizePlanner(
         val inner = wrapper.dirs[0]
         if (inner.zone != Zone.USER_MANAGED || inner.hidden) return null
         if (wrapper.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) return null
-        val sameName = baseName(inner.name) == baseName(wrapper.name)
+        // "ViPER4Android-Presets-v2.2.0-Full/Full": the inner folder repeats the end of the outer one's name.
+        val innerWords = Text.normalize(inner.name)
+        val sameName = baseName(inner.name) == baseName(wrapper.name) ||
+            (innerWords.trim().length >= 3 && Text.normalize(wrapper.name).endsWith(innerWords))
         if (!sameName && inner.name.trim().lowercase() !in extractNames) return null
         if (inner.dirs.any { it.name == inner.name } || inner.files.any { it.name == inner.name }) return null
         if (inner.dirs.isEmpty() && inner.files.isEmpty()) return null
@@ -279,6 +321,49 @@ class OptimizePlanner(
         return false
     }
 
+    // ------------------------------------------------------------------ date folders inside source code
+
+    /** A year or year-month folder, as the flat-folder sorting names them. */
+    private val dateFolder = Regex("""^\d{4}(-\d{2})?$""")
+
+    /**
+     * Galaxy Steward 1.2.0 also sorted big source folders into date folders, and the next scan sorted those again:
+     * `jadx/sources/defpackage/2026-08/2026-08/A.java`. Java, Kotlin and smali package folders can't start with a digit,
+     * so a date-named folder inside a source tree is always that mistake. Its files go back to the package folder they
+     * came from, except any whose name is already taken there.
+     */
+    private fun datedSourceFolder(dir: DirNode): OptimizeItem? {
+        val home = dir.parent ?: return null
+        if (!dateFolder.matches(dir.name) || dateFolder.matches(home.name) || dir.hidden) return null
+        if (!insideCodeTree(home) && !home.insideFlagged(NodeFlags.CODE_TREE)) return null
+        if (dir.subtreeHas(NodeFlags.HAS_SYMLINK or NodeFlags.HAS_SPECIAL or NodeFlags.UNREADABLE or NodeFlags.HAS_UNSAFE_NAME)) return null
+        // Everything the sorting made: this folder and date folders nested in it, holding files only.
+        val files = ArrayList<FileNode>()
+        val stack = ArrayDeque(listOf(dir))
+        while (stack.isNotEmpty()) {
+            val d = stack.removeLast()
+            files += d.files
+            for (c in d.dirs) if (dateFolder.matches(c.name)) stack.addLast(c) else return null
+        }
+        if (files.isEmpty() || files.count { it.kind == FileKind.CODE } * 10 < files.size * 8) return null
+        if (files.any { it.mtime > recentCutoff }) return null
+        val taken = home.files.mapTo(HashSet()) { it.name } + home.dirs.map { it.name }
+        val movable = files.groupBy { it.name }.filter { (name, same) -> same.size == 1 && name !in taken }.values.map { it.single() }
+        if (movable.isEmpty()) return null
+        val kept = files.size - movable.size
+        return OptimizeItem(
+            id = "undate:${dir.path.hashCode().toString(16)}:${dir.path.length}",
+            kind = OptimizeKind.REPAIR_DATE_FOLDERS,
+            path = dir.path,
+            title = dir.relPath,
+            detail = "Move ${movable.size} source files back into ${home.name}: an earlier version sorted them into date folders by mistake." +
+                if (kept > 0) " $kept stay because the name is already taken." else "",
+            fileCount = movable.size,
+            defaultSelected = true,
+            operations = movable.map { MoveFileOp(it.path, "${home.path}/${it.name}", it.size, it.mtime) },
+        )
+    }
+
     // ------------------------------------------------------------------ oversized flat folders
 
     private fun bucketCandidate(dir: DirNode): OptimizeItem? {
@@ -301,8 +386,11 @@ class OptimizePlanner(
             val date = Instant.ofEpochMilli(f.mtime).atZone(zone)
             return if (monthly) "%04d-%02d".format(date.year, date.monthValue) else date.year.toString()
         }
+        val bucketNames = movable.map(::bucketOf).distinct()
+        // A "2026-08" folder whose files all fall in 2026-08 would only gain a "2026-08/2026-08" (seen on a real phone).
+        if (bucketNames == listOf(dir.name)) return null
         val ops = movable.map { MoveFileOp(it.path, "${dir.path}/${bucketOf(it)}/${it.name}", it.size, it.mtime) }
-        val buckets = movable.map(::bucketOf).distinct().size
+        val buckets = bucketNames.size
         return OptimizeItem(
             id = "bucket:${dir.path.hashCode().toString(16)}:${dir.path.length}",
             kind = OptimizeKind.BUCKET_FLAT_DIR,

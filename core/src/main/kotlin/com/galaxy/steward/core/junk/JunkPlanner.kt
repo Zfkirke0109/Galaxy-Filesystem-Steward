@@ -40,6 +40,10 @@ class JunkPlanner(
             add(JunkCategory.THUMBNAIL_CACHES, dir.path, true, dir.totalBytes, dir.mtime, "${dir.totalFiles} cached thumbnails")
             return
         }
+        recycleBinOwner(dir)?.let { owner ->
+            recycleBin(dir, owner)
+            return
+        }
         val inLogDir = dir.relPath == "log" || dir.relPath.startsWith("log/")
         for (f in dir.files) classifyFile(f, dir, inLogDir, hidden)
         for (child in dir.dirs) walk(child, hidden)
@@ -77,6 +81,29 @@ class JunkPlanner(
             "All ${entries.size} files are unpacked in ${copy.folder.substringAfterLast('/')}",
             extracted = copy,
         )
+    }
+
+    /** File managers that keep deleted files in shared storage, by bin folder. */
+    private fun recycleBinOwner(dir: DirNode): String? = when {
+        dir.relPath == "MT2/.recycle" -> "MT Manager"
+        dir.depth == 1 && dir.name.startsWith(".Trash-") -> "a Linux-style trash"
+        else -> null
+    }
+
+    /**
+     * Each deleted item in the bin on its own, so one that holds keys or links stays while the rest go. They go to the
+     * quarantine, so they can still come back until it is emptied.
+     */
+    private fun recycleBin(bin: DirNode, owner: String) {
+        for (item in bin.dirs) {
+            if (item.totalFiles == 0 || item.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) continue
+            val shown = item.dirs.singleOrNull()?.takeIf { item.files.isEmpty() }?.name ?: item.name
+            add(JunkCategory.RECYCLE_BINS, item.path, true, item.totalBytes, item.mtime, "$shown, deleted in $owner")
+        }
+        for (f in bin.files) {
+            if (SafetyPolicy.isCredentialName(f.name)) continue
+            add(JunkCategory.RECYCLE_BINS, f.path, false, f.size, f.mtime, "Deleted in $owner")
+        }
     }
 
     private fun isAbandonedDownload(name: String): Boolean =

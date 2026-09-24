@@ -186,7 +186,7 @@ data class FolderMerge(
 
 enum class JunkCategory(val title: String, val description: String, val defaultSelected: Boolean) {
     STALE_DOWNLOADS("Abandoned downloads", "Partial downloads (.crdownload, .part, .tmp) untouched for weeks.", true),
-    OLD_LOGS("Old system logs", "Dumps in /log that Samsung and other OEMs leave behind.", true),
+    OLD_LOGS("Old system logs", "Wi-Fi logs, dumps and bug reports that Samsung and other makers keep writing to /log.", true),
     EMPTY_FOLDERS("Empty folders", "Folders with nothing inside - often left by uninstalled apps.", true),
     INSTALLED_APKS("Installed APKs", "Installer files for apps that are already installed at the same or newer version.", false),
     EXTRACTED_ARCHIVES(
@@ -197,6 +197,7 @@ enum class JunkCategory(val title: String, val description: String, val defaultS
     ),
     THUMBNAIL_CACHES("Thumbnail caches", "Regenerable .thumbnails caches. Galleries rebuild them on demand.", false),
     TRASHED_MEDIA("Gallery trash", "Items already in the system trash (.trashed-*). Android deletes them after 30 days.", false),
+    RECYCLE_BINS("Other apps' recycle bins", "Files you already deleted in MT Manager and similar file managers, still kept in their recycle bins.", true),
     ZERO_BYTE_FILES("Empty files", "Zero-byte files. Occasionally used as markers, so review first.", false),
     ORPHANED_APP_FOLDERS("Leftover app folders", "Top-level folders named after apps that are no longer installed.", false),
 }
@@ -247,6 +248,7 @@ enum class OptimizeKind(val title: String) {
     BUCKET_FLAT_DIR("Oversized flat folder"),
     LIFT_BUILD_OUTPUTS("Installers buried in build folders"),
     COLLAPSE_CHAIN("Chain of empty folders"),
+    REPAIR_DATE_FOLDERS("Date folders inside source code"),
 }
 
 data class OptimizeItem(

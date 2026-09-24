@@ -63,7 +63,8 @@ class SettingsStore(context: Context) {
             quarantineDuplicates = prefs.getBoolean("quarantineDuplicates", d.quarantineDuplicates),
             quarantineRetentionDays = prefs.getInt("quarantineRetentionDays", d.quarantineRetentionDays),
             staleTempDays = prefs.getInt("staleTempDays", d.staleTempDays),
-            oldLogDays = prefs.getInt("oldLogDays", d.oldLogDays),
+            // A new key: the old one was saved with every settings change, so 14 days stuck even for people who never chose it.
+            oldLogDays = prefs.getInt("systemLogDays", d.oldLogDays),
             flatDirThreshold = prefs.getInt("flatDirThreshold", d.flatDirThreshold),
             mediaYearBuckets = prefs.getBoolean("mediaYearBuckets", d.mediaYearBuckets),
             recentFileGuardMinutes = prefs.getInt("recentFileGuardMinutes", d.recentFileGuardMinutes),
@@ -81,7 +82,7 @@ class SettingsStore(context: Context) {
             putBoolean("quarantineDuplicates", s.quarantineDuplicates)
             putInt("quarantineRetentionDays", s.quarantineRetentionDays)
             putInt("staleTempDays", s.staleTempDays)
-            putInt("oldLogDays", s.oldLogDays)
+            putInt("systemLogDays", s.oldLogDays)
             putInt("flatDirThreshold", s.flatDirThreshold)
             putBoolean("mediaYearBuckets", s.mediaYearBuckets)
             putInt("recentFileGuardMinutes", s.recentFileGuardMinutes)

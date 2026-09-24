@@ -201,7 +201,7 @@ class LayoutCleanupTest {
             assertEquals("Galaxy Steward test report", lines.first())
             assertTrue(text, lines.any { it.startsWith("Download/  ") })
             assertTrue(text, lines.any { it.startsWith("  tool/  ") && it.endsWith("[project]") })
-            assertTrue(text, lines.any { it.startsWith("  big/  5.9 KiB, 3 files") })
+            assertTrue(text, lines.any { it.startsWith("  big/  5.9 KiB, 3 files, newest ") })
             assertTrue(text, lines.contains("Empty Android folders (Android recreates them): Alarms, Podcasts"))
             assertTrue(text, lines.none { it.startsWith("Alarms/") })
             assertTrue(text, lines.any { it.startsWith("scan done in ") })
@@ -209,6 +209,131 @@ class LayoutCleanupTest {
             assertTrue(text, lines.contains("    usr/var/lib/proot-distro/installed-rootfs/debian  5.0 GiB"))
             assertTrue(text, lines.contains("    ~/models/llama.gguf  4.0 GiB"))
             assertFalse("no file names from shared storage", text.contains("part0.bin") || text.contains("a.jpg"))
+        }
+    }
+
+    @Test
+    fun dateFoldersInsideSourceTreesGoBackIntoTheirPackages() = runTest {
+        TestFs().use { fs ->
+            // What 1.2.0 did to decompiled apps on the phone: sorted by month, then sorted again.
+            val jadx = "Download/Projects/Forensics/app.apk/jadx/sources/defpackage"
+            fs.text("$jadx/Kept.java", "class Kept {}")
+            fs.text("$jadx/2026-08/2026-08/A.java", "class A {}")
+            fs.text("$jadx/2026-08/2026-08/B.java", "class B {}")
+            fs.text("$jadx/2026-08/2026-08/Kept.java", "class Kept { /* other */ }") // name taken: stays where it is
+            val smali = "Download/Projects/qq/smali_classes2/com/tencent/nativeinterface"
+            fs.text("$smali/2026-08/C.smali", ".class LC;")
+            fs.text("$smali/2026-08/D.smali", ".class LD;")
+            // A real year folder of photos is not source code.
+            fs.random("Pictures/Imported/2024/IMG_1.jpg", 900, 1)
+            fs.ageDirectories()
+
+            val report = scan(fs)
+            val repairs = report.optimize.filter { it.kind == OptimizeKind.REPAIR_DATE_FOLDERS }
+            assertEquals(setOf(fs.path("$jadx/2026-08"), fs.path("$smali/2026-08")), repairs.map { it.path }.toSet())
+            assertTrue(repairs.all { it.defaultSelected })
+            assertEquals(2, repairs.single { it.path.startsWith(fs.path(jadx)) }.fileCount)
+
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Optimize", "optimize", repairs)
+            assertEquals(0, summary.failed + summary.skipped)
+            assertTrue(fs.exists("$jadx/A.java"))
+            assertTrue(fs.exists("$jadx/B.java"))
+            assertEquals("class Kept {}", File(fs.root, "$jadx/Kept.java").readText())
+            assertTrue(fs.exists("$jadx/2026-08/2026-08/Kept.java"))
+            assertTrue(fs.exists("$smali/C.smali"))
+            assertFalse(fs.exists("$smali/2026-08")) // emptied and removed
+            assertTrue(fs.exists("Pictures/Imported/2024/IMG_1.jpg"))
+        }
+    }
+
+    @Test
+    fun aDateFolderIsNeverSortedIntoItself() = runTest {
+        TestFs().use { fs ->
+            val august = java.time.LocalDate.of(2026, 8, 6).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+            repeat(6) { fs.random("Pictures/Imported/2026-08/IMG_$it.jpg", 500, it, mtime = august) }
+            repeat(6) { fs.random("Pictures/Imported/Mixed/IMG_$it.jpg", 500, it + 10, mtime = august - it * 200 * DAY_MS) }
+            repeat(8) { fs.text("Download/Projects/app/src/main/java/com/x/C$it.java", "class C$it {}") }
+            fs.ageDirectories()
+            val report = Steward(fs.rootPath, testSettings.copy(flatDirThreshold = 4), TestEnv, File(fs.stateDir, "hash-cache.tsv")).scan()
+            val buckets = report.optimize.filter { it.kind == OptimizeKind.BUCKET_FLAT_DIR }.map { it.path }
+            assertEquals(listOf(fs.path("Pictures/Imported/Mixed")), buckets)
+            // Source folders are flat by nature: no "files in one folder" advice about them.
+            assertTrue(report.insights.none { it.title.endsWith("files in one folder") && it.path!!.contains("/src/") })
+        }
+    }
+
+    @Test
+    fun recycleBinsAndDaysOldSystemLogsAreClutter() = runTest {
+        TestFs().use { fs ->
+            val now = System.currentTimeMillis()
+            fs.random("MT2/.recycle/6KQS080B8AXJ/_StorageSteward/run.tsv", 3000, 1) // deleted in MT Manager
+            fs.text("MT2/.recycle/9ZZ/signing.jks", "key") // a deleted key still never goes anywhere
+            fs.random("MT2/apks/tool.apk", 2000, 2) // MT Manager's own working folder stays
+            fs.random("log/dumpstate_2026-09-18.zip", 4000, 3, mtime = now - 5 * DAY_MS)
+            fs.random("log/ewlogd/current.log", 500, 4, mtime = now - 3_600_000) // still being written
+            fs.ageDirectories()
+
+            val junk = scan(fs).junk
+            val bins = junk.filter { it.category == JunkCategory.RECYCLE_BINS }
+            assertEquals(listOf(fs.path("MT2/.recycle/6KQS080B8AXJ")), bins.map { it.path })
+            assertEquals("_StorageSteward, deleted in MT Manager", bins.single().note)
+            assertEquals(listOf(fs.path("log/dumpstate_2026-09-18.zip")), junk.filter { it.category == JunkCategory.OLD_LOGS }.map { it.path })
+        }
+    }
+
+    @Test
+    fun foldersInsideTheWrongHomeAreFiledWhereTheyBelong() = runTest {
+        TestFs().use { fs ->
+            // As they were on the phone.
+            repeat(3) { fs.random("Documents/Archives/ViPER4Android-Presets-v2.2.0-Full/Full/preset$it.vdc", 300, it) }
+            fs.random("Documents/Audio-DSP/leakcanary-com.example.debug/heap1.hprof", 900, 5)
+            fs.random("Documents/Reports/Diagnostics/leakcanary-com.example.debug/heap2.hprof", 800, 6)
+            fs.random("Documents/Software/APKs/apk/tool.apk", 700, 7)
+            fs.random("Documents/Software/APKs/app.apk", 600, 8)
+            fs.random("Documents/Audio-DSP/Test-Corpora/sweep.wav", 500, 9) // belongs where it is
+            fs.ageDirectories()
+
+            val report = scan(fs)
+            fun move(rel: String) = report.organize.singleOrNull { it.source == fs.path(rel) }
+            val apk = move("Documents/Software/APKs/apk")!!
+            assertEquals(fs.path("Documents/Software/APKs"), apk.destination)
+            assertTrue(apk.defaultSelected)
+            val viper = move("Documents/Archives/ViPER4Android-Presets-v2.2.0-Full")!!
+            assertEquals(fs.path("Documents/Audio-DSP/ViPER4Android-Presets-v2.2.0-Full"), viper.destination)
+            assertFalse(viper.defaultSelected)
+            assertEquals(fs.path("Documents/Reports/Diagnostics/leakcanary-com.example.debug"), move("Documents/Audio-DSP/leakcanary-com.example.debug")!!.destination)
+            assertEquals(null, move("Documents/Audio-DSP/Test-Corpora"))
+            assertEquals(null, move("Documents/Reports/Diagnostics/leakcanary-com.example.debug"))
+            // The preset folder's redundant "Full" inside "…-Full" is flattened.
+            assertTrue(report.optimize.any { it.kind == OptimizeKind.FLATTEN_WRAPPER && it.path == fs.path("Documents/Archives/ViPER4Android-Presets-v2.2.0-Full") })
+
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Organize", "organize", report.organize)
+            assertEquals(0, summary.failed + summary.skipped)
+            assertTrue(fs.exists("Documents/Software/APKs/tool.apk"))
+            assertTrue(fs.exists("Documents/Reports/Diagnostics/leakcanary-com.example.debug/heap1.hprof"))
+            assertTrue(fs.exists("Documents/Reports/Diagnostics/leakcanary-com.example.debug/heap2.hprof"))
+            assertTrue(fs.exists("Documents/Audio-DSP/ViPER4Android-Presets-v2.2.0-Full/Full/preset0.vdc"))
+        }
+    }
+
+    @Test
+    fun keysAndSourceTreesInSharedStorageGetOnePieceOfAdviceEach() = runTest {
+        TestFs().use { fs ->
+            fs.text("Documents/Software/APKs/rootlesszachdsp.jks", "k")
+            fs.text("Download/angle-release-credentials.txt", "k")
+            fs.text("Download/Projects/app/src/main/res/raw/cacert.pem", "part of the code")
+            repeat(20_000) { fs.text("Download/Projects/app/src/main/java/C$it.java", "class C$it {}") }
+            fs.random("DCIM/Camera/a.jpg", 900, 1)
+            fs.ageDirectories()
+
+            val insights = scan(fs).insights
+            val keys = insights.single { it.title.endsWith("in shared storage") }
+            assertEquals("2 key or credential files sit in shared storage", keys.title)
+            assertTrue(keys.detail, keys.detail.startsWith("Any app with All files access can read them: angle-release-credentials.txt, rootlesszachdsp.jks."))
+            assertTrue(insights.none { it.title.startsWith("Left in place: ") && it.title.endsWith(".jks") })
+            val code = insights.single { it.title.endsWith("of your files are source code") }
+            assertEquals("99% of your files are source code", code.title)
+            assertEquals(fs.path("Download/Projects"), code.path)
         }
     }
 

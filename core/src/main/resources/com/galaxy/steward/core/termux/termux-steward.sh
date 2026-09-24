@@ -108,8 +108,24 @@ measure() {
     old) find "$p" -xdev -type f -mtime +7 -printf '%s\n' 2>/dev/null | sum_sizes ;;
     oldlog) find "$p" -xdev -type f -name '*.log' -mtime +7 -printf '%s\n' 2>/dev/null | sum_sizes ;;
     pycache) pycache_dirs "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
+    oldversions) old_versions "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     *) find "$p" -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
   esac
+}
+
+# Versions a self-updating tool (Claude Code) keeps next to the one in use: every entry of P except the newest and the
+# one ~/.local/bin/claude points to. Nothing, unless that link shows which version is in use.
+old_versions() {
+  local p="$1" used newest e
+  used="$(readlink -f -- "$HOME/.local/bin/claude" 2>/dev/null)" || return 0
+  case "$used" in "$p"/*) ;; *) return 0 ;; esac
+  newest="$(find "$p" -mindepth 1 -maxdepth 1 -printf '%T@\t%f\n' 2>/dev/null | sort -rn | head -n 1 | cut -f2)"
+  for e in "$p"/*; do
+    [ -e "$e" ] && [ ! -L "$e" ] || continue
+    [ "${e##*/}" = "$newest" ] && continue
+    case "$used" in "$e"|"$e"/*) continue ;; esac
+    printf '%s\0' "$e"
+  done
 }
 
 # Python bytecode caches (__pycache__) below P, outside shared storage, Git internals and proot distributions.
@@ -121,7 +137,7 @@ pycache_dirs() {
 
 # ---------------------------------------------------------------- known targets
 
-FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches apt-lists"
+FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches claude-versions koa-archives apt-lists"
 
 # id -> path|allowed-root|mode
 target_info() {
@@ -156,6 +172,8 @@ target_info() {
     bun-cache) echo "$HOME/.bun/install/cache|$HOME|contents" ;;
     android-cache) echo "$HOME/.android/cache|$HOME|contents" ;;
     gradle-daemon-logs) echo "$HOME/.gradle/daemon|$HOME|oldlog" ;;
+    claude-versions) echo "$HOME/.local/share/claude/versions|$HOME|oldversions" ;;
+    koa-archives) echo "$HOME/.storage-autopilot-archives|$HOME|contents" ;;
     gradle-caches) echo "$HOME/.gradle/caches|$HOME|contents" ;;
     *) return 1 ;;
   esac
@@ -182,9 +200,10 @@ rootfs_allowed() {
   done
   case "$r" in "$HOME"/*)
     rel="${r#"$HOME"/}"
-    case "$rel" in */*/*|storage/*|workspace/*) return 1 ;; esac
+    case "$rel" in */*/*|storage/*|workspace/*|node_modules/*) return 1 ;; esac
     b="$(printf '%s' "${r##*/}" | tr '[:upper:]' '[:lower:]')"
-    case "$b" in *-rootfs|*-fs) return 0 ;; esac
+    # The name alone isn't enough (~/node_modules/graceful-fs matched it on a real phone): it must look like a Linux root.
+    case "$b" in *-rootfs|*-fs) dir_beneath "$r/etc" "$r" && dir_beneath "$r/usr" "$r" && return 0 ;; esac
     ;;
   esac
   return 1
@@ -197,7 +216,7 @@ list_rootfs() {
       [ -d "$r" ] && [ ! -L "$r" ] && printf '%s\0' "$r"
     done
   done
-  find "$HOME" -xdev -mindepth 1 -maxdepth 2 \( -path "$HOME/storage" -o -path "$HOME/workspace" \) -prune -o \
+  find "$HOME" -xdev -mindepth 1 -maxdepth 2 \( -path "$HOME/storage" -o -path "$HOME/workspace" -o -name node_modules \) -prune -o \
     -type d \( -iname '*-rootfs' -o -iname '*-fs' \) -print0 2>/dev/null
 }
 
@@ -438,6 +457,12 @@ clear_path() {
       while IFS= read -r -d '' d; do
         [ "${d##*/}" = __pycache__ ] && dir_beneath "$d" "$p" && rm -rf -- "$d"
       done < <(pycache_dirs "$p")
+      ;;
+    oldversions)
+      dir_beneath "$p" "$root" || return 1
+      while IFS= read -r -d '' e; do
+        beneath "$e" "$p" && rm -rf -- "$e"
+      done < <(old_versions "$p")
       ;;
     contents|contents-rw)
       dir_beneath "$p" "$root" || return 1

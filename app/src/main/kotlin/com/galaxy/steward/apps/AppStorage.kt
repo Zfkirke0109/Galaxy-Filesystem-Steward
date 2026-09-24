@@ -64,6 +64,13 @@ object AppStorage {
     fun appInfoIntent(packageName: String): Intent =
         Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
+    /**
+     * Whether the Shizuku helper (Android's shell user) may clear another app's cache. Android 17 (API 37) requires
+     * INTERNAL_DELETE_CACHE_FILES for it, which the shell user doesn't hold: the package manager logs "silently
+     * ignoring" and the command still reports success (every clear in the 1.2.5 log verified nothing).
+     */
+    val shellCanClearCaches: Boolean get() = Build.VERSION.SDK_INT < 37
+
     /** Android user id of this process (0 for the main user, 150 for Secure Folder, ...). */
     val userId: Int get() = Process.myUid() / 100_000
 

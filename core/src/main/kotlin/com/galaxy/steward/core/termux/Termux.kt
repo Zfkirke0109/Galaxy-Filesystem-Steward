@@ -72,6 +72,11 @@ object TermuxCatalog {
         TermuxTargetInfo("android-cache", "Android SDK cache", TermuxGroup.DEV, true),
         TermuxTargetInfo("gradle-daemon-logs", "Gradle daemon logs", TermuxGroup.DEV, true, "Only logs older than 7 days"),
         TermuxTargetInfo("gradle-caches", "Gradle caches", TermuxGroup.DEV, false, "Large and slow to download again"),
+        TermuxTargetInfo("claude-versions", "Old Claude Code versions", TermuxGroup.DEV, true, "The version in use and the newest stay"),
+        TermuxTargetInfo(
+            "koa-archives", "Termux steward archives", TermuxGroup.OTHER, false,
+            "Backups the Koa Termux steward script made (~/.storage-autopilot-archives); only needed to undo its old runs",
+        ),
         TermuxTargetInfo("proot-cache", "Distro package cache", TermuxGroup.PROOT, true),
         TermuxTargetInfo("proot-tmp", "Distro temp files", TermuxGroup.PROOT, true, "Only files older than 7 days"),
         TermuxTargetInfo("build", "Build output", TermuxGroup.BUILD, false),

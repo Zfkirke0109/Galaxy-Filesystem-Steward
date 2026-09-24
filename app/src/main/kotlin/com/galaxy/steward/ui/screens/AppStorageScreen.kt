@@ -1,5 +1,6 @@
 package com.galaxy.steward.ui.screens
 
+import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -77,6 +78,8 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
     var confirmData by remember { mutableStateOf<List<AppStorageRow>?>(null) }
     val canClear = shizuku == ShizukuStatus.READY
     val dataMode = mode == ClearMode.DATA
+    // Android 17 ignores cache clears from Shizuku; the cache mode then only points to what still works.
+    val canClearCache = canClear && AppStorage.shellCanClearCaches
     val now = remember(state.apps) { System.currentTimeMillis() }
 
     val rows = remember(state.apps, sort, showSystem) {
@@ -111,9 +114,13 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             } else {
                 ActionBar(
                     summary = "Frees about ${selected.sumOf { it.cacheBytes }.humanBytes()}",
-                    detail = if (canClear) "${selected.size.plural("app cache", "app caches")} selected" else "Connect Shizuku to clear caches here",
+                    detail = when {
+                        !AppStorage.shellCanClearCaches -> "Android ${Build.VERSION.RELEASE} blocks cache clears from other apps"
+                        canClear -> "${selected.size.plural("app cache", "app caches")} selected"
+                        else -> "Connect Shizuku to clear caches here"
+                    },
                     action = "Clear",
-                    enabled = canClear && selected.isNotEmpty(),
+                    enabled = canClearCache && selected.isNotEmpty(),
                 ) { confirm = selected }
             }
         },
@@ -163,7 +170,16 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
                     )
                 }
             }
-            if (!canClear) {
+            if (!dataMode && !AppStorage.shellCanClearCaches) {
+                item {
+                    InlineNotice(
+                        "Android ${Build.VERSION.RELEASE} no longer lets Shizuku clear another app's cache: the request is ignored " +
+                            "without an error. Clear an app's cache in its App info (ⓘ → Storage → Clear cache). Caches inside " +
+                            "Android/data can still be cleaned on the Apps tab under App folders.",
+                        error = true,
+                    )
+                }
+            } else if (!canClear) {
                 item {
                     InlineNotice(
                         if (dataMode) {
@@ -187,7 +203,7 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
             item {
                 Column {
                     ToggleLine("Show system apps", showSystem) { showSystem = it }
-                    if (canClear && !dataMode) {
+                    if (canClearCache && !dataMode) {
                         ToggleLine("Stop each app first (more thorough; stopped apps stay silent until you open them)", stopFirst) { stopFirst = it }
                     }
                 }
@@ -197,7 +213,7 @@ fun AppStorageScreen(vm: StewardViewModel, onBack: () -> Unit) {
                 SelectRow(
                     checked = if (dataMode) row.packageName in state.dataSelected && row.clearBlock == null else row.packageName in state.cacheSelected && !row.protected,
                     onCheckedChange = { if (dataMode) vm.apps.toggleData(row.packageName) else vm.apps.toggleCache(row.packageName) },
-                    enabled = canClear && if (dataMode) row.clearBlock == null && row.clearableBytes > 0 else !row.protected && row.cacheBytes > 0,
+                    enabled = if (dataMode) canClear && row.clearBlock == null && row.clearableBytes > 0 else canClearCache && !row.protected && row.cacheBytes > 0,
                     title = row.label,
                     subtitle = "App data ${row.dataBytes.humanBytes()} · cache ${row.cacheBytes.humanBytes()} · app ${row.appBytes.humanBytes()} · " +
                         (row.lastUsed?.let { "used ${ageText(it, now)}" } ?: "no use recorded"),

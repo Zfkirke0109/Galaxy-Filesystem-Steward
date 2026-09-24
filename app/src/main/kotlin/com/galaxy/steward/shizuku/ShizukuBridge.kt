@@ -36,7 +36,11 @@ enum class ShizukuStatus(val label: String) {
  * Connects to the Shizuku service (ADB-level access without root) and binds [StewardHelperService] inside it.
  * All state changes arrive through Shizuku's listeners; [status] is what the UI shows.
  */
-class ShizukuBridge(private val context: Context) {
+class ShizukuBridge(
+    private val context: Context,
+    /** Reads Shizuku's state; throws while Shizuku can't answer this process yet. Tests replace it. */
+    private val probe: () -> ShizukuStatus = { probeShizuku(context) },
+) {
     private val _status = MutableStateFlow(ShizukuStatus.NOT_INSTALLED)
     val status: StateFlow<ShizukuStatus> = _status.asStateFlow()
 
@@ -51,6 +55,11 @@ class ShizukuBridge(private val context: Context) {
 
     private var connection: ServiceConnection? = null
 
+    // Declared before init, which calls refresh(): Kotlin initializes properties in order, and a retry posted from
+    // there found this still null and crashed the app at start (seen in the 1.2.5 log).
+    private val main = Handler(Looper.getMainLooper())
+    private var retries = 0
+
     init {
         Shizuku.addBinderReceivedListenerSticky { refresh() }
         Shizuku.addBinderDeadListener {
@@ -61,18 +70,9 @@ class ShizukuBridge(private val context: Context) {
         refresh()
     }
 
-    private val main = Handler(Looper.getMainLooper())
-    private var retries = 0
-
     fun refresh() {
         _status.value = try {
-            when {
-                !installed() -> ShizukuStatus.NOT_INSTALLED
-                !Shizuku.pingBinder() -> ShizukuStatus.NOT_RUNNING
-                Shizuku.isPreV11() -> ShizukuStatus.NOT_RUNNING
-                Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> ShizukuStatus.NO_PERMISSION
-                else -> ShizukuStatus.READY
-            }.also { retries = 0 }
+            probe().also { retries = 0 }
         } catch (e: RuntimeException) {
             // Right after an update the new process can ask before Shizuku has attached it ("Not an attached client"),
             // which used to crash the app at start. Treat Shizuku as not ready and ask again in a moment.
@@ -97,13 +97,6 @@ class ShizukuBridge(private val context: Context) {
         val intent = context.packageManager.getLaunchIntentForPackage(MANAGER) ?: return false
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         return true
-    }
-
-    private fun installed(): Boolean = try {
-        context.packageManager.getPackageInfo(MANAGER, 0)
-        true
-    } catch (_: PackageManager.NameNotFoundException) {
-        false
     }
 
     /** The helper, binding it first if needed (on the main thread, like any service binding). Throws when Shizuku is not ready. */
@@ -171,5 +164,21 @@ class ShizukuBridge(private val context: Context) {
         private const val BIND_TIMEOUT_MS = 20_000L
         private const val RETRY_MS = 500L
         private const val MAX_RETRIES = 10
+    }
+}
+
+private fun probeShizuku(context: Context): ShizukuStatus {
+    val installed = try {
+        context.packageManager.getPackageInfo(ShizukuBridge.MANAGER, 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+    return when {
+        !installed -> ShizukuStatus.NOT_INSTALLED
+        !Shizuku.pingBinder() -> ShizukuStatus.NOT_RUNNING
+        Shizuku.isPreV11() -> ShizukuStatus.NOT_RUNNING
+        Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> ShizukuStatus.NO_PERMISSION
+        else -> ShizukuStatus.READY
     }
 }

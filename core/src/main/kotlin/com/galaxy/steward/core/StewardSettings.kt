@@ -12,7 +12,11 @@ data class StewardSettings(
     val quarantineDuplicates: Boolean = false,
     val quarantineRetentionDays: Int = 7,
     val staleTempDays: Int = 14,
-    val oldLogDays: Int = 14,
+    /**
+     * Files in /log older than this are clutter. Samsung keeps writing Wi-Fi, ewlogd and dumpstate logs there (2.2 GiB
+     * on one phone, all under two weeks old); they only matter for a problem you are reporting now.
+     */
+    val oldLogDays: Int = 3,
     /** Directories with more direct files than this are suggested for year bucketing. */
     val flatDirThreshold: Int = 1000,
     /** File imported media under Pictures/Imported/<year>/ rather than one flat folder. */

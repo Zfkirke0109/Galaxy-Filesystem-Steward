@@ -53,6 +53,7 @@ class OrganizePlanner(
         tree.find("Documents")?.takeIf { it.zone == Zone.USER_MANAGED }?.let { documents ->
             for (f in documents.files) planFile(f)
             for (d in documents.dirs) planDocumentsChild(d)
+            planHomeChildren(documents)
         }
         planTopLevel(tree.root)
         return OrganizePlan(moves.sortedWith(compareBy({ it.destinationFolder }, { it.source })), insights.toList())
@@ -116,13 +117,50 @@ class OrganizePlanner(
 
     private fun fileMovable(file: FileNode): Boolean {
         if (file.hidden || SafetyPolicy.isMarkerFile(file.name) || SafetyPolicy.isInProgressDownload(file.name)) return false
-        if (SafetyPolicy.isCredentialName(file.name)) {
-            insights.add(Insight(Severity.INFO, "Left in place: ${file.name}", "Looks like a key or credential, so it is never moved.", file.path))
-            return false
-        }
+        // Keys never move; the optimizer's storage-health advice says where they are, all in one place.
+        if (SafetyPolicy.isCredentialName(file.name)) return false
         if (file.mtime > recentCutoff) return false
         if (file.zone != Zone.USER_MANAGED) return false
         return true
+    }
+
+    // ------------------------------------------------------------------ folders inside the homes
+
+    private fun isHome(dir: DirNode) = BuiltInRules.isHome(dir.relPath, deviceLabel, settings.customRules)
+
+    /**
+     * Folders the organizer's own homes collected that belong elsewhere, seen on a real phone:
+     * `Documents/Archives/ViPER4Android-Presets` is audio presets, `Documents/Audio-DSP/leakcanary-…` is a diagnostics
+     * dump, and `Documents/Software/APKs/apk` is the home itself again. Only folders directly inside a home are looked
+     * at; your own folders elsewhere in Documents stay yours. A folder named after its own home merges into it; the
+     * rest are only suggested.
+     */
+    private fun planHomeChildren(documents: DirNode) {
+        val stack = ArrayDeque(listOf(documents))
+        while (stack.isNotEmpty()) {
+            val home = stack.removeLast()
+            for (child in home.dirs) {
+                if (child.zone != Zone.USER_MANAGED || child.hidden || child.totalFiles == 0) continue
+                if (isHome(child)) {
+                    stack.addLast(child)
+                    continue
+                }
+                if (home === documents) continue // Documents' own children: planDocumentsChild
+                val category = BuiltInRules.categoryFolderDestination(child.name)
+                val rule = rules.firstOrNull { it.matchesFolder(child.name) }?.takeIf { r ->
+                    val dest = r.resolvedDestination(deviceLabel)
+                    dest != home.relPath && !home.relPath.startsWith("$dest/")
+                }
+                when {
+                    category == home.relPath ->
+                        planFolderTo(child, home.path, "Category folder inside its own home (merged)", merge = true, selected = true)
+                    category != null && !home.relPath.startsWith("$category/") ->
+                        planFolderTo(child, "$rootPath/$category", "Category folder → its home (merged)", merge = true, selected = false)
+                    rule != null ->
+                        planFolderTo(child, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${child.name}", "Filed under a better home: ${rule.name}", merge = false, selected = false)
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ top-level folders

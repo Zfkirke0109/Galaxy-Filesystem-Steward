@@ -104,7 +104,7 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
                 }
             }
             item {
-                ChoiceRow("System logs are old after", listOf("7 days" to 7, "14 days" to 14, "30 days" to 30), settings.oldLogDays) { v ->
+                ChoiceRow("System logs are old after", listOf("1 day" to 1, "3 days" to 3, "7 days" to 7, "14 days" to 14, "30 days" to 30), settings.oldLogDays) { v ->
                     vm.updateSettings { it.copy(oldLogDays = v) }
                 }
             }

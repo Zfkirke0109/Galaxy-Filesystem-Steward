@@ -85,6 +85,16 @@ class TermuxScriptTest {
         write(File(home, "scripts/tool.py"), 20)
         write(File(debian, "usr/lib/python3/__pycache__/os.cpython-312.pyc"), 150)
         write(File(debian, "root/.npm/_npx/def/index.js"), 160)
+        // Claude Code keeps every version it updated from; the link says which one is in use.
+        write(File(home, ".local/share/claude/versions/2.1.270"), 100, old - 2 * DAY_MS)
+        write(File(home, ".local/share/claude/versions/2.1.278"), 110, old - DAY_MS)
+        write(File(home, ".local/share/claude/versions/2.1.280"), 120)
+        File(home, ".local/bin").mkdirs()
+        Files.createSymbolicLink(File(home, ".local/bin/claude").toPath(), File(home, ".local/share/claude/versions/2.1.278").toPath())
+        write(File(home, ".storage-autopilot-archives/termux-backups/backup.tar.gz"), 170)
+        // A Node package whose name ends in -fs is not a Linux distribution (seen on a real phone).
+        write(File(home, "node_modules/graceful-fs/tmp/old.js"), 180, old)
+        write(File(home, "node_modules/graceful-fs/package.json"), 10)
         git(File(home, "proj"), "init", "-q")
         git(File(home, "proj"), "add", ".gitignore", "src")
         git(File(home, "proj"), "commit", "-qm", "init")
@@ -142,6 +152,9 @@ class TermuxScriptTest {
         assertEquals(140L, byTarget.getValue("pycache").single().bytes) // not the distro's bytecode
         assertTrue(byTarget.getValue("proot-cache").any { it.path.endsWith("/root/.npm/_npx") })
         assertTrue(byTarget.getValue("other-cache").none { it.path.endsWith("/yarn") }) // counted once, as its own target
+        assertEquals(100L, byTarget.getValue("claude-versions").single().bytes) // not the one in use, not the newest
+        assertFalse(byTarget.getValue("koa-archives").single().defaultSelected)
+        assertTrue(report.items.none { it.path.contains("graceful-fs") })
     }
 
     @Test
@@ -172,6 +185,10 @@ class TermuxScriptTest {
         assertTrue(File(home, "scripts/tool.py").exists())
         assertTrue(File(debian, "usr/lib/python3/__pycache__/os.cpython-312.pyc").exists())
         assertFalse(File(home, ".local/share/Trash/files/old.txt").exists())
+        assertFalse(File(home, ".local/share/claude/versions/2.1.270").exists())
+        assertTrue(File(home, ".local/share/claude/versions/2.1.278").exists())
+        assertTrue(File(home, ".local/share/claude/versions/2.1.280").exists())
+        assertTrue(File(home, "node_modules/graceful-fs/tmp/old.js").exists())
 
         val status = summary.results.associate { (it.targetId + "=" + it.path.substringAfterLast('/')) to it.status }
         assertEquals("SKIP_UNSAFE", status["uv-cache=uv"])

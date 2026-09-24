@@ -207,8 +207,8 @@ class AppsController(
         )
     }
 
-    /** Like the Termux steward's adapters: caches of 25 MiB and more, never protected apps. */
-    private fun defaultCacheSelection(row: AppStorageRow) = !row.protected && row.cacheBytes >= 25 * MIB
+    /** Like the Termux steward's adapters: caches of 25 MiB and more, never protected apps; none where it can't work. */
+    private fun defaultCacheSelection(row: AppStorageRow) = AppStorage.shellCanClearCaches && !row.protected && row.cacheBytes >= 25 * MIB
 
     /** Grants usage access through Shizuku when connected. Returns false when the user must do it in Settings. */
     suspend fun grantUsageAccessWithShizuku(): Boolean {
@@ -243,6 +243,7 @@ class AppsController(
      * counts when the app's live cache size actually dropped; the command's own exit code is not trusted.
      */
     suspend fun clearCaches(packages: List<String>, stopFirst: Boolean, progress: (Int, Int, String) -> Unit): CacheClearResult {
+        check(AppStorage.shellCanClearCaches) { "Android ${Build.VERSION.RELEASE} doesn't let Shizuku clear other apps' caches" }
         val targets = packages.filterNot { AppPolicy.isProtected(it, ownPackage) }.distinct()
         val helper = shizuku.helper()
         val runId = journals.newId()

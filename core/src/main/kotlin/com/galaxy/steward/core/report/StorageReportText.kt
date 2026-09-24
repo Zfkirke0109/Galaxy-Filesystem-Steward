@@ -3,6 +3,7 @@ package com.galaxy.steward.core.report
 import com.galaxy.steward.core.MIB
 import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.SafetyPolicy
+import com.galaxy.steward.core.ageText
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.NodeFlags
@@ -63,12 +64,18 @@ object StorageReportText {
         appendLine("Folders by size. Below the top level only folders of ${minBytes.humanBytes()} or ${files(minFiles)} and more, $depth levels deep.")
         appendLine()
         val emptyStandard = root.dirs.filter { it.isEmptyStandardFolder() }.map { it.name }
+        // Newest file below each folder, in one pass: how fresh a folder is says whether something still writes to it.
+        val newest = HashMap<DirNode, Long>()
+        val order = ArrayList<DirNode>()
+        root.walkDirs { order += it }
+        for (d in order.asReversed()) newest[d] = maxOf(d.files.maxOfOrNull { it.mtime } ?: 0L, d.dirs.maxOfOrNull { newest[it] ?: 0L } ?: 0L)
         fun visit(dir: DirNode, level: Int) {
             val children = dir.dirs.filter { !it.isEmptyStandardFolder() }.sortedByDescending { it.totalBytes }
             val shown = if (level == 0) children else children.filter { it.totalBytes >= minBytes || it.totalFiles >= minFiles }.take(perFolder)
             for (child in shown) {
                 val note = child.stewardNote()?.let { "  [$it]" } ?: ""
-                appendLine("${"  ".repeat(level)}${child.name}/  ${child.totalBytes.humanBytes()}, ${files(child.totalFiles)}$note")
+                val age = newest[child]?.takeIf { it > 0 }?.let { ", newest ${ageText(it, scan.finishedAt)}" } ?: ""
+                appendLine("${"  ".repeat(level)}${child.name}/  ${child.totalBytes.humanBytes()}, ${files(child.totalFiles)}$age$note")
                 if (level + 1 < depth && !child.hasFlag(NodeFlags.CODE_TREE) && child.zone != Zone.STEWARD) visit(child, level + 1)
             }
             val rest = children.size - shown.size
