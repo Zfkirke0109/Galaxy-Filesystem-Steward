@@ -349,4 +349,3 @@ private fun ManageCard(title: String, text: String, action: String, enabled: Boo
         }
     }
 }
-
