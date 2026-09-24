@@ -41,6 +41,7 @@ object RunLog {
         "run \"$title\" ($kind) done in ${seconds(millis)}: moved ${count(s.moved)} (${s.bytesMoved.humanBytes()}), " +
             "deduplicated ${count(s.deduped)}, quarantined ${count(s.quarantined)} (${s.bytesQuarantined.humanBytes()}), " +
             "cleared ${count(s.cleared)}, removed ${count(s.removedDirs)} empty folders, freed ${s.bytesFreed.humanBytes()}; " +
+            (if (s.packed > 0) "packed ${count(s.packed)} into zips (${s.bytesPacked.humanBytes()}), " else "") +
             "skipped ${count(s.skipped)}, failed ${count(s.failed)}" + reasons(s.reasons)
 
     /** "; why: source is gone 1,685, protected (pinned folder) 3": the most common reasons first, at most five. */

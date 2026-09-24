@@ -16,6 +16,7 @@ class PlanHygiene(private val guard: PathGuard) {
         is QuarantineOp -> refused(op.path)
         is DeleteDuplicateOp -> refused(op.path)
         is RemoveEmptyDirOp -> refused(op.path)
+        is PackDirOp -> refused(op.path) || refused(op.zip)
     }
 
     fun junk(items: List<JunkItem>): List<JunkItem> = items.filterNot { refused(it.path) }

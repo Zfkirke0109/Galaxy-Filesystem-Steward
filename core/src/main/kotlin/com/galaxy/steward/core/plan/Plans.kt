@@ -50,6 +50,13 @@ data class ExtractedCopy(val folder: String, val stripPrefix: String)
 /** Remove a directory only if it is still empty at execution time. */
 data class RemoveEmptyDirOp(val path: String) : Operation
 
+/**
+ * Pack a folder nobody has touched in months into [zip] (deflate, best compression), check every file against its copy
+ * in the zip, then move the folder to the quarantine. Lossless: undo unpacks it again. [newest] is the newest file the
+ * scan saw; anything newer at run time means the folder is in use, and it stays.
+ */
+data class PackDirOp(val path: String, val zip: String, val newest: Long) : Operation
+
 /** Anything the user can tick in the UI. */
 sealed interface PlanItem {
     val id: String
@@ -268,6 +275,7 @@ enum class OptimizeKind(val title: String) {
     LIFT_BUILD_OUTPUTS("Installers buried in build folders"),
     COLLAPSE_CHAIN("Chain of empty folders"),
     REPAIR_DATE_FOLDERS("Date folders inside source code"),
+    PACK_COLD_FOLDER("Folders untouched for months, packed"),
 }
 
 data class OptimizeItem(
@@ -279,8 +287,10 @@ data class OptimizeItem(
     val fileCount: Int,
     override val defaultSelected: Boolean,
     override val operations: List<Operation>,
+    /** About how much space applying it saves (packing); 0 for layout fixes. */
+    val savesBytes: Long = 0,
 ) : PlanItem {
-    override val reclaimBytes: Long get() = 0
+    override val reclaimBytes: Long get() = savesBytes
 }
 
 enum class Severity { INFO, ADVICE, WARNING }

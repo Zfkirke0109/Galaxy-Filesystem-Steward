@@ -21,6 +21,7 @@ import com.galaxy.steward.core.plan.Operation
 import com.galaxy.steward.core.plan.QuarantineOp
 import com.galaxy.steward.core.plan.OptimizeItem
 import com.galaxy.steward.core.plan.OptimizeKind
+import com.galaxy.steward.core.plan.PackDirOp
 import com.galaxy.steward.core.plan.RemoveEmptyDirOp
 import com.galaxy.steward.core.plan.Severity
 import java.time.Instant
@@ -86,6 +87,7 @@ class OptimizePlanner(
             }
         }
 
+        coldFolders(tree.root, items)
         space?.let { insights += spaceInsight(it) }
         if (keys.isNotEmpty()) {
             val names = keys.groupBy { it.name }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
@@ -341,6 +343,68 @@ class OptimizePlanner(
         return false
     }
 
+    // ------------------------------------------------------------------ cold folders, packed
+
+    /** Text-like files deflate to about a quarter; photos, video, music and archives are compressed already. */
+    private val textLike = setOf(
+        "txt", "log", "csv", "tsv", "json", "xml", "html", "htm", "md", "yaml", "yml", "ini", "cfg", "conf", "properties",
+        "smali", "java", "kt", "js", "ts", "css", "svg", "sql", "sh", "py", "c", "h", "cpp", "rs", "go", "gradle", "vdc", "eel",
+        "hprof", "trace", "dump", "bak", "out", "srt", "vtt", "rtf", "tex", "bib",
+    )
+
+    /**
+     * Folders of yours nobody has touched in [COLD_DAYS] days, mostly text (logs, exports, reports, presets), packed into
+     * one zip each: the same files, losslessly, in about a quarter of the space for text, and one file instead of
+     * thousands for shared storage's slow file layer. Photos, videos and music are never packed, and nothing is ticked:
+     * you open a packed folder from its zip, or undo the run to unpack it.
+     */
+    private fun coldFolders(root: DirNode, items: MutableList<OptimizeItem>) {
+        val cutoff = environment.nowMillis() - COLD_DAYS * DAY_MS
+        fun visit(dir: DirNode) {
+            for (d in dir.dirs) {
+                if (d.hidden || d.zone != Zone.USER_MANAGED) continue
+                val candidate = packCandidate(d, cutoff)
+                if (candidate != null) items += candidate else if (!d.hasFlag(NodeFlags.CODE_TREE)) visit(d)
+            }
+        }
+        visit(root)
+    }
+
+    private fun packCandidate(d: DirNode, cutoff: Long): OptimizeItem? {
+        if (d.depth < 2 || d.totalFiles < 20 || isHome(d) || d.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) return null
+        if (insideCodeTree(d) || d.insideFlagged(NodeFlags.CODE_TREE or NodeFlags.PROJECT_ROOT)) return null
+        // Already packed, or unpacked from a zip next to it.
+        if (d.parent?.files?.any { it.name.equals(d.name + ".zip", ignoreCase = true) } == true) return null
+        var newest = 0L
+        var media = 0L
+        var packedSize = 0.0
+        d.walkFiles { f ->
+            if (f.mtime > newest) newest = f.mtime
+            when {
+                f.kind == FileKind.IMAGE || f.kind == FileKind.VIDEO || f.kind == FileKind.AUDIO -> media += f.size
+                f.extension in textLike -> packedSize += f.size * 0.25
+                f.kind == FileKind.ARCHIVE || f.kind == FileKind.APK || f.extension == "pdf" -> packedSize += f.size.toDouble()
+                else -> packedSize += f.size * 0.7
+            }
+        }
+        if (newest == 0L || newest > cutoff || media > 0) return null
+        val saves = d.totalBytes - packedSize.toLong()
+        if (saves < 8 * MIB || saves * 10 < d.totalBytes * 3) return null
+        val months = (environment.nowMillis() - newest) / (30 * DAY_MS)
+        return OptimizeItem(
+            id = "pack:${d.path.hashCode().toString(16)}:${d.path.length}",
+            kind = OptimizeKind.PACK_COLD_FOLDER,
+            path = d.path,
+            title = d.relPath,
+            detail = "Pack ${d.totalFiles} files (${d.totalBytes.humanBytes()}) into ${d.name}.zip, about ${saves.humanBytes()} smaller. " +
+                "Untouched for $months months. The zip is checked file by file first; open files from it, or undo in History to unpack.",
+            fileCount = d.totalFiles,
+            defaultSelected = false,
+            operations = listOf(PackDirOp(d.path, "${d.path}.zip", newest)),
+            savesBytes = saves,
+        )
+    }
+
     // ------------------------------------------------------------------ date folders inside source code
 
     /** A year or year-month folder, as the flat-folder sorting names them. */
@@ -464,5 +528,10 @@ class OptimizePlanner(
             defaultSelected = dir.zone == Zone.MEDIA_LIBRARY,
             operations = ops,
         )
+    }
+
+    companion object {
+        /** Folders untouched this long are offered for packing. */
+        const val COLD_DAYS = 90
     }
 }

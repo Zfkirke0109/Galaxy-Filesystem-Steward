@@ -401,6 +401,58 @@ class LayoutCleanupTest {
     }
 
     @Test
+    fun coldTextFoldersArePackedLosslesslyAndUnpackedByUndo() = runTest {
+        TestFs().use { fs ->
+            val longAgo = System.currentTimeMillis() - 200 * DAY_MS
+            // Old logcat exports: text, untouched for months.
+            repeat(30) { i -> fs.text("Documents/Reports/LogcatX/2025/logcat-$i.txt", "I/Tag: line $i\n".repeat(40_000 + i), mtime = longAgo) }
+            fs.dir("Documents/Reports/LogcatX/empty-dir", mtime = longAgo)
+            // Photos are never packed, however old; a folder in use isn't either.
+            repeat(30) { i -> fs.random("Documents/Trips/2019/IMG_$i.jpg", 400_000, i, mtime = longAgo) }
+            repeat(30) { i -> fs.text("Documents/Reports/Current/log-$i.txt", "x".repeat(400_000), mtime = System.currentTimeMillis() - 3 * DAY_MS) }
+            fs.ageDirectories()
+            val packs = scan(fs).optimize.filter { it.kind == OptimizeKind.PACK_COLD_FOLDER }
+            assertEquals(listOf(fs.path("Documents/Reports/LogcatX")), packs.map { it.path })
+            val item = packs.single()
+            assertFalse(item.defaultSelected)
+            assertTrue(item.reclaimBytes > 8 * MIB)
+
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val summary = ActionExecutor(fs.rootPath, journals).execute("Pack", "optimize", packs)
+            assertEquals(1, summary.packed)
+            assertEquals(0, summary.skipped + summary.failed)
+            assertFalse(fs.exists("Documents/Reports/LogcatX"))
+            val zip = File(fs.root, "Documents/Reports/LogcatX.zip")
+            assertTrue(zip.length() < 2 * MIB)
+            java.util.zip.ZipFile(zip).use { z ->
+                assertEquals("I/Tag: line 7\n".repeat(40_007), z.getInputStream(z.getEntry("LogcatX/2025/logcat-7.txt")).readBytes().decodeToString())
+                assertTrue(z.getEntry("LogcatX/empty-dir/") != null)
+                assertEquals(longAgo / 2000, z.getEntry("LogcatX/2025/logcat-7.txt").time / 2000)
+            }
+
+            RollbackEngine(fs.rootPath, journals).rollback(summary.runId)
+            assertFalse(zip.exists())
+            assertEquals("I/Tag: line 7\n".repeat(40_007), File(fs.root, "Documents/Reports/LogcatX/2025/logcat-7.txt").readText())
+            assertTrue(File(fs.root, "Documents/Reports/LogcatX/empty-dir").isDirectory)
+        }
+    }
+
+    @Test
+    fun aFolderChangedAfterTheScanIsNotPacked() = runTest {
+        TestFs().use { fs ->
+            val longAgo = System.currentTimeMillis() - 200 * DAY_MS
+            repeat(30) { i -> fs.text("Documents/Exports/old-$i.csv", "a,b,c\n".repeat(100_000), mtime = longAgo) }
+            fs.ageDirectories()
+            val packs = scan(fs).optimize.filter { it.kind == OptimizeKind.PACK_COLD_FOLDER }
+            fs.text("Documents/Exports/old-3.csv", "changed")
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Pack", "optimize", packs)
+            assertEquals(mapOf("Changed since the scan" to 1), summary.reasons)
+            assertTrue(fs.exists("Documents/Exports/old-3.csv"))
+            assertFalse(fs.exists("Documents/Exports.zip"))
+        }
+    }
+
+    @Test
     fun dateFoldersOfLibrariesAreOnlySuggested() = runTest {
         TestFs().use { fs ->
             val october2020 = java.time.LocalDate.of(2020, 10, 12).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()

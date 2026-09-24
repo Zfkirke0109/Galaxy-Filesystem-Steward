@@ -32,6 +32,7 @@ class OrganizeJunkOptimizeTest {
             is com.galaxy.steward.core.plan.DeleteDuplicateOp -> op.path
             is com.galaxy.steward.core.plan.QuarantineOp -> op.path
             is com.galaxy.steward.core.plan.RemoveEmptyDirOp -> op.path
+            is com.galaxy.steward.core.plan.PackDirOp -> op.path
         }
     }
 

@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Android
+import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.UnfoldLess
@@ -79,6 +80,7 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                                         OptimizeKind.LIFT_BUILD_OUTPUTS -> Icons.Rounded.Android
                                         OptimizeKind.FLATTEN_WRAPPER, OptimizeKind.COLLAPSE_CHAIN -> Icons.Rounded.UnfoldLess
                                         OptimizeKind.REPAIR_DATE_FOLDERS -> Icons.Rounded.Build
+                                        OptimizeKind.PACK_COLD_FOLDER -> Icons.Rounded.Archive
                                     },
                                     MaterialTheme.colorScheme.primary,
                                     size = 32,
