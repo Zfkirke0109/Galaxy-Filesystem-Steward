@@ -140,5 +140,6 @@ private fun MoveRow(move: OrganizeMove, checked: Boolean, root: String, learned:
             if (kind == null) IconBadge(folderIcon, MaterialTheme.colorScheme.primary, size = 32) else IconBadge(kindIcon(kind), kindColor(kind), size = 32)
         },
         trailing = { Pill(if (learnedHome != null) "Learned" else move.reason) },
+        subtitleLines = 4,
     )
 }

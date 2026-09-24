@@ -15,15 +15,18 @@ import android.os.Environment
 import android.os.Looper
 import android.os.Process
 import android.os.storage.StorageManager
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
@@ -36,6 +39,9 @@ import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.appdata.AppJunkKind
 import com.galaxy.steward.core.termux.TermuxEntry
+import com.galaxy.steward.core.termux.TermuxPackage
+import com.galaxy.steward.core.termux.TermuxProgram
+import com.galaxy.steward.core.termux.TermuxRepo
 import com.galaxy.steward.core.termux.TermuxReport
 import com.galaxy.steward.core.termux.TermuxRootfs
 import com.galaxy.steward.core.termux.TermuxUsage
@@ -464,6 +470,43 @@ class AppFlowTest {
         compose.onNodeWithText("Remove the debian distribution?").assertExists()
         shot("20-termux-remove-distro")
         compose.onNodeWithText("Cancel").performClick()
+
+        // Repositories: when each was last used, whether everything is pushed, and one in shared storage to move.
+        val day = 86_400_000L
+        val now = System.currentTimeMillis()
+        val shared = com.galaxy.steward.data.StorageAccess.rootPath
+        vm.termux.showRepos(
+            listOf(
+                TermuxRepo("$files/home/code/app", 40L shl 20, 30L shl 20, 12L shl 20, 0, now - 90 * day, now - 60 * day, now - 60 * day, false, false, 0, "main", "https://github.com/me/app.git"),
+                TermuxRepo("$shared/Download/Projects/lib", -1, 8L shl 20, 0, 0, now - 400 * day, 0, now - 400 * day, false, null, null, "main", ""),
+            ),
+        )
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:Git repositories"))
+        compose.onNodeWithTag("open:Git repositories").performClick()
+        compose.onNodeWithText("everything pushed to github.com/me/app", substring = true).assertExists()
+        compose.onNodeWithText("git gc would pack 12.0 MiB", substring = true).assertExists()
+        compose.onNodeWithText("no remote: this is the only copy", substring = true).assertExists()
+        compose.onNodeWithText("lib (main)").performClick()
+        compose.onNodeWithText("Move into Termux").assertIsEnabled()
+        compose.onNodeWithText("Delete").assertIsNotEnabled()
+        shot("21-termux-repos")
+        compose.onNodeWithText("Move into Termux").performClick()
+        compose.onNodeWithText("Move 1 folder into Termux?").assertExists()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.onNodeWithContentDescription("Back").performClick()
+
+        // Programs npm, pip and cargo installed, with when they were last run.
+        vm.termux.showPackages(
+            listOf(TermuxPackage("chromium", 800L shl 20, true, false, "120", emptySet(), "Web browser", now - 200 * day, 0, 0, listOf("chromium-browser"))),
+            listOf(TermuxProgram("npm", "@mmmbuto/codex-cli-termux", "0.39.0", 197L shl 20, now - 30 * day, now - 2 * day, 14, false, listOf("codex"), "$files/usr/lib/node_modules/@mmmbuto/codex-cli-termux")),
+        )
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:Packages and programs"))
+        compose.onNodeWithTag("open:Packages and programs").performClick()
+        compose.onNodeWithText("never run from your shell history", substring = true).assertExists()
+        compose.onNodeWithText("npm, pip, cargo").performClick()
+        compose.onNodeWithText("runs as codex", substring = true).assertExists()
+        compose.onNodeWithText("last run 2 days ago (14 times)", substring = true).assertExists()
+        shot("22-termux-programs")
         scenario.close()
     }
 }

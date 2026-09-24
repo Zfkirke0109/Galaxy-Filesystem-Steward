@@ -38,10 +38,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.galaxy.steward.core.ageText
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.PlannedRemoval
+import com.galaxy.steward.core.termux.TermuxEntry
 import com.galaxy.steward.core.termux.TermuxLocks
 import com.galaxy.steward.core.termux.TermuxPackage
 import com.galaxy.steward.core.termux.TermuxProtocol
@@ -80,13 +82,18 @@ fun TermuxBrowserScreen(vm: StewardViewModel, onBack: () -> Unit) {
     }
     var path by rememberSaveable { mutableStateOf(report.filesRoot) }
     var confirm by remember { mutableStateOf(false) }
+    // "Untouched longest": the newest change anywhere inside each folder, oldest first.
+    var byAge by rememberSaveable { mutableStateOf(false) }
+    val now = remember { System.currentTimeMillis() }
     val atRoot = path == report.filesRoot
     fun up() {
         path = path.substringBeforeLast('/')
     }
     BackHandler(enabled = !atRoot) { up() }
 
-    val children = report.children(path)
+    val children = report.children(path).let { list ->
+        if (byAge) list.sortedWith(compareBy<TermuxEntry> { if (it.mtime > 0) it.mtime else Long.MAX_VALUE }.thenByDescending { it.bytes }) else list
+    }
     val size = report.entry(path)?.bytes ?: report.totalBytes
     val selected = state.browseSelected.mapNotNull { report.entry(it) }
     val shown = if (atRoot) "Termux" else TermuxProtocol.relative(path, report.home, report.prefix).let { if (it == path) path.removePrefix(report.filesRoot + "/") else it }
@@ -118,6 +125,12 @@ fun TermuxBrowserScreen(vm: StewardViewModel, onBack: () -> Unit) {
                     )
                 }
             }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    FilterChip(selected = !byAge, onClick = { byAge = false }, label = { Text("Largest first") }, modifier = Modifier.padding(end = 8.dp))
+                    FilterChip(selected = byAge, onClick = { byAge = true }, label = { Text("Untouched longest") })
+                }
+            }
             if (atRoot) {
                 item {
                     InlineNotice(
@@ -132,7 +145,10 @@ fun TermuxBrowserScreen(vm: StewardViewModel, onBack: () -> Unit) {
                 BrowserRow(
                     icon = if (e.isDirectory) folderIcon else kindIcon(FileKind.of(e.name)),
                     title = e.name,
-                    subtitle = lock ?: if (e.isDirectory) "folder" else "file",
+                    subtitle = lock ?: listOfNotNull(
+                        if (e.isDirectory) "folder" else "file",
+                        e.mtime.takeIf { it > 0 }?.let { (if (e.isDirectory) "last change inside " else "changed ") + ageText(it, now) },
+                    ).joinToString(" · "),
                     bytes = e.bytes,
                     checked = if (lock == null) e.path in state.browseSelected else null,
                     onCheck = { vm.termux.toggleBrowse(e.path) },
@@ -164,7 +180,34 @@ fun TermuxBrowserScreen(vm: StewardViewModel, onBack: () -> Unit) {
     }
 }
 
-private enum class PackageFilter(val label: String) { YOURS("Installed by you"), ALL("All"), DEPENDENCIES("Dependencies") }
+private enum class PackageFilter(val label: String) {
+    YOURS("Installed by you"),
+    ALL("All"),
+    DEPENDENCIES("Dependencies"),
+    PROGRAMS("npm, pip, cargo"),
+}
+
+/**
+ * Oldest first by when you last ran one of its commands; never-run commands first of all, and packages without
+ * commands (libraries) last, since shell history can't tell about them.
+ */
+private fun unusedKey(installed: Long, lastUsed: Long, uses: Int, commands: List<String>): Long = when {
+    commands.isEmpty() -> Long.MAX_VALUE
+    lastUsed > 0 -> lastUsed
+    uses > 0 -> installed.coerceAtLeast(1)
+    else -> 0
+}
+
+/** "installed 5 months ago · last run 2 days ago", from dpkg and your shell history. */
+internal fun usageText(installed: Long, lastUsed: Long, uses: Int, commands: List<String>, now: Long): String? = listOfNotNull(
+    installed.takeIf { it > 0 }?.let { "installed ${ageText(it, now)}" },
+    when {
+        lastUsed > 0 -> "last run ${ageText(lastUsed, now)}" + if (uses > 1) " ($uses times)" else ""
+        uses > 0 -> "run ${uses.plural("time")} (history keeps no dates)"
+        commands.isNotEmpty() -> "never run from your shell history"
+        else -> null
+    },
+).joinToString(" · ").ifEmpty { null }
 
 /**
  * Installed Termux packages, largest first, with what needs each one. Pick packages to uninstall: apt's own dry run
@@ -176,7 +219,17 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
     val ui by vm.state.collectAsStateWithLifecycle()
     var filter by rememberSaveable { mutableStateOf(PackageFilter.YOURS) }
     var query by rememberSaveable { mutableStateOf("") }
+    var unusedFirst by rememberSaveable { mutableStateOf(false) }
+    var confirmPrograms by remember { mutableStateOf(false) }
+    val now = remember { System.currentTimeMillis() }
     LaunchedEffect(Unit) { if (state.packages == null) vm.termux.loadPackages() }
+    val programs = state.programs.orEmpty()
+    val shownPrograms = remember(programs, query, unusedFirst) {
+        programs.filter { query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) }.let { list ->
+            if (unusedFirst) list.sortedBy { unusedKey(it.installed, it.lastUsed, it.uses, it.commands) } else list
+        }
+    }
+    val pickedPrograms = programs.filter { it.key in state.programSelected }
 
     val packages = state.packages.orEmpty()
     val neededBy = remember(packages) {
@@ -184,14 +237,15 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
         packages.forEach { p -> p.depends.forEach { d -> map.getOrPut(d) { ArrayList() } += p.name } }
         map
     }
-    val shown = remember(packages, filter, query) {
+    val shown = remember(packages, filter, query, unusedFirst) {
         packages.filter {
             when (filter) {
                 PackageFilter.YOURS -> it.manual
                 PackageFilter.ALL -> true
                 PackageFilter.DEPENDENCIES -> !it.manual
+                PackageFilter.PROGRAMS -> false
             } && (query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) || it.summary.contains(query.trim(), ignoreCase = true))
-        }
+        }.let { list -> if (unusedFirst) list.sortedBy { unusedKey(it.installed, it.lastUsed, it.uses, it.commands) } else list }
     }
     val selected = packages.filter { it.name in state.packageSelected }
 
@@ -202,12 +256,21 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
             }
         },
         bottomBar = {
-            ActionBar(
-                summary = "Frees about ${selected.sumOf { it.bytes }.humanBytes()}",
-                detail = if (state.planning) "Asking apt what goes with them…" else "${selected.size.plural("package")} picked",
-                action = "Uninstall",
-                enabled = selected.isNotEmpty() && !state.planning && ui.applying == null,
-            ) { vm.termux.planRemoval(selected.map { it.name }) }
+            if (filter == PackageFilter.PROGRAMS) {
+                ActionBar(
+                    summary = "Frees about ${pickedPrograms.sumOf { it.bytes }.humanBytes()}",
+                    detail = "${pickedPrograms.size.plural("program")} picked",
+                    action = "Uninstall",
+                    enabled = pickedPrograms.isNotEmpty() && ui.applying == null,
+                ) { confirmPrograms = true }
+            } else {
+                ActionBar(
+                    summary = "Frees about ${selected.sumOf { it.bytes }.humanBytes()}",
+                    detail = if (state.planning) "Asking apt what goes with them…" else "${selected.size.plural("package")} picked",
+                    action = "Uninstall",
+                    enabled = selected.isNotEmpty() && !state.planning && ui.applying == null,
+                ) { vm.termux.planRemoval(selected.map { it.name }) }
+            }
         },
     ) { padding ->
         LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(vertical = 6.dp)) {
@@ -229,7 +292,7 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
             if (packages.isNotEmpty()) {
                 item {
                     Text(
-                        "${packages.size.plural("package")} use ${packages.sumOf { it.bytes }.humanBytes()}",
+                        "${packages.size.plural("package")} ${if (packages.size == 1) "uses" else "use"} ${packages.sumOf { it.bytes }.humanBytes()}",
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
                     )
@@ -239,6 +302,12 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
                         PackageFilter.entries.forEach { f ->
                             FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f.label) }, modifier = Modifier.padding(end = 8.dp))
                         }
+                    }
+                }
+                item {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                        FilterChip(selected = !unusedFirst, onClick = { unusedFirst = false }, label = { Text("Largest first") }, modifier = Modifier.padding(end = 8.dp))
+                        FilterChip(selected = unusedFirst, onClick = { unusedFirst = true }, label = { Text("Unused longest") })
                     }
                 }
                 item {
@@ -252,8 +321,60 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
                     )
                 }
             }
-            items(shown, key = { it.name }) { p -> PackageRow(p, p.name in state.packageSelected, neededBy[p.name].orEmpty()) { vm.termux.togglePackage(p.name) } }
+            if (filter == PackageFilter.PROGRAMS) {
+                item {
+                    InlineNotice(
+                        "Programs npm, pip and cargo installed outside Termux's packages. Uninstalling runs npm rm -g, pip uninstall " +
+                            "or cargo uninstall inside Termux; npm, pip, setuptools and wheel themselves can't be picked.",
+                    )
+                }
+                if (shownPrograms.isEmpty() && !state.packagesLoading) {
+                    item { Text("No programs from npm, pip or cargo.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(20.dp)) }
+                }
+                items(shownPrograms, key = { it.key }) { p ->
+                    SelectRow(
+                        checked = p.key in state.programSelected && !p.protected,
+                        onCheckedChange = { vm.termux.toggleProgram(p.key) },
+                        enabled = !p.protected,
+                        title = p.name,
+                        subtitle = listOfNotNull(
+                            "${p.manager} ${p.version}".trim(),
+                            p.commands.takeIf { it.isNotEmpty() }?.let { "runs as ${it.take(4).joinToString()}" },
+                            usageText(p.installed, p.lastUsed, p.uses, p.commands, now),
+                        ).joinToString(" · "),
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        subtitleLines = 4,
+                        trailing = {
+                            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                SizeText(p.bytes)
+                                if (p.protected) Pill("Needed")
+                            }
+                        },
+                    )
+                }
+            } else {
+                items(shown, key = { it.name }) { p ->
+                    PackageRow(p, p.name in state.packageSelected, neededBy[p.name].orEmpty(), now) { vm.termux.togglePackage(p.name) }
+                }
+            }
         }
+    }
+
+    if (confirmPrograms) {
+        IrreversibleDialog(
+            title = "Uninstall ${pickedPrograms.size.plural("program")}?",
+            names = pickedPrograms.map { "${it.name} (${it.manager})" },
+            lines = listOf(
+                "Frees about ${pickedPrograms.sumOf { it.bytes }.humanBytes()}",
+                "Each goes through the package manager that installed it; install it again the same way",
+            ),
+            confirmLabel = "Uninstall",
+            onConfirm = {
+                confirmPrograms = false
+                vm.removeTermuxPrograms(pickedPrograms)
+            },
+            onDismiss = { confirmPrograms = false },
+        )
     }
 
     state.plan?.let { plan ->
@@ -270,7 +391,7 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
 }
 
 @Composable
-private fun PackageRow(p: TermuxPackage, checked: Boolean, neededBy: List<String>, onToggle: () -> Unit) {
+private fun PackageRow(p: TermuxPackage, checked: Boolean, neededBy: List<String>, now: Long, onToggle: () -> Unit) {
     val needs = when {
         neededBy.isEmpty() -> null
         neededBy.size <= 3 -> "needed by ${neededBy.sorted().joinToString()}"
@@ -281,8 +402,10 @@ private fun PackageRow(p: TermuxPackage, checked: Boolean, neededBy: List<String
         onCheckedChange = { onToggle() },
         enabled = !p.protected,
         title = p.name,
-        subtitle = listOfNotNull(p.summary.ifEmpty { null }, p.version, needs).joinToString(" · "),
+        subtitle = listOfNotNull(p.summary.ifEmpty { null }, p.version, needs).joinToString(" · ") +
+            (usageText(p.installed, p.lastUsed, p.uses, p.commands, now)?.let { "\n$it" } ?: ""),
         modifier = Modifier.padding(horizontal = 8.dp),
+        subtitleLines = 4,
         trailing = {
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 SizeText(p.bytes)

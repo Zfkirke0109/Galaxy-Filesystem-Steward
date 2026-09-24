@@ -73,6 +73,7 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                             onCheckedChange = { vm.toggle(item.id) },
                             title = item.title,
                             subtitle = "${item.kind.title}: ${item.detail}" + (state.learned[item.id]?.let { "\nLearned: ${it.note}" } ?: ""),
+                            subtitleLines = 5,
                             leading = {
                                 IconBadge(
                                     when (item.kind) {

@@ -37,6 +37,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -160,12 +161,32 @@ fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () ->
                 }
                 item {
                     ManageCard(
-                        title = "Packages",
-                        text = "Every installed package with its size and what needs it. Pick packages to uninstall, as pkg uninstall would.",
+                        title = "Packages and programs",
+                        text = "Every installed package, and what npm, pip and cargo installed, with its size, when it was installed and when " +
+                            "you last ran it. Pick what to uninstall.",
                         action = "Open",
                         enabled = true,
                     ) { navigate(Routes.TERMUX_PACKAGES) }
                 }
+                item {
+                    ManageCard(
+                        title = "Git repositories",
+                        text = "Every repository in Termux, its distributions and shared storage: last commit, fetch and use, whether " +
+                            "everything is pushed, and git gc to pack it losslessly.",
+                        action = "Open",
+                        enabled = true,
+                    ) { navigate(Routes.TERMUX_REPOS) }
+                }
+                item {
+                    ManageCard(
+                        title = "Move projects into Termux",
+                        text = "Projects and decompiled apps in shared storage work several times faster in Termux's home. Moved only " +
+                            "after a byte-for-byte check; History moves them back.",
+                        action = "Open",
+                        enabled = true,
+                    ) { navigate(Routes.TERMUX_PROJECTS) }
+                }
+                item { TermuxCopies(vm) }
                 if (report.prootActive) {
                     item { InlineNotice("A proot distribution is running, so distro caches were only measured. Stop it and scan again to clean them.") }
                 }
@@ -345,7 +366,7 @@ private fun ManageCard(title: String, text: String, action: String, enabled: Boo
                 Text(title, style = MaterialTheme.typography.titleMedium)
                 Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            FilledTonalButton(onClick = onClick, enabled = enabled) { Text(action) }
+            FilledTonalButton(onClick = onClick, enabled = enabled, modifier = Modifier.testTag("open:$title")) { Text(action) }
         }
     }
 }

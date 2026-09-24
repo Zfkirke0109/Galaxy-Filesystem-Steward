@@ -28,7 +28,10 @@ import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.termux.TermuxCleanResult
 import com.galaxy.steward.core.termux.TermuxCleanSummary
+import com.galaxy.steward.core.termux.TermuxProgram
+import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
@@ -345,6 +348,15 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     fun rollback(runId: String, title: String) {
         if (_state.value.applying != null || _state.value.scanning) return
+        if (app.journals.info(runId)?.kind == TermuxController.KIND_MOVE) {
+            launchRun("Moving back: $title") { progress ->
+                progress(0, 1, "Termux is copying and checking every file")
+                val summary = termux.moveBack(runId)
+                _state.update { it.copy(stale = true) }
+                termuxMoveOutcome("Moved back to shared storage", summary)
+            }
+            return
+        }
         if (app.journals.info(runId)?.kind == AppsController.KIND_FOLDERS) {
             launchRun("Undoing: $title") { progress ->
                 val summary = apps.rollback(runId, progress)
@@ -504,6 +516,53 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         progress(0, 1, "Waiting for Termux")
         val summary = termux.deletePaths(paths)
         termuxOutcome("Deleted in Termux", summary, "item", "items")
+    }
+
+    fun removeTermuxPrograms(programs: List<TermuxProgram>) = launchRun("Removing programs") { progress ->
+        progress(0, 1, "Waiting for Termux")
+        termuxOutcome("Programs removed", termux.removePrograms(programs), "program", "programs")
+    }
+
+    /** git gc in the repositories picked: lossless, they work as before. */
+    fun packTermuxRepos(paths: List<String>) = launchRun("Packing Git repositories") { progress ->
+        progress(0, 1, "git gc in ${paths.size.plural("repository", "repositories")}")
+        val summary = termux.packRepos(paths)
+        val report = termux.state.value.report
+        val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        Outcome.Report(
+            "Repositories packed",
+            listOf(
+                "Freed ${summary.freed.humanBytes()}",
+                "${summary.cleared.plural("repository", "repositories")} packed; they work exactly as before",
+            ) + (if (skipped.isNotEmpty()) listOf("${skipped.size.plural("repository", "repositories")} left as they were") else emptyList()),
+            skipped,
+        )
+    }
+
+    /** Moves project folders from shared storage into ~/projects in Termux, one checked copy at a time. */
+    fun moveIntoTermux(folders: List<String>) = launchRun("Moving into Termux") { progress ->
+        val results = ArrayList<TermuxCleanResult>()
+        folders.forEachIndexed { i, folder ->
+            progress(i, folders.size, folder.substringAfterLast('/'))
+            results += termux.moveIntoTermux(folder).results
+        }
+        _state.update { it.copy(stale = true) }
+        termuxMoveOutcome("Moved into Termux", TermuxCleanSummary(results))
+    }
+
+    private fun termuxMoveOutcome(title: String, summary: TermuxCleanSummary): Outcome.Report {
+        val moved = summary.results.filter { it.status == "MOVED" }
+        val report = termux.state.value.report
+        val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        return Outcome.Report(
+            title,
+            buildList {
+                moved.forEach { add("${it.path.substringAfterLast('/')} → ${TermuxProtocol.relative(it.note, report?.home.orEmpty(), report?.prefix.orEmpty())}") }
+                if (moved.isNotEmpty()) add("Every file was compared before the original went. History → Undo moves it back.")
+                if (skipped.isNotEmpty()) add("${skipped.size.plural("folder")} stayed where ${if (skipped.size == 1) "it was" else "they were"}")
+            },
+            skipped,
+        )
     }
 
     private fun termuxOutcome(title: String, summary: TermuxCleanSummary, one: String, many: String): Outcome.Report {

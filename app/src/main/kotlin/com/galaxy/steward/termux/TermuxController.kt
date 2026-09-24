@@ -14,8 +14,10 @@ import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxException
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.core.termux.TermuxPackage
+import com.galaxy.steward.core.termux.TermuxProgram
 import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.core.termux.TermuxRemovalPlan
+import com.galaxy.steward.core.termux.TermuxRepo
 import com.galaxy.steward.core.termux.TermuxReport
 import com.galaxy.steward.core.termux.TermuxScript
 import com.galaxy.steward.data.StorageAccess
@@ -50,6 +52,14 @@ data class TermuxState(
     val plan: TermuxRemovalPlan? = null,
     /** Files and folders picked in the Termux browser, by path. */
     val browseSelected: Set<String> = emptySet(),
+    /** Programs npm, pip and cargo installed, from the same Packages run. */
+    val programs: List<TermuxProgram>? = null,
+    val programSelected: Set<String> = emptySet(),
+    /** Git repositories in Termux, its distributions and shared storage, once loaded on the Repositories screen. */
+    val repos: List<TermuxRepo>? = null,
+    val reposLoading: Boolean = false,
+    val reposError: String? = null,
+    val repoSelected: Set<String> = emptySet(),
 )
 
 class TermuxController(
@@ -133,9 +143,22 @@ class TermuxController(
         scope.launch {
             _state.update { it.copy(packagesLoading = true, packagesError = null) }
             try {
-                val list = TermuxProtocol.parsePackages(run("packages", emptyList(), PACKAGES_TIMEOUT_MS))
-                StewardLog.i("Termux packages listed: ${list.size}, ${list.sumOf { it.bytes }.humanBytes()}")
-                _state.update { s -> s.copy(packagesLoading = false, packages = list, packageSelected = s.packageSelected.filterTo(HashSet()) { n -> list.any { it.name == n } }) }
+                val output = run("packages", emptyList(), PACKAGES_TIMEOUT_MS)
+                val list = TermuxProtocol.parsePackages(output)
+                val programs = TermuxProtocol.parsePrograms(output)
+                StewardLog.i(
+                    "Termux packages listed: ${list.size}, ${list.sumOf { it.bytes }.humanBytes()}; programs ${programs.size}, " +
+                        "${programs.sumOf { it.bytes }.humanBytes()}; ${list.count { it.lastUsed > 0 }} with a last use in shell history",
+                )
+                _state.update { s ->
+                    s.copy(
+                        packagesLoading = false,
+                        packages = list,
+                        packageSelected = s.packageSelected.filterTo(HashSet()) { n -> list.any { it.name == n } },
+                        programs = programs,
+                        programSelected = s.programSelected.filterTo(HashSet()) { k -> programs.any { it.key == k } },
+                    )
+                }
             } catch (e: CancellationException) {
                 _state.update { it.copy(packagesLoading = false) }
                 throw e
@@ -184,6 +207,106 @@ class TermuxController(
         return summary
     }
 
+    fun toggleProgram(key: String) = _state.update {
+        it.copy(programSelected = if (key in it.programSelected) it.programSelected - key else it.programSelected + key)
+    }
+
+    fun clearProgramSelection() = _state.update { it.copy(programSelected = emptySet()) }
+
+    /** Uninstalls programs with the package manager that installed each (npm rm -g, pip uninstall, cargo uninstall). */
+    suspend fun removePrograms(programs: List<TermuxProgram>): TermuxCleanSummary {
+        val results = programs.groupBy { it.manager }.flatMap { (manager, list) ->
+            TermuxProtocol.parseClean(run("prog-remove", listOf(manager) + list.map { it.name }, REMOVE_TIMEOUT_MS)).results
+                .map { r -> r.copy(targetId = "$manager:${r.targetId}") }
+        }
+        val summary = TermuxCleanSummary(results)
+        journal("Termux programs removed", summary)
+        val removed = results.filter { it.status == "REMOVED" }.map { it.targetId }.toSet()
+        _state.update { s -> s.copy(programs = s.programs?.filterNot { it.key in removed }, programSelected = s.programSelected - removed) }
+        return summary
+    }
+
+    // ------------------------------------------------------------------ Git repositories
+
+    fun loadRepos() {
+        refresh()
+        if (_state.value.reposLoading || _state.value.status != TermuxStatus.READY) return
+        scope.launch {
+            _state.update { it.copy(reposLoading = true, reposError = null) }
+            val started = SystemClock.uptimeMillis()
+            try {
+                val repos = TermuxProtocol.parseRepos(run("repos", emptyList(), REPOS_TIMEOUT_MS))
+                StewardLog.i(
+                    "Git repositories listed in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${repos.size}, " +
+                        "${repos.count { it.packable }} worth packing (${repos.sumOf { it.looseBytes + it.garbageBytes }.humanBytes()} loose), " +
+                        "${repos.count { it.onlyACopy }} fully pushed",
+                )
+                _state.update { s -> s.copy(reposLoading = false, repos = repos, repoSelected = s.repoSelected.filterTo(HashSet()) { p -> repos.any { it.path == p } }) }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(reposLoading = false) }
+                throw e
+            } catch (e: Exception) {
+                StewardLog.w("listing Git repositories failed", e)
+                _state.update { it.copy(reposLoading = false, reposError = e.message ?: e.javaClass.simpleName) }
+            }
+        }
+    }
+
+    fun toggleRepo(path: String) = _state.update {
+        it.copy(repoSelected = if (path in it.repoSelected) it.repoSelected - path else it.repoSelected + path)
+    }
+
+    fun clearRepoSelection() = _state.update { it.copy(repoSelected = emptySet()) }
+
+    /** git gc in each repository: loose objects packed, nothing lost; they work exactly as before. */
+    suspend fun packRepos(paths: List<String>): TermuxCleanSummary {
+        val summary = TermuxProtocol.parseClean(run("git-gc", paths, REMOVE_TIMEOUT_MS))
+        journal("Git repositories packed", summary)
+        val after = summary.results.filter { it.status == "CLEARED" }.associate { it.path to it.after }
+        _state.update { s ->
+            s.copy(
+                repos = s.repos?.map { r -> after[r.path]?.let { r.copy(gitBytes = it, looseBytes = 0, garbageBytes = 0) } ?: r },
+                repoSelected = s.repoSelected - paths.toSet(),
+            )
+        }
+        return summary
+    }
+
+    // ------------------------------------------------------------------ projects out of shared storage
+
+    /**
+     * Moves [folder] from shared storage into ~/projects, only after Termux checked the copy byte for byte. History can
+     * move it back. Returns the summary and the new path, when it moved.
+     */
+    suspend fun moveIntoTermux(folder: String): TermuxCleanSummary {
+        val summary = TermuxProtocol.parseClean(run("relocate", listOf(folder), RELOCATE_TIMEOUT_MS))
+        summary.results.filter { it.status == "MOVED" }.forEach { r ->
+            val runId = journals.newId()
+            withContext(Dispatchers.IO) {
+                JournalWriter(journals.fileFor(runId)).use { j ->
+                    j.meta("title", "Moved into Termux: ${r.path.substringAfterLast('/')}")
+                    j.meta("kind", KIND_MOVE)
+                    j.meta("started", System.currentTimeMillis().toString())
+                    j.entry(JournalEntry(JournalAction.RELOCATED, r.path, r.note, r.before, -1, null))
+                    j.meta("finished", System.currentTimeMillis().toString())
+                    j.meta("stats", "moved=1 movedBytes=${r.before}")
+                }
+            }
+        }
+        return summary
+    }
+
+    /** Undoes [moveIntoTermux] for one History entry: the folder goes back to where it was, checked the same way. */
+    suspend fun moveBack(runId: String): TermuxCleanSummary {
+        val entry = journals.entries(runId).firstOrNull { it.action == JournalAction.RELOCATED }
+            ?: throw TermuxException("This entry has nothing to move back")
+        val summary = TermuxProtocol.parseClean(run("relocate-back", listOf(entry.b, entry.a), RELOCATE_TIMEOUT_MS))
+        if (summary.results.any { it.status == "MOVED" }) {
+            withContext(Dispatchers.IO) { journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString()) }
+        }
+        return summary
+    }
+
     // ------------------------------------------------------------------ distributions and the browser
 
     /** Removes one proot distribution (not while one is running). */
@@ -212,6 +335,13 @@ class TermuxController(
     /** Shows [report] as if Termux had just been scanned: the end-to-end test has no Termux to ask. */
     @VisibleForTesting
     internal fun showReport(report: TermuxReport) = _state.update { it.copy(report = report) }
+
+    @VisibleForTesting
+    internal fun showPackages(packages: List<TermuxPackage>, programs: List<TermuxProgram>) =
+        _state.update { it.copy(packages = packages, programs = programs) }
+
+    @VisibleForTesting
+    internal fun showRepos(repos: List<TermuxRepo>) = _state.update { it.copy(repos = repos) }
 
     fun toggleBrowse(path: String) = _state.update {
         it.copy(browseSelected = if (path in it.browseSelected) it.browseSelected - path else it.browseSelected + path)
@@ -254,6 +384,11 @@ class TermuxController(
 
     companion object {
         const val KIND = "termux"
+
+        /** History entries for projects moved from shared storage into Termux; undo moves them back. */
+        const val KIND_MOVE = "termux-move"
+        private const val REPOS_TIMEOUT_MS = 5 * 60_000L
+        private const val RELOCATE_TIMEOUT_MS = 60 * 60_000L
         private const val AUDIT_TIMEOUT_MS = 10 * 60_000L
         private const val CLEAN_TIMEOUT_MS = 20 * 60_000L
         private const val PACKAGES_TIMEOUT_MS = 3 * 60_000L
@@ -267,7 +402,9 @@ class TermuxController(
                     "SKIP_PACKAGE" -> "installed by ${r.note}: uninstall it under Packages"
                     "SKIP_PROTECTED" -> "Termux needs this package"
                     "SKIP_KEYS" -> if (r.note.startsWith("holds ")) "${r.note}, a key: move it out first" else "a key or credential"
-                    "SKIP_ACTIVE" -> "a proot distribution is running"
+                    "SKIP_ACTIVE" -> if (r.targetId == "gc") r.note else "a proot distribution is running"
+                    "SKIP_EXISTS" -> r.note
+                    "SKIP_SPACE" -> "not enough free space for a checked copy"
                     else -> r.note.ifEmpty { r.status.lowercase().replace('_', ' ') }
                 }
                 "$what: $why"

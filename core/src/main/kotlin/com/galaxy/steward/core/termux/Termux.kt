@@ -1,5 +1,9 @@
 package com.galaxy.steward.core.termux
 
+import com.galaxy.steward.core.dedupe.DirSketch
+import com.galaxy.steward.core.dedupe.FolderSketch
+import com.galaxy.steward.core.dedupe.NearCopy
+
 /**
  * Termux keeps its home and packages in its own private folder, which no other app can read. The steward
  * therefore sends Termux a small audited script ([TermuxScript]) through Termux's RUN_COMMAND bridge and parses
@@ -268,6 +272,16 @@ data class TermuxReport(
             },
             sketches = sketches.filterNot { k -> gone.any { k.path == it || k.path.startsWith("$it/") } },
         )
+    }
+
+    /**
+     * Near-copies among Termux's biggest folders, and between them and shared storage's ([shared], from the last scan):
+     * pairs whose files mostly match by name and size. At least one side of each pair is in Termux.
+     */
+    fun nearCopies(shared: List<DirSketch> = emptyList(), threshold: Double = 0.6): List<NearCopy> {
+        val mine = sketches.map { DirSketch(it.path, it.files, it.bytes, entry(it.path)?.mtime ?: 0L, it.hashes) }
+        if (mine.isEmpty()) return emptyList()
+        return FolderSketch.nearCopies(mine + shared, threshold).filter { p -> mine.any { it.path == p.a || it.path == p.b } }
     }
 
     val reclaimableBytes: Long get() = items.sumOf { it.bytes }
