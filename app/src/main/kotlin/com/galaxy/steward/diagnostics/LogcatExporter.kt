@@ -95,7 +95,15 @@ class LogcatExporter(
             source.stream.use { input ->
                 file.outputStream().buffered(BUFFER_BYTES).use { out ->
                     out.write(header(now, source).toByteArray())
-                    copy(input, out)
+                    // The whole device's log also holds other Android users': Secure Folder, a work profile.
+                    val others = if (source.wholeDevice) OtherProfiles(Process.myUid() / 100_000) else null
+                    copy(input, out, others)
+                    if (others != null && others.dropped > 0) {
+                        out.write(
+                            ("--------- Galaxy Steward left out ${others.dropped} lines from or about other profiles " +
+                                "(Secure Folder, a work profile, Dual Messenger)\n").toByteArray(),
+                        )
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -154,20 +162,35 @@ class LogcatExporter(
 
     private fun yesNo(b: Boolean) = if (b) "yes" else "no"
 
-    private fun copy(input: InputStream, out: OutputStream) {
-        val buffer = ByteArray(BUFFER_BYTES)
+    private fun copy(input: InputStream, out: OutputStream, others: OtherProfiles?) {
         var total = 0L
         var reported = 0L
-        while (true) {
-            val n = input.read(buffer)
-            if (n < 0) break
-            out.write(buffer, 0, n)
+        fun wrote(n: Int) {
             total += n
             if (total - reported >= PROGRESS_STEP_BYTES) {
                 reported = total
                 _state.update { it.copy(bytesWritten = total) }
             }
         }
+        if (others == null) {
+            val buffer = ByteArray(BUFFER_BYTES)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                out.write(buffer, 0, n)
+                wrote(n)
+            }
+            return
+        }
+        val writer = out.bufferedWriter(Charsets.UTF_8)
+        input.bufferedReader(Charsets.UTF_8).forEachLine { line ->
+            if (others.keep(line)) {
+                writer.write(line)
+                writer.write('\n'.code)
+                wrote(line.length + 1)
+            }
+        }
+        writer.flush()
     }
 
     companion object {

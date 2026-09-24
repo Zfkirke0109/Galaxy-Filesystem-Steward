@@ -24,9 +24,12 @@ import com.galaxy.steward.core.learn.PreferenceModel
 import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
+import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.goal.GoalPlan
+import com.galaxy.steward.core.learn.StoragePoint
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.TermuxCleanResult
 import com.galaxy.steward.core.termux.TermuxCleanSummary
@@ -168,7 +171,9 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     var last = 0L
                     var lastPhase: ScanPhase? = null
                     var phaseStarted = started
-                    val result = Steward(rootPath, settings.value, app.environment, app.hashCacheFile, app.memory).scan(space) { p ->
+                    // The last map: code folders whose dates haven't changed since are filled in from it, not listed again.
+                    val previous = _state.value.report?.tree
+                    val result = Steward(rootPath, settings.value, app.environment, app.hashCacheFile, app.memory).scan(space, previous) { p ->
                         val now = SystemClock.uptimeMillis()
                         if (p.phase != lastPhase || now - last >= 120) {
                             if (p.phase != lastPhase) {
@@ -453,6 +458,72 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     private fun reindexLater(paths: List<String>) {
         pendingReindex = paths.filterNot { it.startsWith("$rootPath/Android/data/") || it.startsWith("$rootPath/Android/obb/") }
     }
+
+    /**
+     * Frees space toward a goal ([GoalPlanner]): the shared-storage picks through the executor (copies first, then
+     * clutter, then packing), then the Termux ones through Termux. With [freeNow], what went to the quarantine is
+     * emptied right away instead of after the retention days.
+     */
+    fun reachGoal(plan: GoalPlan, freeNow: Boolean) = launchRun("Free up space") { progress ->
+        val title = "Free up space"
+        val keepers = _state.value.keepers
+        val shared = plan.picks.mapNotNull { it.plan }.map { effective(it, keepers) }.sortedBy {
+            when (it) {
+                is DuplicateGroup, is FolderDuplicateGroup -> 0
+                is JunkItem -> 1
+                else -> 2
+            }
+        }
+        val inTermux = plan.picks.mapNotNull { it.termux }
+        val lines = ArrayList<String>()
+        val details = ArrayList<String>()
+        if (shared.isNotEmpty()) {
+            val s = settings.value
+            val started = SystemClock.uptimeMillis()
+            val summary = withContext(Dispatchers.IO) {
+                ActionExecutor(rootPath, app.journals, ExecutorOptions(s.quarantineDuplicates, s.protectedFolders))
+                    .execute(title, "goal", shared) { done, count, current -> progress(done, count, current) }
+            }
+            StewardLog.i(RunLog.applied(title, "goal", summary, SystemClock.uptimeMillis() - started))
+            val emptied = if (freeNow && summary.bytesQuarantined > 0) withContext(Dispatchers.IO) { quarantine().purge(summary.runId) } else 0L
+            lines += "Freed ${(summary.bytesFreed + emptied).humanBytes()} in shared storage"
+            (summary.bytesQuarantined - emptied).takeIf { it > 0 }?.let {
+                lines += "${it.humanBytes()} more once the quarantine is emptied (after ${s.quarantineRetentionDays} days, or now in History, " +
+                    "where this run can also be undone)"
+            }
+            if (summary.packed > 0) lines += "Packed ${summary.packed.plural("folder")} into zips of ${summary.bytesPacked.humanBytes()}"
+            if (summary.skipped + summary.failed > 0) {
+                lines += "${(summary.skipped + summary.failed).plural("file")} left alone" +
+                    RunLog.reasons(summary.reasons).removePrefix("; why: ").takeIf { it.isNotEmpty() }?.let { " ($it)" }.orEmpty()
+            }
+            details += summary.messages
+            _state.update {
+                it.copy(
+                    report = it.report?.without(summary.completedItemIds),
+                    selected = it.selected - summary.completedItemIds - summary.partialItemIds,
+                )
+            }
+            reindexLater(summary.changedPaths)
+        }
+        if (inTermux.isNotEmpty()) {
+            progress(0, 1, "Waiting for Termux")
+            try {
+                val (_, t) = termux.clean(inTermux)
+                lines += "Freed ${t.freed.humanBytes()} inside Termux"
+                if (t.skipped.isNotEmpty()) {
+                    lines += "${t.skipped.size.plural("Termux location")} left alone (${TermuxController.reasonTally(t)?.removePrefix("why: ")})"
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lines += "Termux: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        Outcome.Report("Space freed", lines, details)
+    }
+
+    /** Totals after each scan, oldest first, for the storage-over-time chart. */
+    suspend fun storageHistory(): List<StoragePoint> = withContext(Dispatchers.IO) { app.memory.history() }
 
     fun applyAppFolders(items: List<AppJunkItem>) = launchRun("App folder clean-up") { progress ->
         val summary = apps.applyFolders("App folder clean-up", items, progress)

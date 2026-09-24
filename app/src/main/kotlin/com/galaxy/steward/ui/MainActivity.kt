@@ -41,6 +41,7 @@ import com.galaxy.steward.ui.screens.AppStorageScreen
 import com.galaxy.steward.ui.screens.AppsScreen
 import com.galaxy.steward.ui.screens.DuplicatesScreen
 import com.galaxy.steward.ui.screens.ExplorerScreen
+import com.galaxy.steward.ui.screens.GoalScreen
 import com.galaxy.steward.ui.screens.HistoryScreen
 import com.galaxy.steward.ui.screens.HomeScreen
 import com.galaxy.steward.ui.screens.JunkScreen
@@ -73,6 +74,7 @@ object Routes {
     const val TERMUX_PACKAGES = "termux-packages"
     const val TERMUX_REPOS = "termux-repos"
     const val TERMUX_PROJECTS = "termux-projects"
+    const val GOAL = "goal"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
@@ -162,6 +164,7 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.TERMUX_PACKAGES) { TermuxPackagesScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX_REPOS) { TermuxReposScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX_PROJECTS) { TermuxProjectsScreen(vm) { nav.popBackStack() } }
+            composable(Routes.GOAL) { GoalScreen(vm, state) { nav.popBackStack() } }
         }
     }
 

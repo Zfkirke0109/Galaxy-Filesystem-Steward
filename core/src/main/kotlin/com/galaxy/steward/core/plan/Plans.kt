@@ -324,6 +324,8 @@ data class ScanReport(
     val insights: List<Insight>,
     /** Sketches of the bigger folders, to compare with Termux's ([com.galaxy.steward.core.dedupe.FolderSketch]). */
     val sketches: List<com.galaxy.steward.core.dedupe.DirSketch> = emptyList(),
+    /** Unchanged code folders filled in from the previous scan instead of listed again. */
+    val reusedFolders: Int = 0,
 ) {
     val duplicateBytes: Long get() = duplicates.sumOf { it.reclaimBytes } + folderDuplicates.sumOf { it.reclaimBytes }
     val junkBytes: Long get() = junk.sumOf { it.reclaimBytes }

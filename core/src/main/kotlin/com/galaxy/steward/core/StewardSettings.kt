@@ -37,6 +37,11 @@ data class StewardSettings(
     val learnFromFolders: Boolean = true,
     /** Tick or untick suggestions the way you decided on ones like them ([com.galaxy.steward.core.learn.PreferenceModel]). */
     val learnFromChoices: Boolean = true,
+    /**
+     * The weekly audit also clears what loses nothing (partial downloads, old system logs, heap dumps, empty folders and
+     * thumbnail caches the rules tick), into the quarantine, where History can undo it. Off unless you turn it on.
+     */
+    val weeklyUpkeep: Boolean = false,
 ) {
     fun effectiveHashWorkers(): Int =
         if (hashWorkers > 0) hashWorkers else (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)

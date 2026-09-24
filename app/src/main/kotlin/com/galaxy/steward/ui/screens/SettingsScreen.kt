@@ -203,6 +203,17 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
                     }
                 }
             }
+            if (prefs.weeklyAudit) {
+                item {
+                    SwitchRow(
+                        "Weekly upkeep",
+                        "The weekly audit also clears what loses nothing: partial downloads, old system logs, heap dumps, empty " +
+                            "folders and thumbnail caches. They go to the quarantine for ${settings.quarantineRetentionDays} days; " +
+                            "History can undo it.",
+                        settings.weeklyUpkeep,
+                    ) { v -> vm.updateSettings { it.copy(weeklyUpkeep = v) } }
+                }
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 item { SwitchRow("Match wallpaper colours", "Use Material You dynamic colour.", prefs.dynamicColor) { vm.setDynamicColor(it) } }
             }

@@ -261,6 +261,14 @@ class AppFlowTest {
         shot("07-optimize")
         compose.onNodeWithContentDescription("Back").performClick()
 
+        // Free up space: what loses nothing first, then copies; the goal ticks what reaches it.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:goal"))
+        compose.onNodeWithTag("open:goal").performClick()
+        compose.onNodeWithText("1 GiB").performClick()
+        compose.onNodeWithText("big-movie.mkv.crdownload").assertExists()
+        shot("07b-free-up-space")
+        compose.onNodeWithContentDescription("Back").performClick()
+
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Review & apply"))
         compose.onNodeWithText("Review & apply").performClick()
         shot("08-autopilot-confirm")

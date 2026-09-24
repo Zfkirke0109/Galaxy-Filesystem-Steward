@@ -31,7 +31,19 @@ class TreeScanner(
     private val rootPath: String,
     private val settings: StewardSettings,
     private val parallelism: Int = DEFAULT_PARALLELISM,
+    /**
+     * The last scan's tree, to reuse what can't have changed: a folder inside source code or a decompiled app whose date
+     * is the same as then has the same entries, so it is filled in from [previous] with one stat per subfolder instead of
+     * one per entry. (A file rewritten in place keeps its old size and date here until something beside it changes;
+     * the steward never changes code trees, and checks every file again before touching it.)
+     */
+    private val previous: StorageTree? = null,
 ) {
+    private val reused = AtomicInteger()
+
+    /** Folders filled in from [previous] by the last [scan]. */
+    val reusedFolders: Int get() = reused.get()
+
     fun interface Listener {
         fun onProgress(dirs: Int, files: Long, bytes: Long, current: String)
     }
@@ -51,17 +63,18 @@ class TreeScanner(
         val rootDir = Paths.get(rootPath)
         val root = DirNode(rootPath.trimEnd('/'), null).apply { zone = Zone.OTHER_SHARED }
         val progress = Progress(listener)
-        val queue = Channel<Pair<DirNode, Path>>(Channel.UNLIMITED)
+        val queue = Channel<Triple<DirNode, Path, DirNode?>>(Channel.UNLIMITED)
         // Folders queued or being listed; the walk is over when it drops to zero.
         val pending = AtomicInteger(1)
-        queue.send(root to rootDir)
+        reused.set(0)
+        queue.send(Triple(root, rootDir, previous?.root?.takeIf { it.path == root.path }))
         val workers = (1..parallelism.coerceAtLeast(1)).map {
             launch(Dispatchers.IO) {
-                for ((node, dirPath) in queue) {
+                for ((node, dirPath, before) in queue) {
                     ensureActive()
-                    visit(node, dirPath, progress) { child, childPath ->
+                    visit(node, dirPath, before, progress) { child, childPath, childBefore ->
                         pending.incrementAndGet()
-                        queue.trySend(child to childPath)
+                        queue.trySend(Triple(child, childPath, childBefore))
                     }
                     if (pending.decrementAndGet() == 0) queue.close()
                 }
@@ -98,9 +111,19 @@ class TreeScanner(
         }
     }
 
-    /** Lists one folder: flags and zone for [node] itself, then a child node for every subfolder. */
-    private fun visit(node: DirNode, dirPath: Path, progress: Progress, enqueue: (DirNode, Path) -> Unit) {
+    /**
+     * Lists one folder: flags and zone for [node] itself, then a child node for every subfolder. [before] is the same
+     * folder in the previous tree, if there was one.
+     */
+    private fun visit(node: DirNode, dirPath: Path, before: DirNode?, progress: Progress, enqueue: (DirNode, Path, DirNode?) -> Unit) {
         progress.dir()
+        if (before != null && node.mtime > 0 && before.mtime == node.mtime && before.insideFlagged(NodeFlags.CODE_TREE) &&
+            !before.hasFlag(NodeFlags.UNREADABLE) && reuse(node, dirPath, before, progress, enqueue)
+        ) {
+            reused.incrementAndGet()
+            return
+        }
+        val earlier = before?.dirs?.associateBy { it.name }
         val entries = listEntries(dirPath)
         if (entries == null) {
             node.flags = node.flags or NodeFlags.UNREADABLE
@@ -112,7 +135,7 @@ class TreeScanner(
             if (node.zone.removable) node.zone = Zone.PATH_SENSITIVE
         }
         if (!node.isRoot && SafetyPolicy.isDecompiledAppRoot(names)) markCodeTree(node)
-        val subfolders = ArrayList<Pair<DirNode, Path>>()
+        val subfolders = ArrayList<Triple<DirNode, Path, DirNode?>>()
         for ((name, attrs) in entries) {
             if (SafetyPolicy.isUnsafeName(name)) {
                 node.flags = node.flags or NodeFlags.HAS_UNSAFE_NAME
@@ -126,7 +149,7 @@ class TreeScanner(
                     child.mtime = attrs.lastModifiedTime().toMillis()
                     node.dirs.add(child)
                     // The steward's own quarantine and state are never scanned.
-                    if (child.zone != Zone.STEWARD) subfolders += child to dirPath.resolve(name)
+                    if (child.zone != Zone.STEWARD) subfolders += Triple(child, dirPath.resolve(name), earlier?.get(name))
                 }
                 attrs.isRegularFile -> {
                     val file = FileNode(name, attrs.size(), attrs.lastModifiedTime().toMillis(), node)
@@ -142,7 +165,50 @@ class TreeScanner(
         node.dirs.sortBy { it.name.lowercase() }
         node.files.sortBy { it.name.lowercase() }
         // Children are handed out only once this folder is complete: its zone and flags are final by then.
-        subfolders.forEach { (child, path) -> enqueue(child, path) }
+        subfolders.forEach { (child, path, earlierChild) -> enqueue(child, path, earlierChild) }
+    }
+
+    /**
+     * Fills [node] in from [before] (same path, same date): its files, its flags from the listing, and its subfolders,
+     * each with a fresh date so the walk can decide again below. False (and [node] untouched) if a subfolder is gone
+     * or isn't one any more; the folder is then listed as usual.
+     */
+    private fun reuse(node: DirNode, dirPath: Path, before: DirNode, progress: Progress, enqueue: (DirNode, Path, DirNode?) -> Unit): Boolean {
+        val children = ArrayList<Triple<DirNode, Path, DirNode?>>(before.dirs.size)
+        for (d in before.dirs) {
+            val child = DirNode(d.name, node)
+            val path = dirPath.resolve(d.name)
+            val attrs = try {
+                Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            } catch (_: IOException) {
+                return false
+            } catch (_: SecurityException) {
+                return false
+            }
+            if (!attrs.isDirectory) return false
+            child.mtime = attrs.lastModifiedTime().toMillis()
+            children += Triple(child, path, d)
+        }
+        // What the listing would say: links, special files and unsafe names aren't in the tree, so they come from then.
+        node.flags = node.flags or (before.flags and LISTED_FLAGS)
+        val names = before.files.map { it.name } + before.dirs.map { it.name }
+        if (SafetyPolicy.isProjectRoot(names)) {
+            node.flags = node.flags or NodeFlags.PROJECT_ROOT
+            if (node.zone.removable) node.zone = Zone.PATH_SENSITIVE
+        }
+        if (SafetyPolicy.isDecompiledAppRoot(names)) markCodeTree(node)
+        for (f in before.files) {
+            node.files.add(FileNode(f.name, f.size, f.mtime, node))
+            if (SafetyPolicy.isCredentialName(f.name)) node.flags = node.flags or NodeFlags.HAS_CREDENTIAL
+            progress.file(f.size)
+        }
+        for ((child, path, d) in children) {
+            assignZone(child)
+            node.dirs.add(child)
+            if (child.zone != Zone.STEWARD) enqueue(child, path, d)
+        }
+        progress.entry(node)
+        return true
     }
 
     /** Source code and decompiled apps behave like projects: kept as they are, never restructured. */
@@ -253,6 +319,9 @@ class TreeScanner(
     companion object {
         /** Enough to keep the storage daemon busy without starving the rest of the phone. */
         const val DEFAULT_PARALLELISM = 6
+
+        /** Flags a folder gets from entries the tree doesn't keep. */
+        private const val LISTED_FLAGS = NodeFlags.HAS_SYMLINK or NodeFlags.HAS_SPECIAL or NodeFlags.HAS_UNSAFE_NAME
 
         /** Builds a tree for tests and tools from an arbitrary directory. */
         suspend fun scanDirectory(root: String, settings: StewardSettings = StewardSettings()): StorageTree =

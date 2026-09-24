@@ -75,10 +75,12 @@ class Steward(
     /** Where your files were at the last scan and how full storage was: for learning your moves and storage growth. */
     private val memory: ScanMemory? = null,
 ) {
-    suspend fun scan(space: VolumeSpace? = null, onProgress: (ScanProgress) -> Unit = {}): ScanReport {
+    /** [previous]: the last scan's tree, so unchanged code folders needn't be listed again ([TreeScanner]). */
+    suspend fun scan(space: VolumeSpace? = null, previous: StorageTree? = null, onProgress: (ScanProgress) -> Unit = {}): ScanReport {
         val started = environment.nowMillis()
         onProgress(ScanProgress(ScanPhase.MAPPING))
-        val tree = TreeScanner(rootPath, settings).scan { dirs, files, bytes, current ->
+        val scanner = TreeScanner(rootPath, settings, previous = previous)
+        val tree = scanner.scan { dirs, files, bytes, current ->
             onProgress(ScanProgress(ScanPhase.MAPPING, dirs.toLong(), 0, current, files, bytes))
         }
         val filesSeen = tree.root.totalFiles.toLong()
@@ -156,6 +158,7 @@ class Steward(
             optimize = hygiene.optimize(optimize.items),
             insights = listOfNotNull(growth) + optimize.insights + nearInsights + organize.insights.take(50),
             sketches = sketches,
+            reusedFolders = scanner.reusedFolders,
         )
         onProgress(ScanProgress(ScanPhase.DONE, 1, 1, "", filesSeen, bytesSeen))
         return report

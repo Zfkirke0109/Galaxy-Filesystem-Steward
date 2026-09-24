@@ -69,8 +69,15 @@ has_controls "$HOME$PREFIX" && refuse "unsafe environment"
 FILES="${HOME%/home}"
 [ "$FILES" != "$HOME" ] && [ "$PREFIX" = "$FILES/usr" ] || refuse "not a Termux layout"
 APPDIR="${FILES%/files}"
-# Shared storage, as Termux sees it with storage access.
+# Shared storage, as Termux sees it with storage access: the Android user's own (Termux in Secure Folder, user 150,
+# has /data/user/150/com.termux/files and /storage/emulated/150).
 SHARED=/storage/emulated/0
+case "$FILES" in
+  /data/user/[0-9]*/com.termux/files)
+    u="${FILES#/data/user/}"
+    SHARED="/storage/emulated/${u%%/*}"
+    ;;
+esac
 ARCH="$(uname -m 2>/dev/null)"
 # Identical files, folder sketches and proot's hard-link copies are looked at from these sizes up (KiB).
 DUP_MIN_KIB=8192

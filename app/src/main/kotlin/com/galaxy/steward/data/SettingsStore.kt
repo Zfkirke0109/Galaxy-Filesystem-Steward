@@ -74,6 +74,7 @@ class SettingsStore(context: Context) {
             hashWorkers = prefs.getInt("hashWorkers", d.hashWorkers),
             learnFromFolders = prefs.getBoolean("learnFromFolders", d.learnFromFolders),
             learnFromChoices = prefs.getBoolean("learnFromChoices", d.learnFromChoices),
+            weeklyUpkeep = prefs.getBoolean("weeklyUpkeep", d.weeklyUpkeep),
         )
     }
 
@@ -94,6 +95,7 @@ class SettingsStore(context: Context) {
             putInt("hashWorkers", s.hashWorkers)
             putBoolean("learnFromFolders", s.learnFromFolders)
             putBoolean("learnFromChoices", s.learnFromChoices)
+            putBoolean("weeklyUpkeep", s.weeklyUpkeep)
         }
     }
 

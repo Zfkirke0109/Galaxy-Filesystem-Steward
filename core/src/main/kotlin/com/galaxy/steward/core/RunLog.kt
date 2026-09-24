@@ -35,6 +35,7 @@ object RunLog {
             append("; phases ")
             append(phases.joinToString(", ") { (phase, millis) -> "${phase.name.lowercase()} ${seconds(millis)}" })
         }
+        if (report.reusedFolders > 0) append("; ").append(count(report.reusedFolders)).append(" unchanged code folders not listed again")
     }
 
     fun applied(title: String, kind: String, s: ExecutionSummary, millis: Long): String =

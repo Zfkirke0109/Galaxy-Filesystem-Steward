@@ -23,6 +23,8 @@ import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.ui.platform.testTag
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Speed
@@ -122,6 +124,27 @@ fun HomeScreen(vm: StewardViewModel, state: UiState, navigate: (String) -> Unit)
                 }
             }
             item { AutopilotCard(vm, state) { confirmAutopilot = true } }
+            item {
+                Card(
+                    onClick = { navigate(Routes.GOAL) },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).testTag("open:goal"),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                    shape = RoundedCornerShape(24.dp),
+                ) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Flag, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Free up space", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Pick how much; Koa takes the safest first, from shared storage and Termux",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
             item {
                 Card(
                     onClick = { navigate(Routes.EXPLORE) },
