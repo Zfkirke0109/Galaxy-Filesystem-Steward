@@ -19,6 +19,8 @@ import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
+import com.galaxy.steward.core.learn.LearnedChoice
+import com.galaxy.steward.core.learn.PreferenceModel
 import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
@@ -75,6 +77,8 @@ data class UiState(
     val space: VolumeSpace? = null,
     /** The media index is being refreshed after a run (in the background; nothing waits on it). */
     val indexing: Boolean = false,
+    /** Suggestions whose starting tick came from your past choices instead of the rules. */
+    val learned: Map<String, LearnedChoice> = emptyMap(),
 )
 
 /** Process-wide state shared by every [StewardViewModel] instance; runs outlive the screen that started them. */
@@ -179,15 +183,21 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 } }
                 app.settings.lastScanAt = System.currentTimeMillis()
                 StewardLog.i(RunLog.scan(report, phases))
+                val learned = if (settings.value.learnFromChoices) withContext(Dispatchers.IO) { learnedChoices(report) } else emptyMap()
+                if (learned.isNotEmpty()) {
+                    StewardLog.i("learned from your choices: ${learned.count { it.value.select }} ticked, ${learned.count { !it.value.select }} unticked")
+                }
+                val defaults = report.allItems().filter { item -> item.defaultSelected }.map { item -> item.id }.toSet()
                 _state.update {
                     it.copy(
                         scanning = false,
                         progress = null,
                         report = report,
                         stale = false,
-                        selected = report.allItems().filter { item -> item.defaultSelected }.map { item -> item.id }.toSet(),
+                        selected = defaults + learned.filterValues { c -> c.select }.keys - learned.filterValues { c -> !c.select }.keys,
                         keepers = emptyMap(),
                         space = space,
+                        learned = learned,
                     )
                 }
             } catch (e: CancellationException) {
@@ -202,6 +212,36 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed("Not enough memory to map this much storage.")) }
             }
         }
+    }
+
+    /** Starting ticks your past decisions point to, where enough of them agree. */
+    private fun learnedChoices(report: ScanReport): Map<String, LearnedChoice> {
+        val model = PreferenceModel.train(app.decisions.load())
+        if (model.decisions == 0) return emptyMap()
+        val now = System.currentTimeMillis()
+        return report.allItems().mapNotNull { item -> model.choiceFor(item, rootPath, now)?.let { item.id to it } }.toMap()
+    }
+
+    /** Remembers what was offered and what you ran, once a run has finished. */
+    private fun recordDecisions(runId: String, kind: String, report: ScanReport?, items: List<PlanItem>) {
+        if (!settings.value.learnFromChoices || report == null) return
+        val offered = when (kind) {
+            "autopilot" -> report.allItems()
+            "junk" -> report.junk
+            "organize" -> report.organize
+            "optimize" -> report.optimize
+            "dedupe" -> report.duplicates + report.folderDuplicates + report.folderMerges
+            else -> items
+        }
+        app.decisions.record(runId, offered, items.map { it.id }.toSet(), rootPath, System.currentTimeMillis())
+    }
+
+    /** How many decisions the steward has learned from (Settings → Learning). */
+    suspend fun decisionCount(): Int = withContext(Dispatchers.IO) { app.decisions.load().size }
+
+    fun forgetLearning() {
+        scope.launch(Dispatchers.IO) { app.decisions.clear() }
+        _state.update { it.copy(learned = emptyMap()) }
     }
 
     fun shouldAskForNotifications(): Boolean = !app.settings.askedForNotifications
@@ -249,6 +289,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     fun apply(title: String, kind: String, items: List<PlanItem>) {
         if (items.isEmpty() || _state.value.applying != null || _state.value.scanning) return
+        val offeredFrom = _state.value.report
         session.applyJob = scope.launch {
             val total = items.sumOf { it.operations.size }
             _state.update { it.copy(applying = ApplyProgress(title, 0, total, ""), outcome = null) }
@@ -270,6 +311,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                             }
                     }
                     StewardLog.i(RunLog.applied(title, kind, summary, SystemClock.uptimeMillis() - started))
+                    withContext(Dispatchers.IO) { recordDecisions(summary.runId, kind, offeredFrom, items) }
                     _state.update {
                         it.copy(
                             applying = null,
@@ -325,6 +367,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     StewardLog.i(RunLog.rolledBack(title, summary, SystemClock.uptimeMillis() - started))
+                    // Undoing a run says its suggestions were wrong for you.
+                    withContext(Dispatchers.IO) { app.decisions.undone(runId, System.currentTimeMillis()) }
                     _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
                     refreshHistory()
                     reindex(summary.changedPaths)

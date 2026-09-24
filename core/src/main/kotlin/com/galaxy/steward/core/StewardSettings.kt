@@ -33,6 +33,10 @@ data class StewardSettings(
     val hashWorkers: Int = 0,
     /** Folders smaller than this aren't compared for near-copies. */
     val nearCopyMinBytes: Long = 8 * MIB,
+    /** Suggest homes learned from how your own folders are organised ([com.galaxy.steward.core.organize.FilingModel]). */
+    val learnFromFolders: Boolean = true,
+    /** Tick or untick suggestions the way you decided on ones like them ([com.galaxy.steward.core.learn.PreferenceModel]). */
+    val learnFromChoices: Boolean = true,
 ) {
     fun effectiveHashWorkers(): Int =
         if (hashWorkers > 0) hashWorkers else (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)

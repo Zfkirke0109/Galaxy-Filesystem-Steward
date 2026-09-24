@@ -39,12 +39,16 @@ class OrganizePlanner(
     private val moves = ArrayList<OrganizeMove>()
     private val insights = ArrayList<Insight>()
     private val plannedSources = HashSet<String>()
+    private var model: FilingModel? = null
+    private var learnedMoves = 0
 
     fun plan(tree: StorageTree): OrganizePlan {
         rootPath = tree.rootPath
         moves.clear()
         insights.clear()
         plannedSources.clear()
+        learnedMoves = 0
+        model = if (settings.learnFromFolders) FilingModel.train(tree, settings.flatDirThreshold) else null
 
         tree.find("Download")?.takeIf { it.zone == Zone.USER_MANAGED }?.let { download ->
             for (f in download.files) planFile(f)
@@ -56,21 +60,49 @@ class OrganizePlanner(
             planHomeChildren(documents)
         }
         planTopLevel(tree.root)
+        if (learnedMoves > 0) {
+            insights.add(
+                0,
+                Insight(
+                    Severity.INFO,
+                    "${learnedMoves.let { if (it == 1) "1 suggestion" else "$it suggestions" }} learned from your own folders",
+                    "The steward learns, on this phone, where you keep things: each of your ${model?.size ?: 0} folders is described " +
+                        "by the words, extensions and kinds of what is already in it. Something loose goes where things like it " +
+                        "already are, and the words it shares with them are the reason shown. Rules you set still come first. " +
+                        "Settings → Learn from my folders turns this off.",
+                ),
+            )
+        }
         return OrganizePlan(moves.sortedWith(compareBy({ it.destinationFolder }, { it.source })), insights.toList())
     }
+
+    /** A learned home for [node] that differs from where it is, or null. */
+    private fun learned(node: Any, currentRel: String): LearnedHome? =
+        model?.homeFor(node)?.takeIf { it.folder != currentRel && !(node is DirNode && (it.folder == node.relPath || it.folder.startsWith(node.relPath + "/"))) }
+
+    private fun learnedReason(home: LearnedHome) = "Learned: ${home.explanation}"
 
     // ------------------------------------------------------------------ files
 
     /** Where a loose file belongs, with a human reason. Null means "leave it". */
-    fun destinationFor(file: FileNode): Pair<String, String>? {
+    fun destinationFor(file: FileNode): Pair<String, String>? = ruleDestination(file)?.let { it.first to it.second }
+
+    /** Like [destinationFor], and whether a named rule decided (false: only the file's type did). */
+    private fun ruleDestination(file: FileNode): Triple<String, String, Boolean>? {
         val name = file.name
         val kind = file.kind
         val media = kind == FileKind.IMAGE || kind == FileKind.VIDEO || kind == FileKind.AUDIO
         for (rule in rules) {
             // Media stays in the media library unless a rule explicitly claims its extension (e.g. receipts).
             if (media && rule.extensions.isEmpty()) continue
-            if (rule.matchesFile(name)) return rule.resolvedDestination(deviceLabel) to rule.name
+            if (rule.matchesFile(name)) return Triple(rule.resolvedDestination(deviceLabel), rule.name, true)
         }
+        return typeDestination(file)?.let { Triple(it.first, it.second, false) }
+    }
+
+    private fun typeDestination(file: FileNode): Pair<String, String>? {
+        val name = file.name
+        val kind = file.kind
         val lower = Text.normalize(name)
         when (kind) {
             FileKind.IMAGE -> return if (lower.contains(" screenshot")) {
@@ -99,7 +131,19 @@ class OrganizePlanner(
 
     private fun planFile(file: FileNode) {
         if (!fileMovable(file)) return
-        val (destDir, reason) = destinationFor(file) ?: return
+        var (destDir, reason, named) = ruleDestination(file) ?: return
+        var selected = reason != "Unrecognised type"
+        // Your own folders beat a destination picked from the file type alone, and refine a named rule's.
+        learned(file, file.dir.relPath)?.let { home ->
+            val media = file.kind == FileKind.IMAGE || file.kind == FileKind.VIDEO || file.kind == FileKind.AUDIO
+            val homeIsMedia = home.folder.substringBefore('/') in SafetyPolicy.MEDIA_TOP_DIRS
+            if ((!named || home.folder.startsWith("$destDir/")) && media == homeIsMedia) {
+                destDir = home.folder
+                reason = learnedReason(home)
+                selected = home.score >= CONFIDENT
+                learnedMoves++
+            }
+        }
         val destination = "$rootPath/$destDir/${file.name}"
         if (destination.substringBeforeLast('/') == file.dir.path) return
         addMove(
@@ -110,7 +154,7 @@ class OrganizePlanner(
             fileCount = 1,
             reason = reason,
             group = destination.substringBeforeLast('/'),
-            selected = reason != "Unrecognised type",
+            selected = selected,
             op = MoveFileOp(file.path, destination, file.size, file.mtime),
         )
     }
@@ -158,6 +202,11 @@ class OrganizePlanner(
                         planFolderTo(child, "$rootPath/$category", "Category folder → its home (merged)", merge = true, selected = false)
                     rule != null ->
                         planFolderTo(child, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${child.name}", "Filed under a better home: ${rule.name}", merge = false, selected = false)
+                    // Nothing like it where it is, and a folder of things just like it elsewhere.
+                    (model?.fitWhereItIs(child) ?: Double.MAX_VALUE) <= 1.0 -> learned(child, home.relPath)?.let { h ->
+                        learnedMoves++
+                        planFolderTo(child, "$rootPath/${h.folder}/${child.name}", learnedReason(h), merge = false, selected = false)
+                    }
                 }
             }
         }
@@ -191,9 +240,14 @@ class OrganizePlanner(
             }
             val category = BuiltInRules.categoryFolderDestination(d.name)
             val rule = rules.firstOrNull { it.matchesFolder(d.name) }
+            val learnedHome = if (category == null && rule == null) learned(d, "") else null
             when {
                 category != null -> planFolderTo(d, "$rootPath/$category", "Top-level folder → its category (merged)", merge = true, selected = false)
                 rule != null -> planFolderTo(d, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${d.name}", "Top-level folder: ${rule.name}", merge = false, selected = false)
+                learnedHome != null -> {
+                    learnedMoves++
+                    planFolderTo(d, "$rootPath/${learnedHome.folder}/${d.name}", "Top-level folder. ${learnedReason(learnedHome)}", merge = false, selected = false)
+                }
                 else -> inferFromContent(d)?.let { (home, reason) ->
                     planFolderTo(d, "$rootPath/$home/${d.name}", "Top-level folder: ${reason.lowercase()}", merge = false, selected = false)
                 }
@@ -250,6 +304,11 @@ class OrganizePlanner(
                 planFolderTo(dir, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${dir.name}", rule.name, merge = false, selected = true)
                 return
             }
+        }
+        learned(dir, dir.parent?.relPath.orEmpty())?.let { home ->
+            learnedMoves++
+            planFolderTo(dir, "$rootPath/${home.folder}/${dir.name}", learnedReason(home), merge = false, selected = home.score >= CONFIDENT)
+            return
         }
         inferFromContent(dir)?.let { (home, reason) ->
             planFolderTo(dir, "$rootPath/$home/${dir.name}", reason, merge = false, selected = true)
@@ -350,6 +409,9 @@ class OrganizePlanner(
     companion object {
         /** A top-level folder written to this recently may still be some app's working folder. */
         const val IN_USE_DAYS = 14
+
+        /** Learned suggestions this sure (summed log ratios) are ticked like a rule's; weaker ones are for review. */
+        const val CONFIDENT = 6.0
 
         fun yearOf(mtime: Long): Int = Instant.ofEpochMilli(mtime).atZone(ZoneId.systemDefault()).year
     }

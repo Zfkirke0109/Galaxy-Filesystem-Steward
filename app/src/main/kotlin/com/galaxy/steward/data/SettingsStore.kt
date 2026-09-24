@@ -72,6 +72,8 @@ class SettingsStore(context: Context) {
             protectedFolders = prefs.getString("protectedFolders", "").orEmpty().lines().filter { it.isNotBlank() },
             customRules = prefs.getString("customRules", "").orEmpty().lines().mapNotNull(KeywordRule::decode),
             hashWorkers = prefs.getInt("hashWorkers", d.hashWorkers),
+            learnFromFolders = prefs.getBoolean("learnFromFolders", d.learnFromFolders),
+            learnFromChoices = prefs.getBoolean("learnFromChoices", d.learnFromChoices),
         )
     }
 
@@ -90,6 +92,8 @@ class SettingsStore(context: Context) {
             putString("protectedFolders", s.protectedFolders.joinToString("\n"))
             putString("customRules", s.customRules.joinToString("\n") { it.encode() })
             putInt("hashWorkers", s.hashWorkers)
+            putBoolean("learnFromFolders", s.learnFromFolders)
+            putBoolean("learnFromChoices", s.learnFromChoices)
         }
     }
 

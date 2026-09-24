@@ -15,6 +15,7 @@ import com.galaxy.steward.ui.StewardSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import com.galaxy.steward.core.learn.DecisionLog
 import java.io.File
 
 class StewardApp : Application() {
@@ -46,6 +47,9 @@ class StewardApp : Application() {
     val session = StewardSession()
 
     val hashCacheFile: File get() = File(filesDir, "hash-cache.tsv")
+
+    /** Which suggestions you ran and which you left, for learning your defaults (Settings → Learning). */
+    val decisions: DecisionLog by lazy { DecisionLog(File(filesDir, "decisions.tsv")) }
 
     override fun onCreate() {
         super.onCreate()

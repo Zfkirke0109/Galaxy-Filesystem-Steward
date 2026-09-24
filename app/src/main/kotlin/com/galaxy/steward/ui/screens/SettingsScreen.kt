@@ -50,6 +50,7 @@ import androidx.core.content.ContextCompat
 import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.organize.KeywordRule
 import com.galaxy.steward.data.SettingsStore
 import com.galaxy.steward.diagnostics.LogcatExporter
@@ -123,6 +124,35 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
             item {
                 ChoiceRow("Suggest date buckets above", listOf("500" to 500, "1000" to 1000, "2000" to 2000, "5000" to 5000), settings.flatDirThreshold) { v ->
                     vm.updateSettings { it.copy(flatDirThreshold = v) }
+                }
+            }
+
+            item { SectionHeader("Learning") }
+            item {
+                SwitchRow(
+                    "Learn from my folders",
+                    "Suggest homes from how your own folders are organised: something loose goes where things like it already are.",
+                    settings.learnFromFolders,
+                ) { v -> vm.updateSettings { it.copy(learnFromFolders = v) } }
+            }
+            item {
+                SwitchRow(
+                    "Learn from my choices",
+                    "Start suggestions ticked or unticked the way you decided on ones like them. Undoing a run counts as a no.",
+                    settings.learnFromChoices,
+                ) { v -> vm.updateSettings { it.copy(learnFromChoices = v) } }
+            }
+            item {
+                var count by remember { mutableStateOf<Int?>(null) }
+                LaunchedEffect(state.journals.size) { count = vm.decisionCount() }
+                val n = count ?: 0
+                ActionRow(
+                    "Forget what it learned",
+                    if (n == 0) "Nothing learned yet. Everything stays on this phone." else "Learned from ${n.plural("choice")}. Everything stays on this phone.",
+                    enabled = n > 0,
+                ) {
+                    vm.forgetLearning()
+                    count = 0
                 }
             }
 
@@ -311,6 +341,17 @@ private fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChang
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun ActionRow(title: String, subtitle: String, enabled: Boolean, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        TextButton(onClick = onClick, enabled = enabled) { Text("Forget") }
     }
 }
 
