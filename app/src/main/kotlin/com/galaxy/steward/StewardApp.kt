@@ -7,12 +7,17 @@ import com.galaxy.steward.apps.AppsController
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.data.AndroidEnvironment
 import com.galaxy.steward.data.SettingsStore
+import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.shizuku.ShizukuBridge
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.ui.StewardSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import com.galaxy.steward.core.learn.DecisionLog
+import com.galaxy.steward.core.learn.ScanMemory
+import com.galaxy.steward.diagnostics.StewardLog
 import java.io.File
 
 class StewardApp : Application() {
@@ -31,6 +36,11 @@ class StewardApp : Application() {
     lateinit var termux: TermuxController
         private set
 
+    /** Saves the device log to Documents/Galaxy Steward LogCat (Settings > Diagnostics). */
+    lateinit var logcat: LogcatExporter
+    lateinit var storageReport: StorageReportExporter
+        private set
+
     /**
      * Scans and runs belong to the process, not to a screen: they keep going (inside a foreground service) when
      * you switch apps or close the window, and the next screen picks up their state from [session].
@@ -40,13 +50,23 @@ class StewardApp : Application() {
 
     val hashCacheFile: File get() = File(filesDir, "hash-cache.tsv")
 
+    /** Which suggestions you ran and which you left, for learning your defaults (Settings → Learning). */
+    val decisions: DecisionLog by lazy { DecisionLog(File(filesDir, "decisions.tsv")) }
+
+    /** Where your files were at the last scan (to learn from your own moves) and how full storage was after each scan. */
+    val memory: ScanMemory by lazy { ScanMemory(File(filesDir, "memory"), journals) }
+
     override fun onCreate() {
         super.onCreate()
+        StewardLog.init(File(filesDir, "steward-history.log"))
         settings = SettingsStore(this)
         environment = AndroidEnvironment(this)
         journals = JournalStore(File(filesDir, "journals"))
-        apps = AppsController(this, journals, ShizukuBridge(this), appScope)
-        termux = TermuxController(this, journals, appScope)
+        val shizuku = ShizukuBridge(this)
+        apps = AppsController(this, journals, shizuku, appScope)
+        termux = TermuxController(this, journals, appScope) { decisions.takeIf { settings.settings.value.learnFromChoices } }
+        logcat = LogcatExporter(this, shizuku, appScope)
+        storageReport = StorageReportExporter(this, appScope)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(AUDIT_CHANNEL, getString(R.string.audit_channel_name), NotificationManager.IMPORTANCE_LOW).apply {

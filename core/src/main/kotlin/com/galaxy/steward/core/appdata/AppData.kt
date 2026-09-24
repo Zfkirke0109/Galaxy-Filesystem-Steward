@@ -42,6 +42,10 @@ enum class AppJunkKind(val title: String, val description: String, val defaultSe
         "Folders in Android/data, obb and media belonging to apps that are no longer installed.",
         false, true,
     ),
+
+    // Chosen by you in the app folder browser; never produced by a scan.
+    PICKED("Picked by you", "Files and folders you chose in the app folder browser, moved to the quarantine.", false, true),
+    PICKED_DELETE("Deleted by you", "Files and folders you chose in the app folder browser, deleted for good.", false, false),
 }
 
 /**
@@ -95,12 +99,50 @@ object AppPolicy {
     /** Offline libraries: never cleaned, stopped or cleared, whatever the mode (`is_protected_app_v18`). */
     val STRICT_NO_TOUCH = setOf("com.amazon.mp3", "com.audible.application")
 
+    const val SHIZUKU = "moe.shizuku.privileged.api"
+
+    /**
+     * Messengers and mail. A stopped app gets no push messages until you open it again, so these are never stopped;
+     * and chats kept only on the phone would be lost with their data, so it is never cleared.
+     */
+    private val MESSAGES = setOf(
+        "com.google.android.apps.messaging", "com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger",
+        "org.telegram.messenger.web", "org.thunderdog.challegram", "org.thoughtcrime.securesms", "com.facebook.orca",
+        "com.facebook.mlite", "com.discord", "com.Slack", "com.microsoft.teams", "com.google.android.gm",
+        "com.microsoft.office.outlook", "com.google.android.apps.googlevoice", "com.viber.voip", "jp.naver.line.android",
+        "com.tencent.mm", "com.snapchat.android", "com.instagram.android", "us.zoom.videomeetings", "com.skype.raider",
+        "ch.protonmail.android", "com.google.android.apps.dynamite", "com.kakao.talk", "im.vector.app", "ch.threema.app",
+        "network.loki.messenger", "org.briarproject.briar.android", "com.wire", "eu.siacs.conversations",
+    )
+
     /** Apps that are never force-stopped before a cache clear (`should_force_stop_cache_target_v18`). */
-    private val NEVER_FORCE_STOP = setOf(
-        "com.google.android.apps.messaging", "com.android.providers.telephony", "com.google.android.apps.photos",
-        "com.sec.android.app.shealth", "com.android.managedprovisioning",
+    private val NEVER_FORCE_STOP = MESSAGES + setOf(
+        "com.android.providers.telephony", "com.google.android.apps.photos", "com.sec.android.app.shealth",
+        "com.android.managedprovisioning",
         // Stopping these would end your terminal sessions or the Shizuku bridge the steward is talking through.
-        "com.termux", "moe.shizuku.privileged.api",
+        "com.termux", SHIZUKU,
+    )
+
+    /**
+     * Authenticators, password managers and crypto wallets: their data can hold the only copy of 2FA secrets, a vault
+     * or a wallet's keys, so it is never cleared. No list can name every such app, which is why clearing data always
+     * asks first and says so.
+     */
+    private val KEYS = setOf(
+        "com.google.android.apps.authenticator2", "com.azure.authenticator", "com.authy.authy", "com.twofasapp",
+        "com.beemdevelopment.aegis", "org.fedorahosted.freeotp", "org.liberty.android.freeotpplus",
+        "com.duosecurity.duomobile", "com.okta.android.auth", "com.lastpass.authenticator", "com.yubico.yubioath",
+        "com.x8bit.bitwarden", "com.bitwarden.authenticator", "com.agilebits.onepassword", "proton.android.pass",
+        "keepass2android.keepass2android", "keepass2android.keepass2android_nonet", "com.kunzisoft.keepass.libre",
+        "com.kunzisoft.keepass.pro", "io.metamask", "com.wallet.crypto.trustapp", "org.toshi", "exodusmovement.exodus",
+        "piuk.blockchain.android", "com.mycelium.wallet", "de.schildbach.wallet", "io.atomicwallet",
+        "com.samourai.wallet", "org.electrum.electrum", "app.phantom", "com.ledger.live", "io.zerion.android",
+    )
+
+    /** Platform and vendor packages, recognised by name for callers that cannot see an app's system flag. */
+    private val PLATFORM_PREFIXES = listOf(
+        "com.android.", "com.google.android.gms", "com.google.android.gsf", "com.samsung.", "com.sec.",
+        "com.qualcomm.", "com.qti.", "vendor.",
     )
 
     private val PACKAGE = Regex("""^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$""")
@@ -109,6 +151,21 @@ object AppPolicy {
 
     fun isProtected(packageName: String, ownPackage: String?): Boolean =
         packageName in STRICT_NO_TOUCH || packageName == ownPackage
+
+    /**
+     * Why an app's data may not be cleared ("Clear all data", which is Android's Clear storage), as a short label, or
+     * null when it may. Clearing resets an app to a fresh install and cannot be undone, so it is never offered for
+     * system apps, messengers and mail, apps that may hold keys, Termux (its own tab cleans it safely), or the apps the
+     * steward itself depends on. [system] is the app's system flag when the caller knows it.
+     */
+    fun clearDataBlock(packageName: String, ownPackage: String?, system: Boolean = false): String? = when {
+        packageName in STRICT_NO_TOUCH || packageName == ownPackage || packageName == SHIZUKU -> "Protected"
+        packageName == "com.termux" || packageName.startsWith("com.termux.") -> "Termux"
+        system || packageName == "android" || PLATFORM_PREFIXES.any { packageName.startsWith(it) } -> "System app"
+        packageName in MESSAGES -> "Messages"
+        packageName in KEYS -> "Holds keys"
+        else -> null
+    }
 
     fun mayForceStop(packageName: String): Boolean = when {
         packageName in STRICT_NO_TOUCH || packageName in NEVER_FORCE_STOP -> false

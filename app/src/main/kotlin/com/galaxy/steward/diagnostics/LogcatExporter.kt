@@ -1,0 +1,203 @@
+package com.galaxy.steward.diagnostics
+
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.os.Process
+import android.os.SystemClock
+import com.galaxy.steward.BuildConfig
+import com.galaxy.steward.apps.AppStorage
+import com.galaxy.steward.core.RunLog
+import com.galaxy.steward.core.SafetyPolicy
+import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.shizuku.ShizukuBridge
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+
+/** A saved log. [wholeDevice] is false when only the app's own lines could be read. */
+data class LogcatFile(val file: File, val bytes: Long, val wholeDevice: Boolean, val note: String?)
+
+data class LogcatExportState(
+    val running: Boolean = false,
+    val bytesWritten: Long = 0,
+    val saved: LogcatFile? = null,
+    val error: String? = null,
+)
+
+/**
+ * Saves the device log to Documents/Galaxy Steward LogCat, so a problem can be reported with one tap.
+ *
+ * A normal app can only read its own log lines. With Shizuku connected, the helper (which runs as Android's shell
+ * user) dumps the whole device log instead, as `adb logcat -d` would. The log goes straight into the file, because a
+ * busy phone's buffers hold tens of megabytes.
+ */
+class LogcatExporter(
+    private val context: Context,
+    private val shizuku: ShizukuBridge,
+    private val scope: CoroutineScope,
+) {
+    private val _state = MutableStateFlow(LogcatExportState())
+    val state: StateFlow<LogcatExportState> = _state.asStateFlow()
+
+    private class Source(val stream: InputStream, val wholeDevice: Boolean, val contents: String, val note: String?)
+
+    fun export() {
+        if (_state.value.running) return
+        _state.value = LogcatExportState(running = true)
+        scope.launch {
+            val started = SystemClock.uptimeMillis()
+            val saved = try {
+                withContext(Dispatchers.IO) { write() }
+            } catch (e: CancellationException) {
+                _state.value = LogcatExportState()
+                throw e
+            } catch (e: Exception) {
+                StewardLog.w("logcat export failed", e)
+                _state.value = LogcatExportState(error = "Couldn't save the log: ${e.message ?: e.javaClass.simpleName}")
+                return@launch
+            }
+            StewardLog.i(
+                "logcat saved in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${saved.bytes.humanBytes()}, " +
+                    if (saved.wholeDevice) "whole device" else "own lines only",
+            )
+            _state.value = LogcatExportState(saved = saved)
+            // So the file also shows up over USB and in apps that browse the media index.
+            StorageAccess.rescan(context, listOf(saved.file.path))
+        }
+    }
+
+    /** A share sheet for [file], through this app's FileProvider (which only serves the logcat folder). */
+    fun shareIntent(file: File): Intent = shareTextFile(context, file, "Share logcat")
+
+    private suspend fun write(): LogcatFile {
+        val folder = File(StorageAccess.rootPath, SafetyPolicy.LOGCAT_DIR)
+        if (!folder.isDirectory && !folder.mkdirs()) throw IOException("can't create ${SafetyPolicy.LOGCAT_DIR}")
+        val now = ZonedDateTime.now()
+        val file = File(folder, "logcat-${now.format(FILE_TIME)}.txt")
+        val source = open()
+        try {
+            // The source is closed whatever happens, so logcat or the helper never blocks on a pipe nobody reads.
+            source.stream.use { input ->
+                file.outputStream().buffered(BUFFER_BYTES).use { out ->
+                    out.write(header(now, source).toByteArray())
+                    // The whole device's log also holds other Android users': Secure Folder, a work profile.
+                    val others = if (source.wholeDevice) OtherProfiles(Process.myUid() / 100_000) else null
+                    copy(input, out, others)
+                    if (others != null && others.dropped > 0) {
+                        out.write(
+                            ("--------- Galaxy Steward left out ${others.dropped} lines from or about other profiles " +
+                                "(Secure Folder, a work profile, Dual Messenger)\n").toByteArray(),
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            file.delete()
+            throw e
+        }
+        return LogcatFile(file, file.length(), source.wholeDevice, source.note)
+    }
+
+    private suspend fun open(): Source {
+        val ready = withContext(Dispatchers.Main.immediate) {
+            shizuku.refresh()
+            shizuku.ready
+        }
+        var note = "Connect Shizuku on the Apps tab to include the whole device log."
+        if (ready) {
+            try {
+                // Null when a helper from an older version is still running: it doesn't know this call yet.
+                val fd = shizuku.helper().dumpLogcat() ?: throw IllegalStateException("the Shizuku helper is out of date; restart Shizuku")
+                return Source(ParcelFileDescriptor.AutoCloseInputStream(fd), true, "the whole device log, read through Shizuku", null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                note = "Shizuku couldn't read the device log (${e.message ?: e.javaClass.simpleName})."
+            }
+        }
+        val stream = try {
+            ProcessBuilder(LogcatDump.COMMAND).redirectErrorStream(true).start().inputStream
+        } catch (e: IOException) {
+            // Every Android device has logcat. The header is still worth saving if it can't start.
+            "--------- logcat could not be started: ${e.message}\n".byteInputStream()
+        }
+        return Source(stream, false, "Galaxy Steward's own log lines only", note)
+    }
+
+    private fun header(now: ZonedDateTime, source: Source): String = buildString {
+        appendLine("Galaxy Steward ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) logcat export")
+        appendLine("Saved:    ${now.format(HEADER_TIME)}")
+        appendLine("Device:   ${Build.MANUFACTURER} ${Build.MODEL} (${Build.DEVICE}), Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.DISPLAY}")
+        appendLine("Contents: ${source.contents}; buffers ${LogcatDump.BUFFERS}")
+        source.note?.let { appendLine("Note:     $it") }
+        appendLine("App:      ${context.packageName}, pid ${Process.myPid()}, uid ${Process.myUid()}")
+        appendLine(
+            "Access:   all files ${yesNo(StorageAccess.hasAccess(context))}, usage access ${yesNo(AppStorage.hasUsageAccess(context))}, " +
+                "Shizuku: ${shizuku.status.value.label}",
+        )
+        appendLine()
+        // Android's log keeps only the last hour or so on a busy phone; the steward's own history goes further back.
+        val history = StewardLog.lines().takeLast(HISTORY_LINES)
+        if (history.isNotEmpty()) {
+            appendLine("--------- Galaxy Steward history (its last ${history.size} lines, kept by the app)")
+            history.forEach(::appendLine)
+            appendLine()
+        }
+    }
+
+    private fun yesNo(b: Boolean) = if (b) "yes" else "no"
+
+    private fun copy(input: InputStream, out: OutputStream, others: OtherProfiles?) {
+        var total = 0L
+        var reported = 0L
+        fun wrote(n: Int) {
+            total += n
+            if (total - reported >= PROGRESS_STEP_BYTES) {
+                reported = total
+                _state.update { it.copy(bytesWritten = total) }
+            }
+        }
+        if (others == null) {
+            val buffer = ByteArray(BUFFER_BYTES)
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                out.write(buffer, 0, n)
+                wrote(n)
+            }
+            return
+        }
+        val writer = out.bufferedWriter(Charsets.UTF_8)
+        input.bufferedReader(Charsets.UTF_8).forEachLine { line ->
+            if (others.keep(line)) {
+                writer.write(line)
+                writer.write('\n'.code)
+                wrote(line.length + 1)
+            }
+        }
+        writer.flush()
+    }
+
+    companion object {
+        private const val HISTORY_LINES = 400
+        private val FILE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+        private val HEADER_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss xxx")
+        private const val BUFFER_BYTES = 256 * 1024
+        private const val PROGRESS_STEP_BYTES = 1L shl 20
+    }
+}

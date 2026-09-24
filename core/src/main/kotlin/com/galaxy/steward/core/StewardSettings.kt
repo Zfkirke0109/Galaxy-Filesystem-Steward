@@ -12,7 +12,11 @@ data class StewardSettings(
     val quarantineDuplicates: Boolean = false,
     val quarantineRetentionDays: Int = 7,
     val staleTempDays: Int = 14,
-    val oldLogDays: Int = 14,
+    /**
+     * Files in /log older than this are clutter. Samsung keeps writing Wi-Fi, ewlogd and dumpstate logs there (2.2 GiB
+     * on one phone, all under two weeks old); they only matter for a problem you are reporting now.
+     */
+    val oldLogDays: Int = 3,
     /** Directories with more direct files than this are suggested for year bucketing. */
     val flatDirThreshold: Int = 1000,
     /** File imported media under Pictures/Imported/<year>/ rather than one flat folder. */
@@ -27,6 +31,17 @@ data class StewardSettings(
     val customRules: List<KeywordRule> = emptyList(),
     /** Parallel hashing workers; 0 picks automatically from the CPU count. */
     val hashWorkers: Int = 0,
+    /** Folders smaller than this aren't compared for near-copies. */
+    val nearCopyMinBytes: Long = 8 * MIB,
+    /** Suggest homes learned from how your own folders are organised ([com.galaxy.steward.core.organize.FilingModel]). */
+    val learnFromFolders: Boolean = true,
+    /** Tick or untick suggestions the way you decided on ones like them ([com.galaxy.steward.core.learn.PreferenceModel]). */
+    val learnFromChoices: Boolean = true,
+    /**
+     * The weekly audit also clears what loses nothing (partial downloads, old system logs, heap dumps, empty folders and
+     * thumbnail caches the rules tick), into the quarantine, where History can undo it. Off unless you turn it on.
+     */
+    val weeklyUpkeep: Boolean = false,
 ) {
     fun effectiveHashWorkers(): Int =
         if (hashWorkers > 0) hashWorkers else (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)
@@ -47,6 +62,9 @@ interface DeviceEnvironment {
 
     /** Package metadata parsed from an APK file, or null when it cannot be parsed. */
     fun apkInfo(path: String): ApkInfo? = null
+
+    /** Every installed app, package name to label, for telling an app's own folder from yours. Empty when unknown. */
+    fun installedApps(): Map<String, String> = emptyMap()
 }
 
 data class ApkInfo(val packageName: String, val versionCode: Long, val versionName: String?)

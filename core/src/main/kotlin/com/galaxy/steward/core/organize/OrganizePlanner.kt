@@ -1,8 +1,11 @@
 package com.galaxy.steward.core.organize
 
+import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.learn.YourMoves
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.FileNode
@@ -38,12 +41,28 @@ class OrganizePlanner(
     private val moves = ArrayList<OrganizeMove>()
     private val insights = ArrayList<Insight>()
     private val plannedSources = HashSet<String>()
+    private var model: FilingModel? = null
+    private var learnedMoves = 0
+    private var yours: Set<String> = emptySet()
+    private var holdsYours: Set<String> = emptySet()
+    private var leftForYou = 0
 
-    fun plan(tree: StorageTree): OrganizePlan {
+    /** [yours]: what you moved yourself since the last scan; it teaches the model and isn't suggested to move again. */
+    fun plan(tree: StorageTree, yours: YourMoves = YourMoves.NONE): OrganizePlan {
         rootPath = tree.rootPath
         moves.clear()
         insights.clear()
         plannedSources.clear()
+        learnedMoves = 0
+        leftForYou = 0
+        this.yours = if (settings.learnFromFolders) yours.paths else emptySet()
+        holdsYours = HashSet<String>().apply {
+            for (y in this@OrganizePlanner.yours) {
+                var p = y.substringBeforeLast('/')
+                while (p.length > rootPath.length && add(p)) p = p.substringBeforeLast('/')
+            }
+        }
+        model = if (settings.learnFromFolders) FilingModel.train(tree, settings.flatDirThreshold, this.yours) else null
 
         tree.find("Download")?.takeIf { it.zone == Zone.USER_MANAGED }?.let { download ->
             for (f in download.files) planFile(f)
@@ -52,22 +71,64 @@ class OrganizePlanner(
         tree.find("Documents")?.takeIf { it.zone == Zone.USER_MANAGED }?.let { documents ->
             for (f in documents.files) planFile(f)
             for (d in documents.dirs) planDocumentsChild(d)
+            planHomeChildren(documents)
+        }
+        planTopLevel(tree.root)
+        if (settings.learnFromFolders && yours.files > 0) {
+            insights.add(
+                0,
+                Insight(
+                    Severity.INFO,
+                    "You moved ${yours.files.plural("file")} yourself since the last scan",
+                    "Where you put things is the best lesson there is: each counts ${FilingModel.YOURS_WEIGHT.toInt()} times when the " +
+                        "steward learns where things like it belong, and nothing you placed is suggested to move again" +
+                        (if (leftForYou > 0) " (${leftForYou.plural("suggestion")} left out this time)" else "") + ".",
+                ),
+            )
+        }
+        if (learnedMoves > 0) {
+            insights.add(
+                0,
+                Insight(
+                    Severity.INFO,
+                    "${learnedMoves.let { if (it == 1) "1 suggestion" else "$it suggestions" }} learned from your own folders",
+                    "The steward learns, on this phone, where you keep things: each of your ${model?.size ?: 0} folders is described " +
+                        "by the words, extensions and kinds of what is already in it. Something loose goes where things like it " +
+                        "already are, and the words it shares with them are the reason shown. Rules you set still come first. " +
+                        "Settings → Learn from my folders turns this off.",
+                ),
+            )
         }
         return OrganizePlan(moves.sortedWith(compareBy({ it.destinationFolder }, { it.source })), insights.toList())
     }
 
+    /** A learned home for [node] that differs from where it is, or null. */
+    private fun learned(node: Any, currentRel: String): LearnedHome? =
+        model?.homeFor(node)?.takeIf { it.folder != currentRel && !(node is DirNode && (it.folder == node.relPath || it.folder.startsWith(node.relPath + "/"))) }
+
+    private fun learnedReason(home: LearnedHome) = "Learned: ${home.explanation}"
+
     // ------------------------------------------------------------------ files
 
     /** Where a loose file belongs, with a human reason. Null means "leave it". */
-    fun destinationFor(file: FileNode): Pair<String, String>? {
+    fun destinationFor(file: FileNode): Pair<String, String>? = ruleDestination(file)?.let { it.first to it.second }
+
+    /** Like [destinationFor], and whether a named rule decided (false: only the file's type did). */
+    private fun ruleDestination(file: FileNode): Triple<String, String, Boolean>? {
         val name = file.name
         val kind = file.kind
         val media = kind == FileKind.IMAGE || kind == FileKind.VIDEO || kind == FileKind.AUDIO
         for (rule in rules) {
             // Media stays in the media library unless a rule explicitly claims its extension (e.g. receipts).
             if (media && rule.extensions.isEmpty()) continue
-            if (rule.matchesFile(name)) return rule.resolvedDestination(deviceLabel) to rule.name
+            if (rule.matchesFile(name)) return Triple(rule.resolvedDestination(deviceLabel), rule.name, true)
         }
+        return typeDestination(file)?.let { Triple(it.first, it.second, false) }
+    }
+
+    private fun typeDestination(file: FileNode): Pair<String, String>? {
+        val name = file.name
+        val kind = file.kind
         val lower = Text.normalize(name)
         when (kind) {
             FileKind.IMAGE -> return if (lower.contains(" screenshot")) {
@@ -96,7 +157,19 @@ class OrganizePlanner(
 
     private fun planFile(file: FileNode) {
         if (!fileMovable(file)) return
-        val (destDir, reason) = destinationFor(file) ?: return
+        var (destDir, reason, named) = ruleDestination(file) ?: return
+        var selected = reason != "Unrecognised type"
+        // Your own folders beat a destination picked from the file type alone, and refine a named rule's.
+        learned(file, file.dir.relPath)?.let { home ->
+            val media = file.kind == FileKind.IMAGE || file.kind == FileKind.VIDEO || file.kind == FileKind.AUDIO
+            val homeIsMedia = home.folder.substringBefore('/') in SafetyPolicy.MEDIA_TOP_DIRS
+            if ((!named || home.folder.startsWith("$destDir/")) && media == homeIsMedia) {
+                destDir = home.folder
+                reason = learnedReason(home)
+                selected = home.score >= CONFIDENT
+                learnedMoves++
+            }
+        }
         val destination = "$rootPath/$destDir/${file.name}"
         if (destination.substringBeforeLast('/') == file.dir.path) return
         addMove(
@@ -107,20 +180,116 @@ class OrganizePlanner(
             fileCount = 1,
             reason = reason,
             group = destination.substringBeforeLast('/'),
-            selected = reason != "Unrecognised type",
+            selected = selected,
             op = MoveFileOp(file.path, destination, file.size, file.mtime),
         )
     }
 
     private fun fileMovable(file: FileNode): Boolean {
         if (file.hidden || SafetyPolicy.isMarkerFile(file.name) || SafetyPolicy.isInProgressDownload(file.name)) return false
-        if (SafetyPolicy.isCredentialName(file.name)) {
-            insights.add(Insight(Severity.INFO, "Left in place: ${file.name}", "Looks like a key or credential, so it is never moved.", file.path))
-            return false
-        }
+        // Keys never move; the optimizer's storage-health advice says where they are, all in one place.
+        if (SafetyPolicy.isCredentialName(file.name)) return false
         if (file.mtime > recentCutoff) return false
         if (file.zone != Zone.USER_MANAGED) return false
         return true
+    }
+
+    // ------------------------------------------------------------------ folders inside the homes
+
+    private fun isHome(dir: DirNode) = BuiltInRules.isHome(dir.relPath, deviceLabel, settings.customRules)
+
+    /**
+     * Folders the organizer's own homes collected that belong elsewhere, seen on a real phone:
+     * `Documents/Archives/ViPER4Android-Presets` is audio presets, `Documents/Audio-DSP/leakcanary-…` is a diagnostics
+     * dump, and `Documents/Software/APKs/apk` is the home itself again. Only folders directly inside a home are looked
+     * at; your own folders elsewhere in Documents stay yours. A folder named after its own home merges into it; the
+     * rest are only suggested.
+     */
+    private fun planHomeChildren(documents: DirNode) {
+        val stack = ArrayDeque(listOf(documents))
+        while (stack.isNotEmpty()) {
+            val home = stack.removeLast()
+            for (child in home.dirs) {
+                if (child.zone != Zone.USER_MANAGED || child.hidden || child.totalFiles == 0) continue
+                if (isHome(child)) {
+                    stack.addLast(child)
+                    continue
+                }
+                if (home === documents) continue // Documents' own children: planDocumentsChild
+                val category = BuiltInRules.categoryFolderDestination(child.name)
+                val rule = rules.firstOrNull { it.matchesFolder(child.name) }?.takeIf { r ->
+                    val dest = r.resolvedDestination(deviceLabel)
+                    dest != home.relPath && !home.relPath.startsWith("$dest/")
+                }
+                when {
+                    category == home.relPath ->
+                        planFolderTo(child, home.path, "Category folder inside its own home (merged)", merge = true, selected = true)
+                    category != null && !home.relPath.startsWith("$category/") ->
+                        planFolderTo(child, "$rootPath/$category", "Category folder → its home (merged)", merge = true, selected = false)
+                    rule != null ->
+                        planFolderTo(child, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${child.name}", "Filed under a better home: ${rule.name}", merge = false, selected = false)
+                    // Nothing like it where it is, and a folder of things just like it elsewhere.
+                    (model?.fitWhereItIs(child) ?: Double.MAX_VALUE) <= 1.0 -> learned(child, home.relPath)?.let { h ->
+                        learnedMoves++
+                        planFolderTo(child, "$rootPath/${h.folder}/${child.name}", learnedReason(h), merge = false, selected = false)
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ top-level folders
+
+    private val appFolders by lazy { AppFolderIndex(environment.installedApps()) }
+
+    /**
+     * Folders at the top of shared storage besides Android's own. Those of installed apps stay: apps write to them by
+     * path. The rest (your own folders, unpacked downloads, leftovers of removed apps) get the home their name or
+     * content points to. They are only suggested: something may still write to them, and they are yours to decide on.
+     */
+    private fun planTopLevel(root: DirNode) {
+        val owned = ArrayList<String>()
+        for (d in root.dirs) {
+            if (d.zone != Zone.OTHER_SHARED || d.hidden || d.totalFiles == 0 || SafetyPolicy.isPackageLikeName(d.name)) continue
+            // Samsung writes its dumpstate logs to /log; the clutter check looks after old ones.
+            if (SafetyPolicy.isKeptTopDir(d.name)) continue
+            val owner = appFolders.owner(d.name)
+            if (owner != null) {
+                owned += if (owner.equals(d.name, ignoreCase = true)) d.name else "${d.name} ($owner)"
+                continue
+            }
+            var newest = d.mtime
+            d.walkFiles { if (it.mtime > newest) newest = it.mtime }
+            if (newest > now - IN_USE_DAYS * DAY_MS) {
+                insights.add(Insight(Severity.INFO, "Left in place: ${d.name}", "Something wrote to this folder in the last $IN_USE_DAYS days, so it may still be in use.", d.path))
+                continue
+            }
+            val category = BuiltInRules.categoryFolderDestination(d.name)
+            val rule = rules.firstOrNull { it.matchesFolder(d.name) }
+            val learnedHome = if (category == null && rule == null) learned(d, "") else null
+            when {
+                category != null -> planFolderTo(d, "$rootPath/$category", "Top-level folder → its category (merged)", merge = true, selected = false)
+                rule != null -> planFolderTo(d, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${d.name}", "Top-level folder: ${rule.name}", merge = false, selected = false)
+                learnedHome != null -> {
+                    learnedMoves++
+                    planFolderTo(d, "$rootPath/${learnedHome.folder}/${d.name}", "Top-level folder. ${learnedReason(learnedHome)}", merge = false, selected = false)
+                }
+                else -> inferFromContent(d)?.let { (home, reason) ->
+                    planFolderTo(d, "$rootPath/$home/${d.name}", "Top-level folder: ${reason.lowercase()}", merge = false, selected = false)
+                }
+            }
+        }
+        if (owned.isNotEmpty()) {
+            // First: the report keeps only the first few dozen of these notes.
+            insights.add(
+                0,
+                Insight(
+                    Severity.INFO,
+                    "${owned.size} top-level ${if (owned.size == 1) "folder belongs" else "folders belong"} to installed apps",
+                    "They stay where the apps expect them: ${owned.sorted().joinToString(", ")}.",
+                ),
+            )
+        }
     }
 
     // ------------------------------------------------------------------ folders
@@ -143,7 +312,7 @@ class OrganizePlanner(
     private fun planFolder(dir: DirNode, allowReview: Boolean) {
         if (dir.hidden) return
         if (dir.zone == Zone.PATH_SENSITIVE) {
-            leftInPlace(dir, "is a project or Git repository")
+            leftInPlace(dir, if (dir.insideFlagged(NodeFlags.CODE_TREE)) "holds source code or a decompiled app" else "is a project or Git repository")
             return
         }
         // Empty folders belong to the clutter cleanup, not to filing.
@@ -161,6 +330,11 @@ class OrganizePlanner(
                 planFolderTo(dir, "$rootPath/${rule.resolvedDestination(deviceLabel)}/${dir.name}", rule.name, merge = false, selected = true)
                 return
             }
+        }
+        learned(dir, dir.parent?.relPath.orEmpty())?.let { home ->
+            learnedMoves++
+            planFolderTo(dir, "$rootPath/${home.folder}/${dir.name}", learnedReason(home), merge = false, selected = home.score >= CONFIDENT)
+            return
         }
         inferFromContent(dir)?.let { (home, reason) ->
             planFolderTo(dir, "$rootPath/$home/${dir.name}", reason, merge = false, selected = true)
@@ -202,6 +376,7 @@ class OrganizePlanner(
         if (dir.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) {
             val why = when {
                 dir.subtreeHas(NodeFlags.PROJECT_ROOT or NodeFlags.GIT_DIR) -> "contains a project or Git repository"
+                dir.subtreeHas(NodeFlags.CODE_TREE) -> "contains source code or a decompiled app"
                 dir.subtreeHas(NodeFlags.HAS_CREDENTIAL) -> "contains keys or credentials"
                 dir.subtreeHas(NodeFlags.HAS_SYMLINK) -> "contains symbolic links"
                 else -> "contains unreadable or special entries"
@@ -225,6 +400,18 @@ class OrganizePlanner(
         )
     }
 
+    /** You moved [source] (or something in it, or a folder it is in) yourself since the last scan. */
+    private fun placedByYou(source: String): Boolean {
+        if (yours.isEmpty()) return false
+        if (source in holdsYours) return true
+        var p = source
+        while (p.length > rootPath.length) {
+            if (p in yours) return true
+            p = p.substringBeforeLast('/')
+        }
+        return false
+    }
+
     private fun leftInPlace(dir: DirNode, why: String) {
         insights.add(Insight(Severity.INFO, "Left in place: ${dir.name}", "This folder $why, so it keeps its exact path.", dir.path))
     }
@@ -240,6 +427,10 @@ class OrganizePlanner(
         selected: Boolean,
         op: Operation,
     ) {
+        if (placedByYou(source)) {
+            leftForYou++
+            return
+        }
         if (!plannedSources.add(source)) return
         moves.add(
             OrganizeMove(
@@ -258,6 +449,12 @@ class OrganizePlanner(
     }
 
     companion object {
+        /** A top-level folder written to this recently may still be some app's working folder. */
+        const val IN_USE_DAYS = 14
+
+        /** Learned suggestions this sure (summed log ratios) are ticked like a rule's; weaker ones are for review. */
+        const val CONFIDENT = 6.0
+
         fun yearOf(mtime: Long): Int = Instant.ofEpochMilli(mtime).atZone(ZoneId.systemDefault()).year
     }
 }

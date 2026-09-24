@@ -17,6 +17,7 @@ tuned for Galaxy devices such as the S23 series.
 
 <p>
   <img src="docs/screenshots/apps.png" width="200" alt="Apps tab with Shizuku, usage access and Termux status">
+  <img src="docs/screenshots/app-storage.png" width="200" alt="App storage in Clear all data mode, with last use and a messenger that is never offered">
   <img src="docs/screenshots/app-folders.png" width="200" alt="App folder review grouped by logs and thumbnail caches">
   <img src="docs/screenshots/termux-setup.png" width="200" alt="Termux connection steps">
 </p>
@@ -30,15 +31,37 @@ tuned for Galaxy devices such as the S23 series.
 | **Duplicate files** | Exact duplicates anywhere in shared storage. Files are grouped by size, then compared by a quick head+tail fingerprint, then by full SHA-256, with parallel workers and a persistent hash cache. | Keeps the best copy (camera roll before Pictures, organised Documents before Download, an original name before "(1)"/"copy", the oldest before newer). Both copies are re-hashed right before the extra one is deleted, or quarantined if you prefer. |
 | **Duplicate folders** | Whole folder trees that are identical (names, sizes and content). Only the top-most matching pair is reported. | Removes the redundant tree file by file, checking each file against the kept tree. |
 | **Folder merges** | Folders that share most of their content, e.g. `Download/Trip` and `Pictures/Trip`. | Moves the files that are unique into the kept folder and removes the verified duplicates. |
-| **Clutter** | Abandoned partial downloads, old `/log` dumps, empty folder trees, gallery trash, `.thumbnails` caches, zero-byte files, APKs for apps already installed, and folders left behind by apps you've uninstalled. | Quarantined, so you can restore them until the quarantine is emptied (manually or after a retention period). Empty folders are removed. |
-| **Smart organize** | Treats `Download` as an inbox. Every file and folder gets a permanent home based on its name, type and content: finance, travel, health, device firmware, diagnostics, APKs, archives, e-books, AI models, ROMs, backups, and more. | Moves files with no overwriting: identical files at the destination are deduplicated, and different files with the same name get a hash suffix. Folders move as a unit. Wrapper folders like `Documents/Documents` are dissolved. |
-| **Optimize** | Nested duplicate-name folders (`X/X/...` left by extracted archives), very large flat folders, very deep paths, and low free space. | Collapses the redundant levels and sorts huge folders into year (or month) buckets. The rest is reported as advice. |
-| **Storage map** | Folder-by-folder breakdown with size bars, largest files, a breakdown by file type, and the ownership zone of each folder. | Read only. |
+| **Clutter** | Abandoned partial downloads, logs in `/log` older than 3 days (Samsung keeps writing Wi-Fi logs, dumps and bug reports there; the age is a setting, and the note says how to stop the refill with `*#9900#`), empty folder trees, gallery trash, other apps' recycle bins (MT Manager's `MT2/.recycle`), `.thumbnails` caches, zero-byte files, heap dumps (`.hprof`) older than 3 days, APKs for apps already installed wherever they are (MT Manager's `MT2/apks` too), older installers of an app when a newer one is also there, folders left behind by apps you've uninstalled, zip, tar and tar.gz archives you already unpacked (every file is in the folder next to it at the same size), old run folders a tool writes each time (`runs/20260903-122520-…`; the newest and any from the last two weeks stay), and older near-copies of folders (below). | Quarantined, so you can restore them until the quarantine is emptied (manually or after a retention period). Empty folders are removed. An archive only moves if every unpacked file still matches its copy in the archive (CRC-32); the unpacked folder stays. Installers, run folders and near-copies are only suggested. |
+| **Near-copies** | Folders whose files mostly match by name and size, found without reading them: each folder is summarised as a bottom-k MinHash sketch of its file list, and two sketches estimate how much they share. This finds what exact matching can't: a second decompile of one app, three runs of one tool, an export made twice. | The older of each pair is offered under Clutter, unticked, when it may go as a unit. Projects, source trees and folders with keys are only named in the report. Termux uses the same sketches (same hash), so Termux folders are compared with each other and with shared storage's. |
+| **Smart organize** | Treats `Download` as an inbox. Every file and folder gets a permanent home based on its name, type and content: finance, travel, health, device firmware, diagnostics, APKs, archives, e-books, AI models, ROMs, backups, and more. Folders that ended up in the wrong home are re-filed too (presets in `Archives`, a heap dump in `Audio-DSP`, an `apk` folder inside `APKs`). Folders at the top of storage are sorted too: those of installed apps (matched by the app's name or package, such as `Telegram` or `Poweramp`) stay, because apps write to them by path, and the rest get a suggested home. | Moves files with no overwriting: identical files at the destination are deduplicated, and different files with the same name get a hash suffix. Folders move as a unit. Wrapper folders like `Documents/Documents` are dissolved. Top-level moves are suggestions you tick yourself, and folders written to in the last two weeks are left alone. Destinations can also be **learned from your own folders** (below). |
+| **Optimize** | Nested duplicate-name folders (`X/X/...` or `X-Full/Full` left by extracted archives), date folders that version 1.2.0 wrongly made inside decompiled source trees (`jadx/sources/defpackage/2026-08/2026-08`), installers buried in downloaded builds (`Name/app/build/outputs/apk/<flavor>/<type>/Name.apk`), chains of three or more empty folders, very large flat folders, very deep paths, and low free space. | Collapses the redundant levels, moves buried installers up to the top folder of the download (Gradle's metadata files go to the quarantine), and sorts huge photo and video folders into year (or month) buckets. Source files in date folders go back into their package folder (package names can't start with a digit, so such a folder is always that mistake). Empty-folder chains are only suggested, because people build single-branch folders on purpose. Projects and source code are never touched. **Folders untouched for 90 days** that hold mostly text (logs, exports, reports, presets) and no photos, videos or music can be packed into one zip each, unticked, with the saving measured by compressing a sample of the folder's own files (so encrypted "logs" aren't offered and text in odd formats is): every file is checked against its copy in the zip before the folder goes to the quarantine, and undo unpacks it. The rest is reported as advice. |
+| **Storage map** | Folder-by-folder breakdown with size bars, largest files, a breakdown by file type, the ownership zone of each folder, and why a folder is special (project, source code, pinned, holds keys). Android's empty standard folders (Alarms, Podcasts, …) are folded into one line, since Android creates them again. | Read only. **Settings → Diagnostics → Storage report** saves the whole map as text, with how recent each folder's newest file is, what the last scan suggests, what it left alone and why, and the last Termux audit. Storage health also points out keys lying in shared storage and big source trees that would run faster inside Termux. |
 | **History** | Every run, with what it freed, moved, deduplicated or quarantined. | **Undo** replays the journal backwards and checks each step before reverting it. Quarantine can be emptied per run or all at once. |
-| **Weekly audit** | Optional read-only scan while the phone charges. | Sends a notification saying how much space you could reclaim. It never changes files, except emptying quarantines that are past their retention period. |
-| **App storage** | What every installed app stores, split into app size, app data (accounts, messages, offline downloads) and cache. Needs usage access. | Clears only the cache of the apps you tick, through Shizuku. A clear counts only when the app's live cache size actually drops. App data is shown, never deleted; the ⓘ button opens Android's App info. |
+| **Free up space** | Pick a goal (1 to 20 GiB) on the home screen. The goal takes everything that loses nothing (temp files, partial downloads, old logs, heap dumps, empty folders, Termux's downloads), then exact copies, then what is easy to get back (installers of installed apps, cold folders packed losslessly, build outputs and download caches), and near-copies and leftovers only if you ask. To close the last gap it takes the smallest item that does. **Storage over time** charts used space after each scan and says how fast it grows, where, and how long the free space lasts at that pace. | One confirmed run over shared storage and Termux. Untick anything and the plan fills the gap from what is left. Shared-storage items go to the quarantine as usual; one switch empties it right away instead. |
+| **Weekly audit** | Optional read-only scan while the phone charges. The first one runs a day after you switch it on. It skips a week when you scanned within the last day, and stops as soon as you start a scan or clean-up yourself. | Sends a notification saying how much space you could reclaim. It never changes files, except emptying quarantines that are past their retention period, unless you also turn on **Weekly upkeep**: then it clears what loses nothing and the rules tick (less what your choices say you keep) into the quarantine, where History can undo it. |
+| **App storage** | What every installed app stores, split into app size, app data (accounts, messages, offline downloads) and cache, with when each app was last used. Sort by size or by **Unused longest**. Apps appear as soon as each one is measured. Needs usage access. | **Clear cache** clears only the cache of the apps you tick, through Shizuku (up to Android 16: Android 17 ignores cache clears from Shizuku without an error, so there the app points to App info instead). **Clear all data** resets the apps you pick, exactly like Android's App info → Storage → Clear storage (`pm clear` through Shizuku). Nothing is preselected, and it asks you to confirm that it can't be undone. Messengers and mail, authenticators, password managers and wallets, Termux, Shizuku and system apps are never offered. Both kinds of clear count only when the app's live size actually drops. The ⓘ button opens Android's App info. |
 | **App folders** | `Android/data`, `Android/obb` and `Android/media`: cache folders, logs and crash dumps, temp files, thumbnail caches, outdated OBB game data, and folders left by apps you removed. Also lists the largest files each app keeps. | Caches, logs and temp files are deleted for good (apps rebuild them). Outdated OBBs and leftovers are quarantined, so they can be undone. |
-| **Termux** | Termux's private home and packages: APT downloads, pip/uv/Poetry/npm/Go/Cargo/rustup/Bun/Android SDK caches, caches inside proot distributions that aren't running, build outputs Git ignores in your projects, and everything else in `~/.cache`. | Termux runs a small audited script ([`termux-steward.sh`](core/src/main/resources/com/galaxy/steward/core/termux/termux-steward.sh)) that checks every path again before removing it. Installed packages, configs and sources are never touched. |
+| **Browse app folders** | `Android/data`, `Android/obb` and `Android/media` folder by folder, like a file manager: every app's folder, then each file and subfolder with its total size, largest first. | Tick any files or folders and remove them. By default they go to the quarantine (History can undo it); one switch deletes them for good instead. An app's own top folder, protected apps, links and key-like files are never removed, and files changed after you opened the folder are kept. |
+| **Termux** | Termux's private home and packages: APT downloads, downloaded proot-distro images, week-old logs and temp files, trash, pip/uv/Poetry/npm/npx/Yarn/Go/Cargo (registry and Git)/rustup/Bun/Gradle/Android SDK caches, Python `__pycache__` folders anywhere in your home, old Claude Code versions (the one in use and the newest stay), the Koa Termux steward's archives (to review), caches inside proot distributions that aren't running, build outputs Git ignores in your projects, and everything else in `~/.cache`. For review: decompiled apps (apktool and jadx output, not inside Git projects), APKs in your home, `~/node_modules`, Android NDKs built only for x86-64 PCs on an ARM phone (unless box64 or qemu is installed), big programs built for another processor (x86-64, x86 or Windows, read from their first bytes; ones a package installed stay locked), and proot hard-link copies that nothing in the distribution points at any more (a live Git pack can keep a `tmp_pack` name there, so every symlink is checked). The audit also shows where the space goes, identical large files, and near-copies of big folders. | Termux runs a small audited script ([`termux-steward.sh`](core/src/main/resources/com/galaxy/steward/core/termux/termux-steward.sh)) that checks every path again before removing it. The clean-up never touches installed packages, configs or sources. Three tools act only on what you pick. **Browse Termux** lists every folder and file of 1 MiB or more, largest first, so you can drill down and delete (package files, distributions' systems, keys, `~/.termux`, `~/.ssh` and `~/storage` are refused). **Packages** lists every installed package with its size, whether you installed it and what needs it; uninstalling runs apt, whose dry run first shows everything that would go, and packages Termux needs can't be removed. **Remove** on a Linux distribution deletes it whole, through `proot-distro remove`. Browse shows when each folder last changed and sorts by what was left untouched longest; Packages shows when each package was installed and when you last ran one of its commands (from bash, zsh or fish history), with an **Unused longest** sort, and also lists what npm, pip and cargo installed, uninstalled with their own package manager. **Git repositories** lists every repository in Termux, its distributions and shared storage with its last commit, fetch and use and whether everything is pushed, and packs them losslessly with `git gc`. **Move projects into Termux** moves projects and decompiled apps from shared storage to `~/projects` after a byte-for-byte check; History moves them back. |
+| **Logcat export** | The device log, for reporting a problem. With Shizuku connected it's the whole device log (the main, system, crash and events buffers), without other Android users' lines: Secure Folder, a work profile and Dual Messenger stay private. Without Shizuku, Galaxy Steward's own lines. | **Settings → Diagnostics → Export** saves it to `Documents/Galaxy Steward LogCat/logcat-<date>.txt`, and **Share** sends it to another app. The steward never moves, deduplicates or cleans that folder. Every scan, clean-up, undo, Termux audit and export also writes one summary line (counts, sizes and durations, never file names) under the `GalaxySteward` tag. |
+
+### Learning, on the phone
+
+Two small models, not a language model, learn from this phone only; nothing leaves it.
+
+- **Where things go** (Settings → Learn from my folders): at each scan a naive Bayes classifier is trained on your own
+  folders. Every folder you keep things in is a class, described by the words, extensions and kinds of what is already
+  in it. A loose file or a stray folder goes where things like it already are, and the words it shares with them are
+  the reason shown ("shares .iso, "bionicle" with 4 items there"). Only matched evidence counts, at least a third of
+  the item must match, the item's own contents never vote, and shallow, uncrowded folders are preferred. It overrides
+  destinations picked from the file type alone, refines named rules, and suggests re-homing folders that look out of
+  place; named rules still win. The app also remembers where each file was at the last scan (by name and size, in its
+  private folder): what you moved yourself since then counts three times in the folder you chose, and isn't suggested
+  to move again. The steward's own moves and undos don't count.
+- **What you usually run** (Settings → Learn from my choices): which suggestions you ran, left or undid are logged, and
+  a logistic regression trained on them changes a suggestion's starting tick only with five or more decisions like it
+  behind it ("You usually run these"). Undoing a run counts as a strong no. Folder merges are never pre-ticked.
+  Termux clean-up picks train it too. **Forget what it learned** clears the log and the remembered places.
 
 **Autopilot** on the home screen applies everything that's currently selected in one confirmed run. It works in the
 safest order: dedupe, then clutter, then layout fixes, then filing.
@@ -68,8 +91,10 @@ tab uses two optional helpers that are already on your phone:
 
 - **Shizuku** gives the steward a small helper process with ADB-level rights (no root). The helper only exposes fixed
   operations: the same app-folder scanner and cleaner as the rest of the app, with all their checks, a cache-only
-  clear for one package (`cmd package clear --cache-only`), and granting the app usage access. It has no general
-  command runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
+  clear for one package (`cmd package clear --cache-only`), a full data clear for one package you picked
+  (`pm clear`, after checking it again against the same rules and that it isn't a system package), a read-only folder
+  listing for the app folder browser, granting the app usage access, and one fixed `logcat -d` for the logcat export
+  (only the shell user may read the whole device log). It has no general command runner. Start Shizuku, tap **Allow**, and the Apps tab does the rest. Without Shizuku the app can still
   scan `Android/media` and show app sizes.
 - **Termux** keeps its home private to itself, so the steward asks Termux to run the helper script through Termux's
   own `RUN_COMMAND` bridge. Tap **Allow** on the Apps tab, then paste this once into Termux:
@@ -84,11 +109,17 @@ tab uses two optional helpers that are already on your phone:
 App-data rules carried over from the Termux steward's strict v18 policy:
 
 - **Amazon Music and Audible are never touched**: nothing is cleaned, stopped or cleared.
-- **Only regenerable data is deleted**: cache folders, logs, crash dumps and temp files older than a set age. The app
-  never deletes offline media, downloads, saves, databases (LevelDB/RocksDB write-ahead logs are recognised), or
-  anything with a credential-like name. The same is true of app data in `/data/data`, which would sign you out.
-- **Cache clears are checked against live storage statistics.** Apps are stopped first unless you turn that off.
-  System apps, Google Play services, Samsung apps, messaging, Termux and Shizuku are never stopped.
+- **Scans and clean-ups only delete regenerable data**: cache folders, logs, crash dumps and temp files older than a
+  set age. They never delete offline media, downloads, saves, databases (LevelDB/RocksDB write-ahead logs are
+  recognised), or anything with a credential-like name.
+- **All of an app's data is only cleared when you pick that app** under App storage → Clear all data and confirm it.
+  That is Android's own Clear storage: it empties the app's private data and its `Android/data` folder, signs you out
+  and can't be undone. Apps whose data may be the only copy of something (messengers and mail, 2FA authenticators,
+  password managers, crypto wallets) are never offered, but no list can name every such app, so check before you
+  confirm.
+- **Cache clears are checked against live storage statistics.** You can have each app stopped first, which clears a
+  little more. It's off by default, because a stopped app gets no notifications until you open it again. System apps,
+  Google Play services, Samsung apps, messengers, mail and social apps, Termux and Shizuku are never stopped.
 - A folder only counts as a **leftover** when Android doesn't know its package at all. Apps removed with "keep data"
   and archived apps count as installed. If the package list looks unreliable, nothing is reported as a leftover.
 
@@ -118,17 +149,31 @@ operation runs:
   pick up the new layout without keeping Android's media service busy for minutes.
 - **Source trees keep their shape.** Folders inside `src`, `smali*`, `java`, `node_modules` and similar trees, or
   containing code, are never flattened: `com/acme/model/model` is a package path, not a redundant wrapper.
-  apktool output (`apktool.yml`) counts as a project.
+  Decompiled apps are treated like projects: apktool output (`apktool.yml`, `smali*`), jadx output (`sources` next to
+  `resources`) and unpacked APKs (`classes.dex` next to `AndroidManifest.xml`). So are two kinds of folder below the
+  top level: development folders (`Download/Projects`, `Documents/src`, `jadx`, `decompiled`, and so on), and folders
+  with at least 50 code files that make up at least half of their files. None of these are moved, date-sorted or
+  deduplicated, though they can serve as the kept copy. Because they rarely change, a rescan fills in each such
+  folder whose date is unchanged from the previous map, with one check per folder instead of one per file.
+- **Only photo and video dumps are sorted into date folders.** Preset libraries, datasets, music and documents are
+  found by name, so a huge flat folder of those is reported but never split up by date.
 
 ## Install
 
-1. Open the latest run of the **Android build** workflow in this repository's **Actions** tab and download the
-   `galaxy-steward-apks` artifact.
-2. Install `app-release.apk`. The CI build is signed with a debug key; sign your own build if you plan to
-   distribute it. You'll need to allow installs from your browser or file manager.
-3. Open the app and grant **All files access**. The app has no internet permission, so nothing leaves your phone.
-4. Optional: on the **Apps** tab, connect Shizuku (for `Android/data`, `obb` and cache clearing), grant usage access
+1. Download
+   [`galaxy-steward.apk`](https://github.com/Zfkirke0109/Galaxy-Filesystem-Steward/releases/latest/download/galaxy-steward.apk)
+   from the latest release and install it. You'll need to allow installs from your browser or file manager. To get
+   updates automatically, add this repository to [Obtainium](https://github.com/ImranR98/Obtainium) or GitHub Store
+   instead.
+2. Open the app and grant **All files access**. The app has no internet permission, so nothing leaves your phone.
+3. Optional: on the **Apps** tab, connect Shizuku (for `Android/data`, `obb` and cache clearing), grant usage access
    (for app sizes), and connect Termux.
+
+Every build is signed with the same release key, so each new version installs over the last one and the app keeps
+its settings and history. Builds made before release signing was set up each had a different throwaway key: uninstall
+such a build once before installing a release, and undo any runs you still want undone first. The
+[signing guide](docs/SIGNING.md) covers the one-time key setup and how CI signs, checks and publishes each build.
+Every workflow run also keeps its APK as an artifact, including runs for pull requests.
 
 ## Build from source
 
@@ -138,8 +183,11 @@ Requirements: JDK 17 or later and the Android SDK (platform 36).
 ./gradlew :core:test              # engine unit tests (plain JVM, fast)
 ./gradlew :app:testDebugUnitTest  # end-to-end app test (Robolectric) + screenshots in app/build/outputs/roborazzi
 ./gradlew :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:assembleRelease    # minified with R8
+./gradlew :app:assembleRelease    # shrunk with R8; signed with the release key if one is configured
 ```
+
+Release builds keep real class names and line numbers, so crash traces in a phone's logcat are readable without a
+mapping file. To sign local builds with the release key, see [docs/SIGNING.md](docs/SIGNING.md#building-locally-with-the-key).
 
 The engine tests run against real temporary directories. They cover keeper choice, the protected zones, fresh
 SHA-256 re-checks that catch content changed after a scan, quarantine, folder deduplication and merges, filing
@@ -149,7 +197,8 @@ reinstalled apps. The Termux script tests run the real `termux-steward.sh` with 
 home. They check symlinked caches, forged paths, tracked sources, unknown targets and truncated output. The app test
 scans a sample phone layout through the real ViewModel, opens every screen, applies Autopilot, checks the result
 file by file on disk, then undoes the run and checks that everything was restored. It also cleans a sample
-`Android/media` folder from the Apps tab.
+`Android/media` folder from the Apps tab, and exports a logcat from Settings, then shares it and reads it back through
+the app's file provider.
 
 ## Architecture
 
@@ -157,17 +206,18 @@ file by file on disk, then undoes the run and checks that everything was restore
 core/   Pure Kotlin/JVM engine, no Android dependencies, unit-tested against real temp directories
   scan/       TreeScanner: walks storage without following symlinks; assigns ownership zones and safety flags
   hash/       Quick fingerprints, SHA-256, persistent hash cache
-  dedupe/     DuplicateFinder, FolderAnalyzer (exact trees and partial overlaps), keeper ranking
+  dedupe/     DuplicateFinder, FolderAnalyzer (exact trees and partial overlaps), keeper ranking, FolderSketch (near-copies)
   junk/       JunkPlanner
-  organize/   Keyword and extension rules, OrganizePlanner (the semantic layout planner)
-  optimize/   OptimizePlanner (flattening, date buckets, health insights)
+  organize/   Keyword and extension rules, OrganizePlanner (the semantic layout planner), FilingModel (learned homes)
+  optimize/   OptimizePlanner (flattening, date buckets, packing cold folders, health insights), ProjectMoves
+  learn/      DecisionLog and PreferenceModel (starting ticks learned from your choices)
   exec/       ActionExecutor, PathGuard, JournalStore, RollbackEngine, QuarantineManager, MediaRescan
   appdata/    AppDataScanner and AppDataExecutor for Android/data|obb|media, and the helper line protocol
   termux/     termux-steward.sh (resource), target catalogue and output parser
 app/    Android app: Compose UI, ViewModel, settings, WorkManager weekly audit, MediaStore rescans
   shizuku/    Shizuku bridge and StewardHelperService (runs as the shell user inside Shizuku)
   termux/     RUN_COMMAND bridge and result receiver
-  apps/       Per-app storage stats and cache clears
+  apps/       Per-app storage stats, last use, cache clears and full data clears
 ```
 
 ### From the Termux script to the app
@@ -189,12 +239,18 @@ app/    Android app: Compose UI, ViewModel, settings, WorkManager weekly audit, 
 
 - **Device-wide `pm trim-caches`.** The v18 script disabled it because it can't exclude Amazon Music or Audible.
   Caches are cleared app by app instead.
-- **Deleting app data in `/data/data`.** Only root could do that selectively, and clearing it wholesale signs you
-  out and loses messages. The app shows how big each app's data is and links to App info.
-- **Pruning Git history** (`git gc`, repacking). Build outputs that Git ignores can be cleaned; repository history is
-  left alone.
+- **Deleting single files inside `/data/data`.** Only root can reach inside another app's private data. Without root
+  the only option is all or nothing, Android's Clear storage, which App storage → Clear all data offers for the apps
+  you pick.
+- **Rewriting Git history** (shallow clones, pruning reflogs). `git gc` packs repositories losslessly; their history
+  stays whole.
+- **Recompressing photos, videos or music.** Any real saving there is lossy or changes the format apps expect, so media
+  is never packed or re-encoded.
 
 On "faster I/O": the app speeds up everyday file access by freeing space (flash storage slows down and wears
 faster when nearly full), by removing duplicate and junk files that galleries and file managers would otherwise index,
-and by splitting very large flat folders. It doesn't change filesystem settings or run TRIM, which Android
-already schedules itself.
+by splitting very large flat folders, and by cutting the number of small files shared storage's FUSE layer has to
+serve: projects can move into Termux's own home and cold folders can become one zip each. It doesn't change filesystem settings or run TRIM, which Android
+already schedules itself. Where files sit doesn't change how fast the CPU runs or how much RAM apps get: Android
+manages memory itself, and "RAM booster" apps that kill background apps make the phone slower, because those apps
+have to start again from scratch.

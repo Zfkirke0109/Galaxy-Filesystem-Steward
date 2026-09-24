@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.FolderSpecial
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.QueryStats
@@ -153,7 +154,8 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     title = "Installed apps",
                     text = when {
                         !apps.usageAccess -> "Grant usage access to see what every app stores, split into app data and cache."
-                        apps.statsLoading && apps.apps.isEmpty() -> "Measuring apps…"
+                        apps.statsLoading && !apps.everLoaded ->
+                            "Measuring apps…" + if (apps.statsTotal > 0) " ${apps.statsDone} of ${apps.statsTotal}" else ""
                         apps.statsError != null -> apps.statsError!!
                         else -> "${apps.apps.size.plural("app")} use ${total.humanBytes()}: ${data.humanBytes()} app data, ${cache.humanBytes()} cache"
                     },
@@ -189,6 +191,23 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                 ) {
                     if (report == null) vm.apps.scanFolders()
                     navigate(Routes.APP_FOLDERS)
+                }
+            }
+
+            item {
+                val report = apps.folders
+                OverviewCard(
+                    icon = Icons.Rounded.FolderOpen,
+                    title = "Browse app folders",
+                    text = "Open Android/data, obb and media folder by folder, like a file manager, and remove the files and " +
+                        "folders you choose - into the quarantine, or for good." +
+                        if (report != null && AppArea.DATA !in report.areas) " Connect Shizuku for Android/data and obb." else "",
+                    fraction = null,
+                    busy = false,
+                    action = "Browse",
+                ) {
+                    if (apps.folders == null && !apps.foldersScanning) vm.apps.scanFolders()
+                    navigate(Routes.APP_BROWSER)
                 }
             }
 

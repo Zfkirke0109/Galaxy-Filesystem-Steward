@@ -1,5 +1,6 @@
 package com.galaxy.steward.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,7 +15,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -24,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -55,6 +60,50 @@ fun ConfirmDialog(
             }
         },
         confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/**
+ * For changes nothing can undo (deleting inside Termux, removing a distribution): names what goes and only confirms
+ * after "I understand".
+ */
+@Composable
+fun IrreversibleDialog(
+    title: String,
+    names: List<String>,
+    lines: List<String>,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var understood by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (names.isNotEmpty()) {
+                    Text(
+                        if (names.size <= 4) names.joinToString() else names.take(3).joinToString() + " and ${names.size - 3} more",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                }
+                lines.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                Row(Modifier.fillMaxWidth().clickable { understood = !understood }, verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = understood, onCheckedChange = { understood = it })
+                    Text("I understand this can't be undone", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = understood,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(confirmLabel) }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
@@ -91,16 +140,19 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
             val s = outcome.summary
             val lines = buildList {
                 if (s.bytesFreed > 0) add("Freed ${s.bytesFreed.humanBytes()}")
-                if (s.cleared > 0) add("${s.cleared.plural("cache, log or temp file", "cache, log and temp files")} removed for good")
+                if (s.cleared > 0) add("${s.cleared.plural("file")} removed for good")
                 if (s.deduped > 0) add("${s.deduped.plural("verified duplicate", "verified duplicates")} removed")
                 if (s.quarantined > 0) add("${s.quarantined.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
+                if (s.packed > 0) add("${s.packed.plural("folder", "folders")} packed into zips (${s.bytesPacked.humanBytes()}); the folders are in the quarantine")
                 if (s.moved > 0) add("${s.moved.plural("item", "items")} organised")
                 if (s.removedDirs > 0) add("${s.removedDirs.plural("empty folder", "empty folders")} removed")
                 if (s.skipped > 0) add("${s.skipped.plural("step", "steps")} skipped safely")
                 if (s.failed > 0) add("${s.failed.plural("step", "steps")} failed")
                 if (isEmpty()) add("Nothing needed changing.")
             }
-            Outcome5(outcome.title, lines, s.messages, s.runId.takeIf { s.changedAnything }, outcome.title)
+            // The counts by reason first: a long list of paths hides that they were all skipped for one reason.
+            val reasons = s.reasons.entries.sortedByDescending { it.value }.map { "${it.key}: ${it.value.plural("file")}" }
+            Outcome5(outcome.title, lines, reasons + s.messages, s.runId.takeIf { s.changedAnything }, outcome.title)
         }
         is Outcome.RolledBack -> {
             val s = outcome.summary

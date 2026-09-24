@@ -26,8 +26,14 @@ object JournalAction {
     /** Regenerable data (caches, logs, temp files) deleted for good; `b` holds `files=<count>`. Not undoable. */
     const val PURGED = "PURGED"
 
+    /** A zip `a` made from folder `b` (size and SHA-256 of the zip): undo deletes the zip if it is unchanged. */
+    const val PACKED = "PACKED"
+
+    /** A folder `a` in shared storage moved into Termux as `b`: undone through Termux, not by [RollbackEngine]. */
+    const val RELOCATED = "RELOCATED"
+
     /** Actions [RollbackEngine] can revert. */
-    val RESTORABLE = setOf(MOVED, MOVED_DIR, DEDUPED, DEDUPED_QUARANTINED, QUARANTINED, RMDIR)
+    val RESTORABLE = setOf(MOVED, MOVED_DIR, DEDUPED, DEDUPED_QUARANTINED, QUARANTINED, RMDIR, PACKED, RELOCATED)
 }
 
 data class JournalEntry(

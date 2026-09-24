@@ -20,4 +20,17 @@ interface IStewardHelper {
 
     // Grants this app the usage-access app-op so it can read per-app storage statistics.
     boolean grantUsageAccess(String packageName) = 6;
+
+    // Dumps the whole device log once (a fixed `logcat -d`, which only the shell user may read in full) and
+    // streams it back. The helper's first line names its uid and pid.
+    ParcelFileDescriptor dumpLogcat() = 7;
+
+    // Lists one folder inside Android/{data,obb,media}/<package> with the size of each entry (the app folder
+    // browser). Read-only; the request and the listing use core's AppDataWire format.
+    ParcelFileDescriptor listAppFolder(in ParcelFileDescriptor request) = 8;
+
+    // Clears all data of one app, like Android's Settings > Clear storage (a fixed `pm clear`), after checking the
+    // package against core's AppPolicy.clearDataBlock and that it is not a system package. Returns "exit=<code>" or
+    // "error=<reason>".
+    String clearAppData(String packageName, int userId, long timeoutMs) = 9;
 }

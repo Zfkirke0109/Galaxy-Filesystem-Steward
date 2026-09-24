@@ -37,6 +37,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -45,16 +46,20 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.learn.LearnedChoice
 import com.galaxy.steward.core.termux.TermuxGroup
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.core.termux.TermuxProtocol
+import com.galaxy.steward.core.termux.TermuxRootfs
 import com.galaxy.steward.termux.TermuxBridge
 import com.galaxy.steward.termux.TermuxStatus
+import com.galaxy.steward.ui.Routes
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.components.ActionBar
 import com.galaxy.steward.ui.components.ConfirmDialog
 import com.galaxy.steward.ui.components.GroupHeader
 import com.galaxy.steward.ui.components.InlineNotice
+import com.galaxy.steward.ui.components.IrreversibleDialog
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.SelectRow
@@ -62,7 +67,7 @@ import com.galaxy.steward.ui.components.toggleState
 
 /** Termux's private home: package caches, developer caches, proot distros and build outputs. */
 @Composable
-fun TermuxScreen(vm: StewardViewModel, onBack: () -> Unit) {
+fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () -> Unit) {
     val state by vm.termux.state.collectAsStateWithLifecycle()
     val report = state.report
     val items = report?.items.orEmpty()
@@ -70,6 +75,7 @@ fun TermuxScreen(vm: StewardViewModel, onBack: () -> Unit) {
     val selected = items.filter { it.spec in state.selected }
     var expanded by rememberSaveable { mutableStateOf(setOf<String>()) }
     var confirm by remember { mutableStateOf<List<TermuxItem>?>(null) }
+    var removeDistro by remember { mutableStateOf<TermuxRootfs?>(null) }
     val context = LocalContext.current
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.termux.refresh() }
 
@@ -99,7 +105,8 @@ fun TermuxScreen(vm: StewardViewModel, onBack: () -> Unit) {
             item {
                 InlineNotice(
                     "Termux's home is private to Termux, so the steward asks Termux to run a small, audited helper script there. " +
-                        "It re-checks every path, never follows symlinks and never touches your projects' sources, configs or installed packages.",
+                        "It re-checks every path and never follows symlinks. The clean-up below never touches your sources, configs or " +
+                        "packages; Browse, Packages and Remove only change what you pick.",
                 )
             }
             if (state.status != TermuxStatus.READY || state.needsExternalApps) {
@@ -141,21 +148,56 @@ fun TermuxScreen(vm: StewardViewModel, onBack: () -> Unit) {
                         }
                     }
                 }
+                item {
+                    ManageCard(
+                        title = "Browse Termux",
+                        text = if (report.entries.isEmpty()) {
+                            "Run termux-setup-storage once in Termux and scan again: the folder-by-folder map comes back through shared storage."
+                        } else {
+                            "Every folder and file of 1 MiB or more, largest first. Open folders and delete what you pick."
+                        },
+                        action = "Browse",
+                        enabled = report.entries.isNotEmpty(),
+                    ) { navigate(Routes.TERMUX_BROWSER) }
+                }
+                item {
+                    ManageCard(
+                        title = "Packages and programs",
+                        text = "Every installed package, and what npm, pip and cargo installed, with its size, when it was installed and when " +
+                            "you last ran it. Pick what to uninstall.",
+                        action = "Open",
+                        enabled = true,
+                    ) { navigate(Routes.TERMUX_PACKAGES) }
+                }
+                item {
+                    ManageCard(
+                        title = "Git repositories",
+                        text = "Every repository in Termux, its distributions and shared storage: last commit, fetch and use, whether " +
+                            "everything is pushed, and git gc to pack it losslessly.",
+                        action = "Open",
+                        enabled = true,
+                    ) { navigate(Routes.TERMUX_REPOS) }
+                }
+                item {
+                    ManageCard(
+                        title = "Move projects into Termux",
+                        text = "Projects and decompiled apps in shared storage work several times faster in Termux's home. Moved only " +
+                            "after a byte-for-byte check; History moves them back.",
+                        action = "Open",
+                        enabled = true,
+                    ) { navigate(Routes.TERMUX_PROJECTS) }
+                }
+                item { TermuxCopies(vm) }
+                item { TermuxForeign(vm) }
                 if (report.prootActive) {
                     item { InlineNotice("A proot distribution is running, so distro caches were only measured. Stop it and scan again to clean them.") }
                 }
                 for ((group, list) in groups) {
-                    item(key = group.name) { GroupCard(group, list, state.selected, group.name in expanded, vm, report.home, report.prefix) { expanded = if (group.name in expanded) expanded - group.name else expanded + group.name } }
+                    item(key = group.name) { GroupCard(group, list, state.selected, state.learned, group.name in expanded, vm, report.home, report.prefix) { expanded = if (group.name in expanded) expanded - group.name else expanded + group.name } }
                 }
                 if (report.rootfs.isNotEmpty()) {
                     item { SectionHeader("Linux distributions") }
-                    items(report.rootfs) { r ->
-                        Text(
-                            "${r.path.substringAfterLast('/')} · ${r.bytes.humanBytes()}" + if (r.active) " · running" else "",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
-                        )
-                    }
+                    items(report.rootfs) { r -> DistroRow(distroName(r.path), r.bytes, r.active || report.prootActive) { removeDistro = r } }
                 }
                 if (report.largeFiles.isNotEmpty()) {
                     item { SectionHeader("Largest files in Termux") }
@@ -176,6 +218,24 @@ fun TermuxScreen(vm: StewardViewModel, onBack: () -> Unit) {
                     .forEach { w -> item { InlineNotice(w) } }
             }
         }
+    }
+
+    removeDistro?.let { r ->
+        IrreversibleDialog(
+            title = "Remove the ${distroName(r.path)} distribution?",
+            names = emptyList(),
+            lines = listOf(
+                "Frees about ${r.bytes.humanBytes()}",
+                "Everything inside it goes: its packages, your files in its home folders and its settings",
+                "You can install a fresh one again with proot-distro install",
+            ),
+            confirmLabel = "Remove",
+            onConfirm = {
+                removeDistro = null
+                vm.removeTermuxDistro(r.path)
+            },
+            onDismiss = { removeDistro = null },
+        )
     }
 
     confirm?.let { list ->
@@ -203,6 +263,7 @@ private fun GroupCard(
     group: TermuxGroup,
     list: List<TermuxItem>,
     selected: Set<String>,
+    learned: Map<String, LearnedChoice>,
     open: Boolean,
     vm: StewardViewModel,
     home: String,
@@ -232,7 +293,8 @@ private fun GroupCard(
                         onCheckedChange = { vm.termux.toggle(item.spec) },
                         title = item.title,
                         subtitle = listOf(TermuxProtocol.relative(item.path, home, prefix), item.files.plural("file"), item.note)
-                            .filter { it.isNotEmpty() }.joinToString(" · "),
+                            .filter { it.isNotEmpty() }.joinToString(" · ") + (learned[item.spec]?.let { "\n${it.note}" } ?: ""),
+                        subtitleLines = 3,
                         trailing = { SizeText(item.bytes) },
                     )
                 }
@@ -295,4 +357,20 @@ private fun Step(number: Int, text: String, done: Boolean, action: @Composable (
 
 private fun copy(context: Context, text: String) {
     context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Termux command", text))
+}
+
+/** "debian" for both proot-distro layouts: installed-rootfs/debian and containers/debian/rootfs. */
+private fun distroName(path: String): String = path.removeSuffix("/rootfs").substringAfterLast('/')
+
+@Composable
+private fun ManageCard(title: String, text: String, action: String, enabled: Boolean, onClick: () -> Unit) {
+    ReviewCard {
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            FilledTonalButton(onClick = onClick, enabled = enabled, modifier = Modifier.testTag("open:$title")) { Text(action) }
+        }
+    }
 }

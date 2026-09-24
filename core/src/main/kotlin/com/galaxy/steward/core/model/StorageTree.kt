@@ -30,8 +30,12 @@ object NodeFlags {
     const val UNREADABLE = 1 shl 5
     const val HAS_UNSAFE_NAME = 1 shl 6
 
+    /** Source code or a decompiled app (smali, jadx output, mostly code files): its layout is its meaning. */
+    const val CODE_TREE = 1 shl 7
+
     /** Any of these anywhere in a subtree makes the whole subtree unsafe to move or dedupe as a unit. */
-    const val SUBTREE_BLOCKERS = HAS_SYMLINK or HAS_SPECIAL or HAS_CREDENTIAL or PROJECT_ROOT or GIT_DIR or UNREADABLE or HAS_UNSAFE_NAME
+    const val SUBTREE_BLOCKERS =
+        HAS_SYMLINK or HAS_SPECIAL or HAS_CREDENTIAL or PROJECT_ROOT or GIT_DIR or UNREADABLE or HAS_UNSAFE_NAME or CODE_TREE
 }
 
 class FileNode(
@@ -66,6 +70,9 @@ class DirNode(
     val files: MutableList<FileNode> = ArrayList(0)
     var totalBytes: Long = 0L
     var totalFiles: Int = 0
+
+    /** Code files (FileKind.CODE) anywhere below this folder. */
+    var codeFiles: Int = 0
     val depth: Int = if (parent == null) 0 else parent.depth + 1
 
     private var cachedPath: String? = null

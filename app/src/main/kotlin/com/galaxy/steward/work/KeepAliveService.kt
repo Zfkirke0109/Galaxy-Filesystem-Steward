@@ -75,11 +75,14 @@ object KeepAlive {
         }
     }
 
-    /** Refreshes the notification text at most once a second. */
+    /**
+     * Refreshes the notification text at most every few seconds: each update makes System UI re-inflate the row, and
+     * once a second for a 20-minute run was over a thousand re-inflations on a real phone.
+     */
     fun update(context: Context, title: String, text: String?, done: Int, total: Int) {
         if (holders.get() <= 0) return
         val now = SystemClock.uptimeMillis()
-        if (now - lastUpdate < 1000 && done < total) return
+        if (now - lastUpdate < UPDATE_INTERVAL_MS && done < total) return
         lastUpdate = now
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -88,6 +91,8 @@ object KeepAlive {
         }
         NotificationManagerCompat.from(context).notify(KeepAliveService.NOTIFICATION_ID, notification(context, title, text, done, total))
     }
+
+    private const val UPDATE_INTERVAL_MS = 5_000L
 
     val active: Boolean get() = holders.get() > 0
 

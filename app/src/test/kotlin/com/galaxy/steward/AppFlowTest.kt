@@ -1,25 +1,51 @@
 package com.galaxy.steward
 
+import android.Manifest
 import android.app.AppOpsManager
+import android.app.Application
+import android.app.usage.StorageStats
+import android.app.usage.StorageStatsManager
+import android.app.usage.UsageStatsManager
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.net.Uri
 import android.os.Environment
 import android.os.Looper
+import android.os.Process
+import android.os.storage.StorageManager
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.galaxy.steward.core.DAY_MS
+import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.appdata.AppJunkKind
+import com.galaxy.steward.core.termux.TermuxEntry
+import com.galaxy.steward.core.termux.TermuxPackage
+import com.galaxy.steward.core.termux.TermuxProgram
+import com.galaxy.steward.core.termux.TermuxRepo
+import com.galaxy.steward.core.termux.TermuxReport
+import com.galaxy.steward.core.termux.TermuxRootfs
+import com.galaxy.steward.core.termux.TermuxUsage
+import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.ui.MainActivity
 import com.galaxy.steward.ui.Outcome
 import com.galaxy.steward.ui.StewardViewModel
@@ -34,9 +60,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadow.api.Shadow
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowEnvironment
+import org.robolectric.shadows.ShadowLog
 import org.robolectric.shadows.ShadowStatFs
+import org.robolectric.shadows.ShadowStorageStatsManager
+import org.robolectric.shadows.ShadowUsageStatsManager
 import java.io.File
 import kotlin.random.Random
 
@@ -82,6 +112,9 @@ class AppFlowTest {
 
     private fun text(rel: String, s: String) = file(rel, s.toByteArray())
 
+    /** What the app wrote under its log tag, so a logcat export would show it. */
+    private fun stewardLog(): List<String> = ShadowLog.getLogsForTag(StewardLog.TAG).map { it.msg }
+
     @Before
     fun fixture() {
         root = Environment.getExternalStorageDirectory()
@@ -124,6 +157,47 @@ class AppFlowTest {
         ShadowEnvironment.addExternalDir("emulated-0")
     }
 
+    /**
+     * Three apps as Android's statistics report them: sizes from StorageStatsManager, last use from UsageStatsManager,
+     * and usage access granted so both can be read.
+     */
+    private fun installApps() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val now = System.currentTimeMillis()
+        val storage = Shadow.extract<ShadowStorageStatsManager>(context.getSystemService(StorageStatsManager::class.java))
+        val usage = Shadow.extract<ShadowUsageStatsManager>(context.getSystemService(UsageStatsManager::class.java))
+        // Package, label, app, data (without cache), cache, and how long ago it was last used.
+        listOf(
+            listOf("com.example.game", "Example Game", 300L * 1024 * 1024, 2_600L * 1024 * 1024, 40L * 1024 * 1024, 200 * DAY_MS),
+            listOf("org.thoughtcrime.securesms", "Signal", 120L * 1024 * 1024, 900L * 1024 * 1024, 30L * 1024 * 1024, DAY_MS / 2),
+            listOf("com.example.notes", "Notes", 20L * 1024 * 1024, 5L * 1024 * 1024, 1L * 1024 * 1024, 3 * DAY_MS),
+        ).forEach { row ->
+            val pkg = row[0] as String
+            shadowOf(context.packageManager).installPackage(
+                PackageInfo().apply {
+                    packageName = pkg
+                    applicationInfo = ApplicationInfo().apply {
+                        packageName = pkg
+                        nonLocalizedLabel = row[1] as String
+                    }
+                },
+            )
+            val stats = StorageStats::class.java.getDeclaredConstructor().newInstance()
+            fun field(name: String, value: Long) = StorageStats::class.java.getDeclaredField(name).apply { isAccessible = true }.setLong(stats, value)
+            field("codeBytes", row[2] as Long)
+            field("dataBytes", row[3] as Long + row[4] as Long) // Android counts the cache as part of the data
+            field("cacheBytes", row[4] as Long)
+            storage.addStorageStats(StorageManager.UUID_DEFAULT, pkg, Process.myUserHandle(), stats)
+            usage.addUsageStats(
+                UsageStatsManager.INTERVAL_BEST,
+                ShadowUsageStatsManager.UsageStatsBuilder.newBuilder().setPackageName(pkg).setFirstTimeStamp(now - 300 * DAY_MS)
+                    .setLastTimeStamp(now).setLastTimeUsed(now - row[5] as Long).build(),
+            )
+        }
+        shadowOf(context.getSystemService(AppOpsManager::class.java))
+            .setMode(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName, AppOpsManager.MODE_ALLOWED)
+    }
+
     /** "All files access" is an app-op on Android 11+; flip it the way the Settings toggle would. */
     private fun setAllFilesAccess(granted: Boolean) {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -138,6 +212,7 @@ class AppFlowTest {
 
     @Test
     fun scanReviewApplyAndUndo() {
+        installApps()
         setAllFilesAccess(false)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         compose.onNodeWithText("Grant all files access").assertExists()
@@ -154,6 +229,12 @@ class AppFlowTest {
         compose.onNodeWithText("Start smart scan").performClick()
         awaitState("scan", vm) { vm.state.value.report != null }
         shot("02-home-after-scan")
+        // The first scan asks once for the notification permission (so progress shows in the shade) and is logged.
+        scenario.onActivity {
+            assertEquals(listOf(Manifest.permission.POST_NOTIFICATIONS), shadowOf(it).lastRequestedPermission?.requestedPermissions?.toList())
+        }
+        assertFalse(vm.shouldAskForNotifications())
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("scan done in ") && it.contains("; phases mapping ") })
 
         val report = vm.state.value.report!!
         assertEquals(1, report.duplicates.size)
@@ -180,6 +261,14 @@ class AppFlowTest {
         shot("07-optimize")
         compose.onNodeWithContentDescription("Back").performClick()
 
+        // Free up space: what loses nothing first, then copies; the goal ticks what reaches it.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:goal"))
+        compose.onNodeWithTag("open:goal").performClick()
+        compose.onNodeWithText("1 GiB").performClick()
+        compose.onNodeWithText("big-movie.mkv.crdownload").assertExists()
+        shot("07b-free-up-space")
+        compose.onNodeWithContentDescription("Back").performClick()
+
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Review & apply"))
         compose.onNodeWithText("Review & apply").performClick()
         shot("08-autopilot-confirm")
@@ -189,6 +278,7 @@ class AppFlowTest {
 
         val outcome = vm.state.value.outcome
         assertTrue("expected an applied outcome, got $outcome", outcome is Outcome.Applied)
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("run \"Autopilot\" (autopilot) done in ") })
         // Verified duplicate removed, camera original kept.
         assertFalse(File(root, "Download/IMG_20240612_101500 (1).jpg").exists())
         assertTrue(File(root, "DCIM/Camera/IMG_20240612_101500.jpg").exists())
@@ -226,9 +316,69 @@ class AppFlowTest {
         compose.onNodeWithText("Settings").performClick()
         shot("13-settings")
 
-        // Apps tab: without Shizuku the app folders scan covers Android/media in-process.
+        // Settings > Diagnostics: without Shizuku the export holds the app's own log, saved under Documents.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Export logcat"))
+        compose.onNodeWithText("Export").performClick()
+        awaitState("logcat export", vm) { vm.logcat.state.value.let { !it.running && (it.saved != null || it.error != null) } }
+        val saved = vm.logcat.state.value.saved ?: error("logcat export failed: ${vm.logcat.state.value.error}")
+        assertEquals(File(root, SafetyPolicy.LOGCAT_DIR).path, saved.file.parent)
+        assertTrue(saved.file.name.matches(Regex("""logcat-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.txt""")))
+        assertFalse(saved.wholeDevice)
+        val log = saved.file.readText()
+        assertTrue(log.startsWith("Galaxy Steward "))
+        assertTrue(log.contains("Contents: Galaxy Steward's own log lines only"))
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Share"))
+        shot("13b-logcat-export")
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("undo \"Autopilot\" done in ") })
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("logcat saved in ") && it.endsWith("own lines only") })
+        // Share hands the file to other apps through the FileProvider, which serves exactly this folder.
+        compose.onNodeWithText("Share").performClick()
+        val chooser = shadowOf(ApplicationProvider.getApplicationContext<Application>()).nextStartedActivity
+        assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+        val send = IntentCompat.getParcelableExtra(chooser, Intent.EXTRA_INTENT, Intent::class.java)!!
+        val uri = IntentCompat.getParcelableExtra(send, Intent.EXTRA_STREAM, Uri::class.java)!!
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertEquals("${context.packageName}.files", uri.authority)
+        context.contentResolver.openInputStream(uri)!!.use { assertEquals(log, it.readBytes().decodeToString()) }
+
+        // The storage report maps the last scan's folders and says how each is treated; it is saved beside the logcat.
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Storage report"))
+        compose.onNodeWithText("Save").performClick()
+        awaitState("storage report", vm) { vm.storageReport.state.value.let { !it.running && (it.saved != null || it.error != null) } }
+        val storageReport = vm.storageReport.state.value.saved ?: error("storage report failed: ${vm.storageReport.state.value.error}")
+        assertEquals(File(root, SafetyPolicy.LOGCAT_DIR).path, storageReport.parent)
+        assertTrue(storageReport.name.matches(Regex("""storage-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.txt""")))
+        val reportText = storageReport.readText()
+        assertTrue(reportText, reportText.lines().first().endsWith(" storage report"))
+        assertTrue(reportText, reportText.lines().any { it.startsWith("Documents/  ") })
+        assertTrue(reportText, reportText.contains("WHAT THE LAST SCAN SUGGESTS"))
+
+        // Apps tab: app sizes are read as soon as it opens.
         compose.onNodeWithText("Apps").performClick()
+        // The tab reads app sizes when it resumes; Robolectric leaves the navigation entry short of RESUMED, so start
+        // the read the way that resume does.
+        vm.apps.loadStats()
+        awaitState("app sizes", vm) { vm.apps.state.value.everLoaded }
         shot("14-apps")
+        assertEquals(setOf("com.example.game", "org.thoughtcrime.securesms", "com.example.notes"), vm.apps.state.value.apps.map { it.packageName }.toSet())
+        assertEquals(setOf("com.example.game", "org.thoughtcrime.securesms"), vm.apps.state.value.cacheSelected) // caches of 25 MiB and more
+
+        // App storage: sizes with last use, sorted by the app unused longest.
+        compose.onNodeWithText("Review").performClick()
+        compose.onNodeWithText("App data 2.5 GiB · cache 40.0 MiB · app 300 MiB · used 6 months ago").assertExists()
+        compose.onNodeWithText("Unused longest").performClick()
+        shot("14a-app-storage")
+        // Clear all data: nothing is picked for you, messengers are never offered, and without Shizuku it points to
+        // Android's own Clear storage button.
+        compose.onNodeWithText("Clear all data").performClick()
+        compose.onNodeWithText("Messages").assertExists()
+        compose.onNodeWithText("Without Shizuku, open an app's App info > Storage and tap Clear storage there.", substring = true).assertExists()
+        assertTrue(vm.apps.state.value.dataSelected.isEmpty())
+        compose.onNodeWithText("Clear data").assertIsNotEnabled()
+        shot("14b-app-storage-clear-data")
+        compose.onNodeWithContentDescription("Back").performClick()
+
+        // Without Shizuku the app folders scan covers Android/media in-process.
         compose.onNodeWithText("Scan").performClick()
         awaitState("app folder scan", vm) { vm.apps.state.value.folders != null && !vm.apps.state.value.foldersScanning }
         val folders = vm.apps.state.value.folders!!
@@ -246,6 +396,37 @@ class AppFlowTest {
         assertTrue(File(root, "Android/media/com.whatsapp/WhatsApp/Media/.Thumbs/t1.jpg").exists()) // not selected by default
         assertTrue(File(root, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/IMG-1.jpg").exists())
         compose.onNodeWithText("Done").performClick()
+
+        // Browse app folders like a file manager (Android/media needs no Shizuku), pick a folder and remove it.
+        compose.onNodeWithText("Browse").performClick()
+        compose.onNodeWithText("Android/media").performClick()
+        shot("16a-app-folder-apps")
+        compose.onNodeWithText("com.whatsapp").performClick()
+        val media = File(root, "Android/media/com.whatsapp/WhatsApp/Media").path
+        awaitState("app folder listing", vm) { vm.apps.browser.value.listing?.path?.endsWith("/com.whatsapp") == true }
+        compose.onNodeWithText("WhatsApp").performClick()
+        awaitState("app folder listing", vm) { vm.apps.browser.value.listing?.path?.endsWith("/WhatsApp") == true }
+        compose.onNodeWithText("Media").performClick()
+        awaitState("app folder listing", vm) { vm.apps.browser.value.listing?.path == media }
+        assertEquals(listOf("WhatsApp Images", ".Thumbs"), vm.apps.browser.value.listing!!.entries.map { it.name }) // largest first
+        compose.onAllNodes(isToggleable())[0].performClick() // WhatsApp Images
+        shot("16b-app-folder-browser")
+        compose.onNodeWithText("Remove").performClick()
+        compose.onNodeWithText("Remove 1 item?").assertExists()
+        shot("16c-app-folder-remove")
+        compose.onNode(hasText("Remove") and hasAnyAncestor(isDialog())).performClick()
+        awaitState("removing a picked folder", vm) { vm.state.value.applying == null && vm.state.value.outcome is Outcome.Applied }
+        assertFalse(File(media, "WhatsApp Images").exists())
+        assertTrue(File(media, ".Thumbs/t1.jpg").exists())
+        assertTrue(File(root, ".StorageSteward/Quarantine").walk().any { it.name == "IMG-1.jpg" })
+        awaitState("the folder listed again", vm) { vm.apps.browser.value.listing?.entries?.map { it.name } == listOf(".Thumbs") }
+        // It went to the quarantine, so the result offers Undo, which puts it back.
+        compose.onNodeWithText("Undo").performClick()
+        awaitState("undoing the removal", vm) { vm.state.value.outcome is Outcome.RolledBack }
+        assertTrue(File(media, "WhatsApp Images/IMG-1.jpg").exists())
+        compose.onNodeWithText("Done").performClick()
+        repeat(4) { compose.onNodeWithContentDescription("Back").performClick() } // Media, WhatsApp, app, list of apps
+        compose.onNodeWithText("App folders").assertExists()
         compose.onNodeWithContentDescription("Back").performClick()
 
         // Termux is not installed here: the screen explains how to connect it.
@@ -253,6 +434,87 @@ class AppFlowTest {
         compose.onNodeWithText("Open").performClick()
         compose.onNodeWithText("Connect Termux").assertExists()
         shot("17-termux-setup")
+
+        // With a Termux scan: browse its folders, see what can't be picked, and remove a distribution only after
+        // "I understand".
+        val files = "/data/data/com.termux/files"
+        val debian = "$files/usr/var/lib/proot-distro/containers/debian/rootfs"
+        vm.termux.showReport(
+            TermuxReport(
+                home = "$files/home", prefix = "$files/usr", prootActive = false,
+                usage = listOf(TermuxUsage(files, 32L shl 30), TermuxUsage("$files/home", 9L shl 30), TermuxUsage("$files/usr", 23L shl 30)),
+                items = emptyList(),
+                rootfs = listOf(TermuxRootfs(debian, 4700L shl 20, false)),
+                largeFiles = emptyList(), warnings = emptyList(), unsafe = emptyList(),
+                entries = listOf(
+                    TermuxEntry("$files/home", 9L shl 30, true),
+                    TermuxEntry("$files/usr", 23L shl 30, true),
+                    TermuxEntry("$files/home/mx_jadx_bad", 515L shl 20, true),
+                    TermuxEntry("$files/home/mx_jadx_bad/out.zip", 400L shl 20, false),
+                    TermuxEntry("$files/home/.termux", 2L shl 20, true),
+                    TermuxEntry("$files/usr/lib", 7300L shl 20, true),
+                    TermuxEntry("$files/usr/opt", 4100L shl 20, true),
+                ),
+            ),
+        )
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Browse Termux"))
+        shot("18-termux-report")
+        compose.onNodeWithText("Browse").performClick()
+        compose.onNodeWithText("home").performClick() // open the folder
+        compose.onNodeWithText("Termux or your keys need it").assertExists() // .termux can't be picked
+        compose.onNodeWithText("mx_jadx_bad").performClick()
+        compose.onNodeWithText("out.zip").assertExists()
+        compose.onNodeWithContentDescription("Back").performClick() // up to home
+        compose.onAllNodes(isToggleable())[0].performClick() // mx_jadx_bad
+        assertEquals(setOf("$files/home/mx_jadx_bad"), vm.termux.state.value.browseSelected)
+        shot("19-termux-browser")
+        compose.onNodeWithText("Delete").performClick()
+        compose.onNodeWithText("Delete 1 item in Termux?").assertExists()
+        compose.onNode(hasText("Delete") and hasAnyAncestor(isDialog())).assertIsNotEnabled()
+        compose.onNodeWithText("Cancel").performClick()
+        repeat(2) { compose.onNodeWithContentDescription("Back").performClick() } // home, then the browser
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Remove"))
+        compose.onNodeWithText("Remove").performClick()
+        compose.onNodeWithText("Remove the debian distribution?").assertExists()
+        shot("20-termux-remove-distro")
+        compose.onNodeWithText("Cancel").performClick()
+
+        // Repositories: when each was last used, whether everything is pushed, and one in shared storage to move.
+        val day = 86_400_000L
+        val now = System.currentTimeMillis()
+        val shared = com.galaxy.steward.data.StorageAccess.rootPath
+        vm.termux.showRepos(
+            listOf(
+                TermuxRepo("$files/home/code/app", 40L shl 20, 30L shl 20, 12L shl 20, 0, now - 90 * day, now - 60 * day, now - 60 * day, false, false, 0, "main", "https://github.com/me/app.git"),
+                TermuxRepo("$shared/Download/Projects/lib", -1, 8L shl 20, 0, 0, now - 400 * day, 0, now - 400 * day, false, null, null, "main", ""),
+            ),
+        )
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:Git repositories"))
+        compose.onNodeWithTag("open:Git repositories").performClick()
+        compose.onNodeWithText("everything pushed to github.com/me/app", substring = true).assertExists()
+        compose.onNodeWithText("git gc would pack 12.0 MiB", substring = true).assertExists()
+        compose.onNodeWithText("no remote: this is the only copy", substring = true).assertExists()
+        compose.onNodeWithText("lib (main)").performClick()
+        compose.onNodeWithText("Move into Termux").assertIsEnabled()
+        compose.onNodeWithText("Delete").assertIsNotEnabled()
+        shot("21-termux-repos")
+        compose.onNodeWithText("Move into Termux").performClick()
+        compose.onNodeWithText("Move 1 folder into Termux?").assertExists()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.onNodeWithContentDescription("Back").performClick()
+
+        // Programs npm, pip and cargo installed, with when they were last run.
+        vm.termux.showPackages(
+            listOf(TermuxPackage("chromium", 800L shl 20, true, false, "120", emptySet(), "Web browser", now - 200 * day, 0, 0, listOf("chromium-browser"))),
+            listOf(TermuxProgram("npm", "@mmmbuto/codex-cli-termux", "0.39.0", 197L shl 20, now - 30 * day, now - 2 * day, 14, false, listOf("codex"), "$files/usr/lib/node_modules/@mmmbuto/codex-cli-termux")),
+        )
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:Packages and programs"))
+        compose.onNodeWithTag("open:Packages and programs").performClick()
+        compose.onNodeWithText("never run from your shell history", substring = true).assertExists()
+        compose.onNodeWithText("npm, pip, cargo").performClick()
+        compose.onNodeWithText("runs as codex", substring = true).assertExists()
+        compose.onNodeWithText("last run 2 days ago (14 times)", substring = true).assertExists()
+        shot("22-termux-programs")
         scenario.close()
     }
 }

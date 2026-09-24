@@ -40,6 +40,16 @@ class SettingsStore(context: Context) {
         _app.value = next
     }
 
+    /** When the last full scan finished (yours or the weekly audit's), so the audit can skip a survey that's still fresh. */
+    var lastScanAt: Long
+        get() = prefs.getLong("lastScanAt", 0L)
+        set(value) = prefs.edit { putLong("lastScanAt", value) }
+
+    /** Android 13+: the notification permission is asked for once, with the first scan. */
+    var askedForNotifications: Boolean
+        get() = prefs.getBoolean("askedForNotifications", false)
+        set(value) = prefs.edit { putBoolean("askedForNotifications", value) }
+
     private fun readApp() = AppPreferences(
         weeklyAudit = prefs.getBoolean("weeklyAudit", false),
         dynamicColor = prefs.getBoolean("dynamicColor", true),
@@ -53,7 +63,8 @@ class SettingsStore(context: Context) {
             quarantineDuplicates = prefs.getBoolean("quarantineDuplicates", d.quarantineDuplicates),
             quarantineRetentionDays = prefs.getInt("quarantineRetentionDays", d.quarantineRetentionDays),
             staleTempDays = prefs.getInt("staleTempDays", d.staleTempDays),
-            oldLogDays = prefs.getInt("oldLogDays", d.oldLogDays),
+            // A new key: the old one was saved with every settings change, so 14 days stuck even for people who never chose it.
+            oldLogDays = prefs.getInt("systemLogDays", d.oldLogDays),
             flatDirThreshold = prefs.getInt("flatDirThreshold", d.flatDirThreshold),
             mediaYearBuckets = prefs.getBoolean("mediaYearBuckets", d.mediaYearBuckets),
             recentFileGuardMinutes = prefs.getInt("recentFileGuardMinutes", d.recentFileGuardMinutes),
@@ -61,6 +72,9 @@ class SettingsStore(context: Context) {
             protectedFolders = prefs.getString("protectedFolders", "").orEmpty().lines().filter { it.isNotBlank() },
             customRules = prefs.getString("customRules", "").orEmpty().lines().mapNotNull(KeywordRule::decode),
             hashWorkers = prefs.getInt("hashWorkers", d.hashWorkers),
+            learnFromFolders = prefs.getBoolean("learnFromFolders", d.learnFromFolders),
+            learnFromChoices = prefs.getBoolean("learnFromChoices", d.learnFromChoices),
+            weeklyUpkeep = prefs.getBoolean("weeklyUpkeep", d.weeklyUpkeep),
         )
     }
 
@@ -71,7 +85,7 @@ class SettingsStore(context: Context) {
             putBoolean("quarantineDuplicates", s.quarantineDuplicates)
             putInt("quarantineRetentionDays", s.quarantineRetentionDays)
             putInt("staleTempDays", s.staleTempDays)
-            putInt("oldLogDays", s.oldLogDays)
+            putInt("systemLogDays", s.oldLogDays)
             putInt("flatDirThreshold", s.flatDirThreshold)
             putBoolean("mediaYearBuckets", s.mediaYearBuckets)
             putInt("recentFileGuardMinutes", s.recentFileGuardMinutes)
@@ -79,6 +93,9 @@ class SettingsStore(context: Context) {
             putString("protectedFolders", s.protectedFolders.joinToString("\n"))
             putString("customRules", s.customRules.joinToString("\n") { it.encode() })
             putInt("hashWorkers", s.hashWorkers)
+            putBoolean("learnFromFolders", s.learnFromFolders)
+            putBoolean("learnFromChoices", s.learnFromChoices)
+            putBoolean("weeklyUpkeep", s.weeklyUpkeep)
         }
     }
 

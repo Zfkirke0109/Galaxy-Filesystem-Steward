@@ -27,6 +27,16 @@ object AppDataHelper {
             out(AppDataWire.END)
         }
 
+        fun list(request: String, out: (String) -> Unit) {
+            try {
+                val r = AppDataWire.decodeListRequest(request)
+                AppDataWire.encodeListing(AppDataBrowser(r.rootPath, r.ownPackage).list(r.path)).forEach(out)
+            } catch (e: Exception) {
+                out(AppDataWire.error(e.message ?: e.javaClass.simpleName))
+            }
+            out(AppDataWire.END)
+        }
+
         suspend fun apply(request: String, out: (String) -> Unit) {
             try {
                 val r = AppDataWire.decodeApplyRequest(request)
@@ -76,6 +86,20 @@ object AppDataHelper {
             error?.let { throw HelperException(it) }
             if (!ended) throw HelperException("The helper stopped before finishing the scan")
             return report
+        }
+
+        fun readList(lines: Sequence<String>): AppFolderListing {
+            var error: String? = null
+            var ended = false
+            val listing = AppDataWire.decodeListing(lines) { p ->
+                when (p[0]) {
+                    "E" -> error = p.getOrElse(1) { "Helper error" }
+                    AppDataWire.END -> ended = true
+                }
+            }
+            error?.let { throw HelperException(it) }
+            if (!ended || listing == null) throw HelperException("The helper stopped before finishing the listing")
+            return listing
         }
 
         /** Replays journal lines into [journal] as they arrive, so an interrupted run is still recorded truthfully. */
