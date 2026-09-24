@@ -35,6 +35,10 @@ enum class TermuxGroup(val title: String, val description: String) {
     PROOT("Linux distributions", "Package caches and old temp files inside proot distributions that are not running."),
     BUILD("Build outputs", "Folders Git ignores in your projects (build, node_modules, target, .venv...). Rebuilt on the next build or install."),
     OTHER("Other caches", "Everything else in ~/.cache. Often model or download caches that are slow to fetch again - review first."),
+    LEFTOVERS(
+        "Leftovers",
+        "Decompiled apps, APKs, NDKs the phone can't run, and files proot no longer uses. Not caches: review each one.",
+    ),
 }
 
 data class TermuxTargetInfo(val id: String, val title: String, val group: TermuxGroup, val defaultSelected: Boolean, val note: String = "")
@@ -77,6 +81,20 @@ object TermuxCatalog {
             "koa-archives", "Termux steward archives", TermuxGroup.OTHER, false,
             "Backups the Koa Termux steward script made (~/.storage-autopilot-archives); only needed to undo its old runs",
         ),
+        TermuxTargetInfo(
+            "home-node-modules", "npm packages in your home", TermuxGroup.DEV, false,
+            "~/node_modules: npm install run in the home folder itself; it puts them back",
+        ),
+        TermuxTargetInfo("decompiled", "Decompiled app", TermuxGroup.LEFTOVERS, false, "apktool or jadx output: decompile the APK again to get it back"),
+        TermuxTargetInfo("home-apk", "APK file", TermuxGroup.LEFTOVERS, false, "An installer in your home"),
+        TermuxTargetInfo(
+            "foreign-ndk", "Android NDK for x86-64 PCs", TermuxGroup.LEFTOVERS, false,
+            "Its compilers can't run on the phone's ARM CPU without an emulator such as box64",
+        ),
+        TermuxTargetInfo(
+            "l2s-orphan", "Orphaned hard-link copy", TermuxGroup.LEFTOVERS, false,
+            "A file proot kept for hard links that nothing in the distribution points at any more",
+        ),
         TermuxTargetInfo("proot-cache", "Distro package cache", TermuxGroup.PROOT, true),
         TermuxTargetInfo("proot-tmp", "Distro temp files", TermuxGroup.PROOT, true, "Only files older than 7 days"),
         TermuxTargetInfo("build", "Build output", TermuxGroup.BUILD, false),
@@ -84,7 +102,7 @@ object TermuxCatalog {
     ).associateBy { it.id }
 
     /** Targets whose records carry a path the script must re-validate (`id=path`). */
-    val PATH_TARGETS = setOf("other-cache", "proot-cache", "proot-tmp", "build")
+    val PATH_TARGETS = setOf("other-cache", "proot-cache", "proot-tmp", "build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan")
 }
 
 data class TermuxItem(
@@ -106,9 +124,70 @@ data class TermuxRootfs(val path: String, val bytes: Long, val active: Boolean)
 
 data class TermuxLargeFile(val path: String, val size: Long, val mtime: Long)
 
-/** A file or folder of 1 MiB or more in Termux, from the audit's size map. */
-data class TermuxEntry(val path: String, val bytes: Long, val isDirectory: Boolean) {
+/** A file or folder of 1 MiB or more in Termux, from the audit's size map. [mtime]: newest change inside (ms), 0 if unknown. */
+data class TermuxEntry(val path: String, val bytes: Long, val isDirectory: Boolean, val mtime: Long = 0) {
     val name: String get() = path.substringAfterLast('/')
+}
+
+/** Files of one size and SHA-256 in several places in Termux. */
+data class TermuxDuplicateSet(val size: Long, val sha256: String, val paths: List<String>) {
+    val extraBytes: Long get() = size * (paths.size - 1)
+}
+
+/** A bottom-k sketch of a big Termux folder ([com.galaxy.steward.core.dedupe.FolderSketch]). */
+data class TermuxSketch(val path: String, val files: Int, val bytes: Long, val hashes: LongArray)
+
+/**
+ * A program another package manager installed: global npm packages, pip packages outside dpkg's, cargo installs.
+ * Times are milliseconds, 0 when unknown; [lastUsed] and [uses] come from shell history.
+ */
+data class TermuxProgram(
+    val manager: String,
+    val name: String,
+    val version: String,
+    val bytes: Long,
+    val installed: Long,
+    val lastUsed: Long,
+    val uses: Int,
+    val protected: Boolean,
+    val commands: List<String>,
+    val path: String,
+) {
+    val key: String get() = "$manager:$name"
+}
+
+/**
+ * A Git repository in Termux, a distribution or shared storage. [bytes] is -1 when not measured (shared storage: the
+ * scan knows); [dirty] and [unpushed] are null when not known.
+ */
+data class TermuxRepo(
+    val path: String,
+    val bytes: Long,
+    val gitBytes: Long,
+    val looseBytes: Long,
+    val garbageBytes: Long,
+    val lastCommit: Long,
+    val lastFetch: Long,
+    val lastActive: Long,
+    val shallow: Boolean,
+    val dirty: Boolean?,
+    val unpushed: Int?,
+    val branch: String,
+    val remote: String,
+) {
+    val name: String get() = path.substringAfterLast('/')
+
+    /** When anything happened in it, as far as Git knows: a commit, a fetch, a checkout. */
+    val lastTouched: Long get() = maxOf(lastCommit, lastFetch, lastActive)
+
+    /** git gc has loose objects or garbage worth packing (at least 4 MiB). */
+    val packable: Boolean get() = looseBytes + garbageBytes >= 4L * 1024 * 1024
+
+    /** Everything is committed and pushed to a remote: cloning it again gives it back. */
+    val onlyACopy: Boolean get() = remote.isNotEmpty() && dirty == false && unpushed == 0
+
+    /** "github.com/owner/repo" from https or ssh remotes, for showing. */
+    val remoteLabel: String get() = remote.removeSuffix(".git").replace(Regex("^[a-z+]+://"), "").replace(Regex("^[^@/]+@([^:/]+):"), "$1/")
 }
 
 /** An installed Termux package, as dpkg describes it. [manual] is false for packages pulled in as dependencies. */
@@ -121,6 +200,14 @@ data class TermuxPackage(
     val version: String,
     val depends: Set<String>,
     val summary: String,
+    /** When it was installed or last updated (ms), 0 when unknown. */
+    val installed: Long = 0,
+    /** When you last ran one of its commands, from shell history (ms); 0 when not known. */
+    val lastUsed: Long = 0,
+    /** How often its commands appear in shell history. */
+    val uses: Int = 0,
+    /** Commands it puts in $PREFIX/bin. */
+    val commands: List<String> = emptyList(),
 )
 
 /** One package apt would remove: [kind] is requested, dependent (it needs a requested one) or orphan (nothing needs it after). */
@@ -145,6 +232,10 @@ data class TermuxReport(
     val unsafe: List<String>,
     /** Every file and folder of 1 MiB or more, for browsing (only when the report came through shared storage). */
     val entries: List<TermuxEntry> = emptyList(),
+    /** Identical files of 8 MiB or more. */
+    val duplicates: List<TermuxDuplicateSet> = emptyList(),
+    /** Sketches of the biggest folders, for finding near-copies. */
+    val sketches: List<TermuxSketch> = emptyList(),
 ) {
     private val byParent: Map<String, List<TermuxEntry>> by lazy {
         entries.groupBy { it.path.substringBeforeLast('/') }.mapValues { (_, list) -> list.sortedByDescending { it.bytes } }
@@ -172,6 +263,10 @@ data class TermuxReport(
             rootfs = rootfs.filterNot { it.path in gone },
             largeFiles = largeFiles.filterNot { f -> gone.any { f.path == it || f.path.startsWith("$it/") } },
             items = items.filterNot { i -> gone.any { i.path == it || i.path.startsWith("$it/") } },
+            duplicates = duplicates.mapNotNull { d ->
+                d.copy(paths = d.paths.filterNot { p -> gone.any { p == it || p.startsWith("$it/") } }).takeIf { it.paths.size > 1 }
+            },
+            sketches = sketches.filterNot { k -> gone.any { k.path == it || k.path.startsWith("$it/") } },
         )
     }
 
@@ -186,7 +281,7 @@ data class TermuxReport(
 data class TermuxCleanResult(val targetId: String, val status: String, val before: Long, val after: Long, val path: String, val note: String) {
     /** REMOVED is an uninstalled package: its installed size, as dpkg reports it. */
     val freed: Long get() = if (status == "CLEARED" || status == "PARTIAL" || status == "REMOVED") (before - after).coerceAtLeast(0) else 0
-    val ok: Boolean get() = status == "CLEARED" || status == "NO_CHANGE" || status == "REMOVED"
+    val ok: Boolean get() = status == "CLEARED" || status == "NO_CHANGE" || status == "REMOVED" || status == "MOVED"
 }
 
 data class TermuxCleanSummary(val results: List<TermuxCleanResult>) {
@@ -267,6 +362,8 @@ object TermuxProtocol {
         val warnings = ArrayList<String>()
         val unsafe = ArrayList<String>()
         val entries = ArrayList<TermuxEntry>()
+        val copies = LinkedHashMap<Pair<Long, String>, MutableList<String>>()
+        val sketches = ArrayList<TermuxSketch>()
         for (p in parsed.records) {
             when (p[0]) {
                 "V" -> if (p.size >= 5) {
@@ -302,9 +399,20 @@ object TermuxProtocol {
                 "L" -> if (p.size >= 4) large += TermuxLargeFile(p[3], p[1].toLongOrNull() ?: 0, (p[2].toLongOrNull() ?: 0) * 1000)
                 "W" -> warnings += p.getOrElse(1) { "" }
                 "X" -> if (p.size >= 3) unsafe += p[2]
-                "S" -> if (p.size >= 4) entries += TermuxEntry(p[3], p[1].toLongOrNull() ?: 0, p[2] == "d")
+                "S" -> if (p.size >= 4) entries += TermuxEntry(p[3], p[1].toLongOrNull() ?: 0, p[2] == "d", (p.getOrNull(4)?.toLongOrNull() ?: 0) * 1000)
+                "Q" -> if (p.size >= 4) {
+                    val size = p[1].toLongOrNull() ?: continue
+                    copies.getOrPut(size to p[2]) { ArrayList() } += p[3]
+                }
+                "H" -> if (p.size >= 5) {
+                    val hashes = p[3].split(',').mapNotNull { it.toLongOrNull() }.toLongArray()
+                    if (hashes.isNotEmpty()) sketches += TermuxSketch(p[4], p[1].toIntOrNull() ?: 0, p[2].toLongOrNull() ?: 0, hashes)
+                }
             }
         }
+        val duplicates = copies.filterValues { it.size > 1 }
+            .map { (key, paths) -> TermuxDuplicateSet(key.first, key.second, paths.sorted()) }
+            .sortedByDescending { it.extraBytes }
         // "debian: var/cache/apt/archives" reads better than the full proot-distro path.
         val named = items.map { item ->
             if (item.group != TermuxGroup.PROOT) return@map item
@@ -312,7 +420,9 @@ object TermuxProtocol {
             val info = TermuxCatalog.targets.getValue(item.targetId)
             item.copy(title = "${info.title}: ${r.path.substringAfterLast('/')}/${item.path.removePrefix(r.path + "/")}")
         }
-        return TermuxReport(home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries)
+        return TermuxReport(
+            home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries, duplicates, sketches,
+        )
     }
 
     fun parsePackages(output: String): List<TermuxPackage> {
@@ -327,8 +437,56 @@ object TermuxProtocol {
                 version = p[5],
                 depends = dependencyNames(p[6]),
                 summary = p[7],
+                installed = seconds(p.getOrNull(8)),
+                lastUsed = seconds(p.getOrNull(9)),
+                uses = p.getOrNull(10)?.toIntOrNull() ?: 0,
+                commands = p.getOrNull(11).orEmpty().split(',').filter { it.isNotEmpty() },
             )
         }.sortedByDescending { it.bytes }
+    }
+
+    private fun seconds(field: String?): Long = (field?.toLongOrNull() ?: 0L).coerceAtLeast(0) * 1000
+
+    /** The M records of a packages run: programs npm, pip and cargo installed. */
+    fun parsePrograms(output: String): List<TermuxProgram> {
+        val parsed = parse(output)
+        check(parsed)
+        return parsed.records.filter { it[0] == "M" && it.size >= 11 }.map { p ->
+            TermuxProgram(
+                manager = p[1],
+                name = p[2],
+                version = p[3],
+                bytes = p[4].toLongOrNull() ?: 0,
+                installed = seconds(p[5]),
+                lastUsed = seconds(p[6]),
+                uses = p[7].toIntOrNull() ?: 0,
+                protected = p[8] == "1",
+                commands = p[9].split(',').filter { it.isNotEmpty() },
+                path = p[10],
+            )
+        }.sortedByDescending { it.bytes }
+    }
+
+    fun parseRepos(output: String): List<TermuxRepo> {
+        val parsed = parse(output)
+        check(parsed)
+        return parsed.records.filter { it[0] == "G" && it.size >= 14 }.map { p ->
+            TermuxRepo(
+                path = p[1],
+                bytes = p[2].toLongOrNull() ?: -1,
+                gitBytes = p[3].toLongOrNull() ?: 0,
+                looseBytes = p[4].toLongOrNull() ?: 0,
+                garbageBytes = p[5].toLongOrNull() ?: 0,
+                lastCommit = seconds(p[6]),
+                lastFetch = seconds(p[7]),
+                lastActive = seconds(p[8]),
+                shallow = p[9] == "1",
+                dirty = when (p[10]) { "1" -> true; "0" -> false; else -> null },
+                unpushed = p[11].toIntOrNull()?.takeIf { it >= 0 },
+                branch = p[12],
+                remote = p[13],
+            )
+        }.sortedByDescending { maxOf(it.bytes, it.gitBytes) }
     }
 
     /** "libc++, openssl (>= 3), zlib | libz" -> libc++, openssl, zlib, libz. */

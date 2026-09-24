@@ -2,6 +2,7 @@ package com.galaxy.steward.core
 
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.RollbackSummary
+import com.galaxy.steward.core.plan.JunkCategory
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.termux.TermuxReport
 import java.util.Locale
@@ -25,6 +26,9 @@ object RunLog {
         append(" (").append(report.folderDuplicates.sumOf { it.reclaimBytes }.humanBytes()).append(')')
         append(", merges ").append(count(report.folderMerges.size))
         append(", clutter ").append(count(report.junk.size)).append(" (").append(report.junkBytes.humanBytes()).append(')')
+        report.junk.filter { it.category == JunkCategory.NEAR_COPIES }.takeIf { it.isNotEmpty() }?.let { near ->
+            append(", near-copies ").append(count(near.size)).append(" (").append(near.sumOf { it.bytes }.humanBytes()).append(')')
+        }
         append(", to organize ").append(count(report.organize.size))
         append(", to optimize ").append(count(report.optimize.size))
         if (phases.isNotEmpty()) {

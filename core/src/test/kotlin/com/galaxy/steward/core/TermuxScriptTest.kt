@@ -159,7 +159,8 @@ class TermuxScriptTest {
 
     @Test
     fun cleanRemovesOnlyValidatedTargets() {
-        val specs = audit().items.map { it.spec } + listOf(
+        // ~/node_modules is offered for review since 1.2.8; here it stands for the folder once mistaken for a distro.
+        val specs = audit().items.map { it.spec }.filterNot { it == "home-node-modules" } + listOf(
             "uv-cache", // symlinked to a folder outside Termux
             "other-cache=${outside.path}", // forged path outside ~/.cache
             "build=${home.path}/proj/src", // tracked sources

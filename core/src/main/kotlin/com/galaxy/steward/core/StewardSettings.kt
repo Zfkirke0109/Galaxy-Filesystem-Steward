@@ -31,6 +31,8 @@ data class StewardSettings(
     val customRules: List<KeywordRule> = emptyList(),
     /** Parallel hashing workers; 0 picks automatically from the CPU count. */
     val hashWorkers: Int = 0,
+    /** Folders smaller than this aren't compared for near-copies. */
+    val nearCopyMinBytes: Long = 8 * MIB,
 ) {
     fun effectiveHashWorkers(): Int =
         if (hashWorkers > 0) hashWorkers else (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)

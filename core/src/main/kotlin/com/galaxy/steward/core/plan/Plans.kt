@@ -202,6 +202,12 @@ enum class JunkCategory(val title: String, val description: String, val defaultS
             "checked against its copy in the archive right before the archive moves to the quarantine. The folder stays.",
         true,
     ),
+    NEAR_COPIES(
+        "Older near-copies of folders",
+        "Folders whose files mostly match a newer folder by name and size: a second download, an older export, a copy " +
+            "made before an edit. The newer one stays. The match is by names and sizes only, so review what differs.",
+        false,
+    ),
     OLD_RUNS(
         "Old run folders",
         "Folders named by date and time that a tool writes on every run. The newest run, and any from the last two weeks, " +
@@ -306,6 +312,8 @@ data class ScanReport(
     val organize: List<OrganizeMove>,
     val optimize: List<OptimizeItem>,
     val insights: List<Insight>,
+    /** Sketches of the bigger folders, to compare with Termux's ([com.galaxy.steward.core.dedupe.FolderSketch]). */
+    val sketches: List<com.galaxy.steward.core.dedupe.DirSketch> = emptyList(),
 ) {
     val duplicateBytes: Long get() = duplicates.sumOf { it.reclaimBytes } + folderDuplicates.sumOf { it.reclaimBytes }
     val junkBytes: Long get() = junk.sumOf { it.reclaimBytes }

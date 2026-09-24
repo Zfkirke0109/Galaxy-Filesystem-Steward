@@ -1,22 +1,30 @@
 package com.galaxy.steward.core
 
+import com.galaxy.steward.core.dedupe.DirSketch
 import com.galaxy.steward.core.dedupe.DuplicateFinder
 import com.galaxy.steward.core.dedupe.FolderAnalyzer
+import com.galaxy.steward.core.dedupe.FolderSketch
+import com.galaxy.steward.core.dedupe.NearCopy
 import com.galaxy.steward.core.dedupe.HashListener
 import com.galaxy.steward.core.dedupe.HashStage
 import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.hash.HashCache
 import com.galaxy.steward.core.junk.JunkPlanner
 import com.galaxy.steward.core.model.FileKind
+import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.optimize.OptimizePlanner
 import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.organize.OrganizePlanner
+import com.galaxy.steward.core.plan.Insight
+import com.galaxy.steward.core.plan.JunkCategory
+import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.KindStat
 import com.galaxy.steward.core.plan.LargeFile
 import com.galaxy.steward.core.plan.PlanHygiene
 import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.plan.Severity
 import com.galaxy.steward.core.plan.StorageSummary
 import com.galaxy.steward.core.scan.TreeScanner
 import java.io.File
@@ -99,6 +107,12 @@ class Steward(
         }
 
         onProgress(ScanProgress(ScanPhase.PLANNING, filesSeen = filesSeen, bytesSeen = bytesSeen))
+        val sketches = FolderSketch.sketches(tree.root, minBytes = settings.nearCopyMinBytes)
+        val exactPaths = folders.exact.flatMap { g -> g.copies.map { it.path } } + folders.merges.flatMap { listOf(it.source, it.target) }
+        val nearCopies = FolderSketch.nearCopies(sketches).filterNot { pair ->
+            exactPaths.any { p -> pair.a == p || pair.b == p || pair.a.startsWith("$p/") || pair.b.startsWith("$p/") }
+        }
+        val (nearJunk, nearInsights) = nearCopyItems(tree, sketches, nearCopies, junk)
         val organize = OrganizePlanner(settings, environment).plan(tree)
         val optimize = OptimizePlanner(settings, environment).plan(tree, space)
         val hygiene = PlanHygiene(PathGuard(rootPath, settings.protectedFolders))
@@ -107,7 +121,7 @@ class Steward(
         val claimed = HashSet<String>()
         fileGroups.forEach { g -> g.removals.forEach { claimed += it.path } }
         folders.exact.forEach { g -> g.removals.forEach { claimed += it.path } }
-        junk.forEach { claimed += it.path }
+        (junk + nearJunk).forEach { claimed += it.path }
         val moves = hygiene.organize(organize.moves).filterNot { move ->
             var path = move.source
             var hit = false
@@ -126,13 +140,58 @@ class Steward(
             duplicates = fileGroups,
             folderDuplicates = folders.exact,
             folderMerges = folders.merges,
-            junk = hygiene.junk(junk),
+            junk = hygiene.junk(junk + nearJunk),
             organize = moves,
             optimize = hygiene.optimize(optimize.items),
-            insights = optimize.insights + organize.insights.take(50),
+            insights = optimize.insights + nearInsights + organize.insights.take(50),
+            sketches = sketches,
         )
         onProgress(ScanProgress(ScanPhase.DONE, 1, 1, "", filesSeen, bytesSeen))
         return report
+    }
+
+    /**
+     * The older folder of each near-copy pair, for review, when it may go as a unit; projects, source trees and anything
+     * holding keys are only named.
+     */
+    private fun nearCopyItems(
+        tree: StorageTree,
+        sketches: List<DirSketch>,
+        pairs: List<NearCopy>,
+        junk: List<JunkItem>,
+    ): Pair<List<JunkItem>, List<Insight>> {
+        val byPath = sketches.associateBy { it.path }
+        val claimed = junk.map { it.path }
+        val items = ArrayList<JunkItem>()
+        val insights = ArrayList<Insight>()
+        for (pair in pairs) {
+            val (older, newer) = listOf(pair.a, pair.b).sortedBy { byPath[it]?.newest ?: 0L }
+            if (claimed.any { older == it || older.startsWith("$it/") || it.startsWith("$older/") }) continue
+            val node = tree.find(older.removePrefix(tree.rootPath + "/")) ?: continue
+            val rel = { p: String -> p.removePrefix(tree.rootPath + "/") }
+            val movable = node.zone.removable && !node.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)
+            if (movable) {
+                items += JunkItem(
+                    id = "junk:NEAR_COPIES:${older.hashCode().toString(16)}:${older.length}",
+                    category = JunkCategory.NEAR_COPIES,
+                    path = older,
+                    isDirectory = true,
+                    bytes = node.totalBytes,
+                    mtime = byPath[older]?.newest ?: node.mtime,
+                    note = "${pair.percent}% the same files as ${rel(newer)}, which is newer and stays",
+                )
+            } else {
+                insights += Insight(
+                    Severity.ADVICE,
+                    "Near-copies: ${older.substringAfterLast('/')} and ${newer.substringAfterLast('/')}",
+                    "${rel(older)} and ${rel(newer)} share about ${pair.percent}% of their files by name and size; " +
+                        "${rel(newer)} is the newer. The steward doesn't remove projects, source trees or folders with keys; " +
+                        "if one is an old copy, delete it yourself.",
+                    older,
+                )
+            }
+        }
+        return items to insights
     }
 
     companion object {
