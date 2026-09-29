@@ -76,6 +76,11 @@ object RunLog {
             append(" (").append(groups.entries.joinToString(", ") { (g, items) -> "${g.name.lowercase()} ${items.sumOf { it.bytes }.humanBytes()}" }).append(')')
         }
         append(", ").append(count(report.unsafe.size)).append(" unsafe paths skipped")
+        // The parts that took longest, so a slow audit says where its time went.
+        if (report.timings.isNotEmpty()) {
+            append("; parts ").append(report.timings.entries.sortedByDescending { it.value }.joinToString(", ") { (k, v) -> "$k ${seconds(v)}" })
+        }
+        if (report.warnings.isNotEmpty()) append("; warnings: ").append(report.warnings.take(3).joinToString(" | "))
     }
 
     fun rolledBack(title: String, s: RollbackSummary, millis: Long): String =

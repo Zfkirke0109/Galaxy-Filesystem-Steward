@@ -605,11 +605,14 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         val summary = termux.packRepos(paths)
         val report = termux.state.value.report
         val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        // git gc that finds nothing to pack says so: 1.2.9 reported "0 repositories packed" and nothing else.
+        val already = summary.results.count { it.status == "NO_CHANGE" }
         Outcome.Report(
-            "Repositories packed",
-            listOf(
+            if (summary.cleared == 0 && already > 0) "Already packed" else "Repositories packed",
+            listOfNotNull(
                 "Freed ${summary.freed.humanBytes()}",
-                "${summary.cleared.plural("repository", "repositories")} packed; they work exactly as before",
+                summary.cleared.takeIf { it > 0 }?.let { "${it.plural("repository", "repositories")} packed; they work exactly as before" },
+                already.takeIf { it > 0 }?.let { "${it.plural("repository was", "repositories were")} already as small as git gc makes them" },
             ) + (if (skipped.isNotEmpty()) listOf("${skipped.size.plural("repository", "repositories")} left as they were") else emptyList()),
             skipped,
         )

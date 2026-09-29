@@ -152,7 +152,7 @@ class TermuxController(
                 )
             }
         }
-        _state.update { it.copy(report = it.report?.without(done), selected = it.selected - done) }
+        _state.update { it.copy(report = it.report?.without(done)?.afterCleaning(summary.results), selected = it.selected - done) }
         return runId to summary
     }
 
@@ -241,7 +241,12 @@ class TermuxController(
         journal("Termux packages removed", summary)
         val removed = summary.results.filter { it.status == "REMOVED" }.map { it.targetId }.toSet()
         _state.update { s ->
-            s.copy(plan = null, packages = s.packages?.filterNot { it.name in removed }, packageSelected = s.packageSelected - removed)
+            s.copy(
+                plan = null,
+                packages = s.packages?.filterNot { it.name in removed },
+                packageSelected = s.packageSelected - removed,
+                report = s.report?.afterCleaning(summary.results),
+            )
         }
         return summary
     }
@@ -261,7 +266,13 @@ class TermuxController(
         val summary = TermuxCleanSummary(results)
         journal("Termux programs removed", summary)
         val removed = results.filter { it.status == "REMOVED" }.map { it.targetId }.toSet()
-        _state.update { s -> s.copy(programs = s.programs?.filterNot { it.key in removed }, programSelected = s.programSelected - removed) }
+        _state.update { s ->
+            s.copy(
+                programs = s.programs?.filterNot { it.key in removed },
+                programSelected = s.programSelected - removed,
+                report = s.report?.afterCleaning(results),
+            )
+        }
         return summary
     }
 

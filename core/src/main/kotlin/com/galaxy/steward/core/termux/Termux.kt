@@ -262,6 +262,8 @@ data class TermuxReport(
     val owners: Map<String, Pair<Int, String>> = emptyMap(),
     /** Big programs for another processor, largest first. */
     val foreign: List<TermuxForeignFile> = emptyList(),
+    /** How long each part of the audit took (milliseconds), for the run log. */
+    val timings: Map<String, Long> = emptyMap(),
 ) {
     private val byParent: Map<String, List<TermuxEntry>> by lazy {
         entries.groupBy { it.path.substringBeforeLast('/') }.mapValues { (_, list) -> list.sortedByDescending { it.bytes } }
@@ -304,6 +306,29 @@ data class TermuxReport(
     }
 
     /**
+     * This report after a clean-up or an uninstall ([results]): every total above what was freed shrinks by it, the
+     * "where the space goes" lines too. What was removed as a whole (a build output, a decompiled app, an npm program)
+     * leaves the size map; a cleaned cache keeps its entry, smaller. A package has no path of its own: what it freed
+     * comes off the packages total. The 1.2.9 report still said 22.1 GiB after a clean-up had freed 2.6 GiB.
+     */
+    fun afterCleaning(results: List<TermuxCleanResult>): TermuxReport {
+        val freed = results.filter { it.freed > 0 }.map { r -> (r.path.ifEmpty { prefix }) to r }
+        if (freed.isEmpty()) return this
+        fun lessAt(path: String) = freed.sumOf { (p, r) -> if (p == path || p.startsWith("$path/")) r.freed else 0L }
+        // Programs come back as "npm:name" with their folder; packages without a path (their bytes are spread out).
+        val whole = freed.filter { (p, r) -> r.targetId in WHOLE_TARGETS || (':' in r.targetId && p != prefix) }.map { it.first }.toSet()
+        val gone = { path: String -> whole.any { path == it || path.startsWith("$it/") } }
+        return copy(
+            usage = usage.filterNot { gone(it.path) }.map { u -> lessAt(u.path).let { if (it > 0) u.copy(bytes = (u.bytes - it).coerceAtLeast(0)) else u } },
+            entries = entries.filterNot { gone(it.path) }.map { e -> lessAt(e.path).let { if (it > 0) e.copy(bytes = (e.bytes - it).coerceAtLeast(0)) else e } },
+            largeFiles = largeFiles.filterNot { gone(it.path) },
+            duplicates = duplicates.mapNotNull { d -> d.copy(paths = d.paths.filterNot(gone)).takeIf { it.paths.size > 1 } },
+            sketches = sketches.filterNot { gone(it.path) },
+            foreign = foreign.filterNot { gone(it.path) },
+        )
+    }
+
+    /**
      * Near-copies among Termux's biggest folders, and between them and shared storage's ([shared], from the last scan):
      * pairs whose files mostly match by name and size. At least one side of each pair is in Termux.
      */
@@ -319,6 +344,11 @@ data class TermuxReport(
     val totalBytes: Long get() = usage.firstOrNull()?.bytes ?: 0L
 
     fun without(specs: Set<String>): TermuxReport = copy(items = items.filterNot { it.spec in specs })
+
+    private companion object {
+        /** Clean-up targets that remove the folder or file itself, not what is in it. */
+        val WHOLE_TARGETS = setOf("build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "path")
+    }
 }
 
 data class TermuxCleanResult(val targetId: String, val status: String, val before: Long, val after: Long, val path: String, val note: String) {
@@ -392,6 +422,10 @@ object TermuxProtocol {
         parsed.records.firstOrNull { it[0] == "X" && it.getOrNull(1) == "refused" }?.let {
             throw TermuxException(it.getOrElse(2) { "Termux refused to run the steward" })
         }
+        // The helper stopped on an error of its own (Z carries what bash said): nothing it printed is complete.
+        parsed.records.firstOrNull { it[0] == "Z" }?.let {
+            throw TermuxException("The Termux helper stopped early: " + it.getOrElse(1) { "no reason given" })
+        }
         if (parsed.end == null) throw TermuxException("The Termux output was cut short; nothing was assumed")
     }
 
@@ -412,6 +446,7 @@ object TermuxProtocol {
         val sketches = ArrayList<TermuxSketch>()
         val owners = HashMap<String, Pair<Int, String>>()
         val foreign = ArrayList<TermuxForeignFile>()
+        val timings = LinkedHashMap<String, Long>()
         for (p in parsed.records) {
             when (p[0]) {
                 "V" -> if (p.size >= 5) {
@@ -454,6 +489,7 @@ object TermuxProtocol {
                 }
                 "O" -> if (p.size >= 4) owners[p[3]] = (p[1].toIntOrNull() ?: 1) to p[2]
                 "F" -> if (p.size >= 4) foreign += TermuxForeignFile(p[3], p[1], p[2].toLongOrNull() ?: 0)
+                "Y" -> if (p.size >= 3) p[2].toLongOrNull()?.let { timings[p[1]] = it }
                 "H" -> if (p.size >= 5) {
                     val hashes = p[3].split(',').mapNotNull { it.toLongOrNull() }.toLongArray()
                     if (hashes.isNotEmpty()) sketches += TermuxSketch(p[4], p[1].toIntOrNull() ?: 0, p[2].toLongOrNull() ?: 0, hashes)
@@ -472,7 +508,7 @@ object TermuxProtocol {
         }
         return TermuxReport(
             home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries, duplicates, sketches,
-            owners, foreign.sortedByDescending { it.bytes },
+            owners, foreign.sortedByDescending { it.bytes }, timings,
         )
     }
 

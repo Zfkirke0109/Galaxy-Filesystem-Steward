@@ -357,6 +357,33 @@ class TermuxInventoryTest {
     }
 
     @Test
+    fun aHelperThatStopsSaysWhyAndOnePartThatFailsCostsNothingElse() {
+        fakeDpkg()
+        // The whole run stops (as an empty array key or an arithmetic error ends bash): the app hears the reason.
+        val stopped = try {
+            TermuxProtocol.parsePackages(run("packages", env = mapOf("STEWARD_FIXTURE_CRASH" to "packages")))
+            null
+        } catch (e: TermuxException) {
+            e.message
+        }
+        assertTrue(stopped, stopped!!.startsWith("The Termux helper stopped early: ") && "bad array subscript" in stopped)
+
+        // Only npm's part stops: the packages and the other programs are all there, with a warning.
+        val output = run("packages", env = mapOf("STEWARD_FIXTURE_CRASH" to "npm"))
+        assertEquals(setOf("git", "python", "bash"), TermuxProtocol.parsePackages(output).map { it.name }.toSet())
+        assertEquals(setOf("pip:requests", "cargo:ripgrep"), TermuxProtocol.parsePrograms(output).map { it.key }.toSet())
+        assertTrue(output, output.lines().any { it.startsWith("W\tnpm stopped early: ") })
+
+        // The same for an audit's extras, which run alongside the rest; every part says how long it took.
+        write(File(home, "big/data.bin"), 3 * mib, 3)
+        val report = TermuxProtocol.parseAudit(run("audit", env = mapOf("STEWARD_FIXTURE_CRASH" to "sketches")))
+        assertTrue(report.warnings.toString(), report.warnings.any { it.startsWith("sketches stopped early") })
+        assertTrue(report.entries.isNotEmpty())
+        assertTrue(report.timings.keys.toString(), report.timings.keys.containsAll(setOf("sizes", "targets", "duplicates", "sketches", "owners", "foreign")))
+        assertTrue(com.galaxy.steward.core.RunLog.termux(report, 1000).contains("; parts "))
+    }
+
+    @Test
     fun programsGoThroughTheirOwnPackageManager() {
         fakeDpkg()
         tool("npm", "[ \"\$1\" = rm ] && [ \"\$2\" = -g ] && rm -rf \"\$PREFIX/lib/node_modules/\$4\"")

@@ -50,6 +50,7 @@ emit() {
 }
 
 finish() {
+  FINISHED=1
   emit E "$1"
   exec 3>&-
   [ -n "$OUT" ] && printf 'O\t%s\n' "$OUT"
@@ -59,6 +60,61 @@ finish() {
 refuse() {
   emit X refused "$1"
   finish refused 2
+}
+
+# What bash itself complains about goes to a file, so a run that stops unexpectedly (a bad array subscript or an
+# arithmetic error ends a bash script on the spot) can say why: Z, reason, then E failed. The app shows the reason
+# instead of "the output was cut short".
+FINISHED=""
+ERRLOG="$(mktemp "${TMPDIR:-${PREFIX:-/data/data/com.termux/files/usr}/tmp}/steward-err.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)" || ERRLOG=""
+[ -n "$ERRLOG" ] && exec 2>"$ERRLOG"
+
+last_error() {
+  [ -n "$ERRLOG" ] && [ -s "$ERRLOG" ] && tail -n 1 -- "$ERRLOG" 2>/dev/null | tr '\t\r\n' '   ' | cut -c1-240
+}
+
+on_exit() {
+  local st=$? why
+  if [ -z "$FINISHED" ]; then
+    why="$(last_error)"
+    emit Z "${why:-the helper stopped with status $st}"
+    emit E failed
+  fi
+  [ -n "$ERRLOG" ] && rm -f -- "$ERRLOG"
+}
+trap on_exit EXIT
+
+# In the test fixture only: stops here the way a real bash error does (an empty associative-array key is fatal).
+CRASH_AT=""
+crash_point() {
+  if [ -n "$CRASH_AT" ] && [ "$CRASH_AT" = "$1" ]; then
+    local -A boom=()
+    boom[""]=1
+  fi
+}
+
+# Milliseconds since the epoch, for timing the parts of a report.
+now_ms() {
+  local t="${EPOCHREALTIME:-}"
+  if [ -n "$t" ]; then t="${t/./}"; echo "${t:0:${#t}-3}"; else echo "$(( $(date +%s) * 1000 ))"; fi
+}
+
+# Y, part, milliseconds: how long a part of a report took, for the run log.
+timed() {
+  local name="$1" t
+  shift
+  t="$(now_ms)"
+  "$@"
+  emit Y "$name" "$(( $(now_ms) - t ))"
+}
+
+# Runs an optional part of a report in a subshell, so one that fails can't take the rest with it, and times it.
+optional() {
+  local name="$1" t
+  shift
+  t="$(now_ms)"
+  if ! ( crash_point "$name"; "$@" ); then emit W "$name stopped early: $(last_error)"; fi
+  emit Y "$name" "$(( $(now_ms) - t ))"
 }
 
 # ---------------------------------------------------------------- context
@@ -90,6 +146,8 @@ if [ "${STEWARD_TERMUX_FIXTURE:-0}" = "1" ]; then
   DUP_MIN_KIB="${STEWARD_FIXTURE_MIN_KIB:-$DUP_MIN_KIB}"
   SKETCH_MIN_KIB="${STEWARD_FIXTURE_MIN_KIB:-$SKETCH_MIN_KIB}"
   L2S_MIN_KIB="${STEWARD_FIXTURE_MIN_KIB:-$L2S_MIN_KIB}"
+  # Tests make one named part stop the way a bash error would (see crash_point).
+  CRASH_AT="${STEWARD_FIXTURE_CRASH:-}"
 else
   case "$FILES" in
     /data/data/com.termux/files|/data/user/[0-9]*/com.termux/files) ;;
@@ -406,7 +464,7 @@ l2s_orphans() {
   done
   [ "${#big[@]}" -gt 0 ] || return 0
   declare -A refs=()
-  while IFS= read -r f; do refs["$f"]=1; done < <(find "$r" -xdev -type l -printf '%l\n' 2>/dev/null | grep -F '.l2s.' | sed 's#.*/##')
+  while IFS= read -r f; do [ -n "$f" ] && refs["$f"]=1; done < <(find "$r" -xdev -type l -printf '%l\n' 2>/dev/null | grep -F '.l2s.' | sed 's#.*/##')
   for f in "${big[@]}"; do
     [ -n "${refs[${f##*/}]:-}" ] && continue
     [ -n "${refs[$(basename -- "${f%.*}")]:-}" ] && continue
@@ -455,6 +513,7 @@ dup_large_files() {
     [ "${BIG[$f]}" -ge "$DUP_MIN_KIB" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
     s="$(stat -c '%s:%i' -- "$f" 2>/dev/null)" || continue
     ino="${s#*:}"; s="${s%%:*}"
+    [ -n "$ino" ] && [ -n "$s" ] || continue
     [ -n "${seen[$ino]:-}" ] && continue
     seen["$ino"]=1
     by["$s"]+="$f"$'\n'
@@ -483,9 +542,8 @@ BEGIN { P = 4294967291; for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i }
   h = mulmod(h + 1, 2654435761); h = (mulmod(h, h) + h) % P; printf "%.0f\n", h }'
 
 sketch_dirs() {
-  local p rest k tmp n sk distros
+  local p rest k distros
   distros="$(list_rootfs | tr '\0' '\n')"
-  tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/steward-sketch.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)" || return 0
   for p in "${!BIG[@]}"; do
     [ "${BIG[$p]}" -ge "$SKETCH_MIN_KIB" ] && [ -d "$p" ] && [ ! -L "$p" ] || continue
     case "$p" in
@@ -497,13 +555,25 @@ sketch_dirs() {
     printf '%s\n' "$distros" | grep -qxF -e "$p" && continue
     printf '%s\n' "$distros" | awk -v p="$p/" '$0 != "" && index(p, $0 "/") == 1 { f = 1 } END { exit !f }' && continue
     printf '%s\t%s\n' "${BIG[$p]}" "$p"
-  done | sort -t "$(printf '\t')" -k1,1nr | head -n 25 | while IFS=$'\t' read -r k p; do
-    find "$p" -xdev -type f -printf '%P\t%s\n' 2>/dev/null | head -n 300000 > "$tmp"
-    n="$(wc -l < "$tmp")"
-    [ "${n:-0}" -ge 20 ] || continue
+  done | sort -t "$(printf '\t')" -k1,1nr | head -n 25 | {
+    # Four folders at a time: hashing every file name in awk is the slow part, and it is all CPU.
+    while IFS=$'\t' read -r k p; do
+      while [ "$(jobs -rp | wc -l)" -ge 4 ]; do wait -n 2>/dev/null || break; done
+      sketch_one "$k" "$p" &
+    done
+    wait
+  }
+}
+
+sketch_one() {
+  local k="$1" p="$2" tmp n sk
+  tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/steward-sketch.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)" || return 0
+  find "$p" -xdev -type f -printf '%P\t%s\n' 2>/dev/null | head -n 300000 > "$tmp"
+  n="$(wc -l < "$tmp")"
+  if [ "${n:-0}" -ge 20 ]; then
     sk="$(awk "$SKETCH_AWK" "$tmp" | sort -n -u | head -n 64 | paste -sd, -)"
     emit H "$n" "$(( k * 1024 ))" "$sk" "$p"
-  done
+  fi
   rm -f -- "$tmp"
 }
 
@@ -567,6 +637,7 @@ declare -A BIG=() BIGT=()
 load_sizes() {
   local k t p
   while IFS=$'\t' read -r k t p; do
+    [ -n "$p" ] && [[ "$k" =~ ^[0-9]+$ ]] || continue
     has_controls "$p" && continue
     BIG["$p"]="$k"
     BIGT["$p"]="$t"
@@ -584,7 +655,19 @@ audit() {
   local id info p root mode m bytes files d name active=0 r s k count=0 repo art rest
   proot_running && active=1
   emit V 1 "$HOME" "$PREFIX" "$active"
-  load_sizes
+  timed sizes load_sizes
+
+  # The optional extras only go into the --out file. They read the size map and nothing else of this function, so
+  # they run alongside the rest (a phone has eight cores and the storage answers in parallel); each in its own
+  # subshell, so one that fails can't take the report with it.
+  if [ -n "$OUT" ]; then
+    optional duplicates dup_large_files &
+    optional sketches sketch_dirs &
+    optional owners emit_owners &
+    optional foreign foreign_binaries &
+  fi
+  local started
+  started="$(now_ms)"
 
   # Where the space goes (report only): the whole folder, then the largest folders one level into home and usr.
   emit U "$(size_of "$FILES")" "$FILES"
@@ -696,13 +779,7 @@ audit() {
     done < <(l2s_orphans "$r")
   done < <(list_rootfs | sort -zu)
 
-  # Identical large files, and sketches of big folders for finding near-copies (both only into the --out file).
-  if [ -n "$OUT" ]; then
-    dup_large_files
-    sketch_dirs
-    emit_owners
-    foreign_binaries
-  fi
+  emit Y targets "$(( $(now_ms) - started ))"
 
   # The size map itself, for browsing Termux folder by folder in the app: only into the --out file, because the
   # result bundle that carries stdout is too small for it.
@@ -721,6 +798,8 @@ audit() {
     emit L "$(stat -c %s -- "$p" 2>/dev/null || echo $(( k * 1024 )))" "$(stat -c %Y -- "$p" 2>/dev/null || echo 0)" "$p"
   done
 
+  # The extras started above.
+  wait
   finish ok
 }
 
@@ -952,6 +1031,7 @@ load_history() {
   [ -f "$HOME/.local/share/fish/fish_history" ] && { files+=("$HOME/.local/share/fish/fish_history"); kinds+="fish "; }
   [ "${#files[@]}" -gt 0 ] || return 0
   while IFS=$'\t' read -r c t n; do
+    [ -n "$c" ] && [[ "$t$n" =~ ^[0-9]+$ ]] || continue
     CMD_LAST["$c"]="$t"
     CMD_USES["$c"]="$n"
   done < <(awk -v kinds="$kinds" -v list="${files[*]}" 'BEGIN { nk = split(kinds, k, " "); split(list, f, " "); for (i = 1; i <= nk; i++) kind[f[i]] = k[i] }'"$HISTORY_AWK" "${files[@]}" 2>/dev/null)
@@ -975,15 +1055,18 @@ packages() {
   declare -A manual=() commands=() installed=()
   emit V 1 "$HOME" "$PREFIX" 0
   [ -x "$PREFIX/bin/dpkg-query" ] || refuse "dpkg-query is missing"
-  while IFS= read -r name; do manual["$name"]=1; done < <("$PREFIX/bin/apt-mark" showmanual 2>/dev/null)
+  crash_point packages
+  while IFS= read -r name; do [ -n "$name" ] && manual["$name"]=1; done < <("$PREFIX/bin/apt-mark" showmanual 2>/dev/null)
   load_history
   # The commands each package put in $PREFIX/bin, and when it was installed or last updated (its file list's time).
   while IFS=$'\t' read -r cmd pkg; do
+    [ -n "$cmd" ] && [ -n "$pkg" ] || continue
     commands["$pkg"]+="${commands[$pkg]:+,}$cmd"
   done < <(awk -v bin="$PREFIX/bin/" 'index($0, bin) == 1 { c = substr($0, length(bin) + 1); if (c != "" && c !~ /\//) { f = FILENAME; sub(/.*\//, "", f); sub(/\.list$/, "", f); sub(/:.*/, "", f); print c "\t" f } }' \
       "$PREFIX/var/lib/dpkg/info/"*.list 2>/dev/null)
   while read -r t f; do
     f="${f##*/}"; f="${f%.list}"; f="${f%%:*}"
+    [ -n "$f" ] && [[ "$t" =~ ^[0-9]+$ ]] || continue
     installed["$f"]="$t"
   done < <(stat -c '%Y %n' -- "$PREFIX/var/lib/dpkg/info/"*.list 2>/dev/null)
   while IFS="$US" read -r name size protected version deps summary; do
@@ -993,7 +1076,10 @@ packages() {
     emit K "$name" "$size" "$m" "$protected" "$version" "$deps" "$summary" "${installed[$name]:-0}" "$LAST" "$USES" \
       "$(printf '%s' "${commands[$name]:-}" | cut -d, -f1-12)"
   done < <(load_packages)
-  programs
+  # Each package manager on its own: one that trips can't cost the package list.
+  optional npm npm_programs
+  optional pip pip_programs
+  optional cargo cargo_programs
   finish ok
 }
 
@@ -1018,6 +1104,7 @@ npm_programs() {
     case "$link" in *node_modules/*) ;; *) continue ;; esac
     name="${link#*node_modules/}"
     case "$name" in @*/*) name="${name%%/*}/$(printf '%s' "${name#*/}" | cut -d/ -f1)" ;; *) name="${name%%/*}" ;; esac
+    [ -n "$name" ] && [ "${name%/}" = "$name" ] || continue
     bins["$name"]+="${bins[$name]:+,}${b##*/}"
   done
   for d in "$root"/* "$root"/@*/*; do
@@ -1036,7 +1123,7 @@ npm_programs() {
 pip_programs() {
   local site info name version t bytes cmds p
   declare -A owned=()
-  while IFS= read -r info; do owned["$info"]=1; done < <(grep -h '\.dist-info$' "$PREFIX/var/lib/dpkg/info/"*.list 2>/dev/null)
+  while IFS= read -r info; do [ -n "$info" ] && owned["$info"]=1; done < <(grep -h '\.dist-info$' "$PREFIX/var/lib/dpkg/info/"*.list 2>/dev/null)
   for site in "$PREFIX"/lib/python3*/site-packages "$HOME"/.local/lib/python3*/site-packages; do
     [ -d "$site" ] && [ ! -L "$site" ] || continue
     for info in "$site"/*.dist-info; do
@@ -1068,7 +1155,7 @@ cargo_programs() {
     IFS=, read -r -a list <<< "$cmds"
     for b in "${list[@]}"; do
       [ -f "$HOME/.cargo/bin/$b" ] || continue
-      bytes=$(( bytes + $(stat -c %s -- "$HOME/.cargo/bin/$b" 2>/dev/null || echo 0) ))
+      bytes=$(( bytes + $(stat -c %s -- "$HOME/.cargo/bin/$b" 2>/dev/null || echo 0) + 0 ))
       t="$(stat -c %Y -- "$HOME/.cargo/bin/$b" 2>/dev/null || echo 0)"
     done
     usage_of "$cmds"
