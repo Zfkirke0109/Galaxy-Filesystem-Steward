@@ -1,9 +1,9 @@
 package com.galaxy.steward.core.termux
 
 import com.galaxy.steward.core.dedupe.DirSketch
-import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.dedupe.FolderSketch
 import com.galaxy.steward.core.dedupe.NearCopy
+import com.galaxy.steward.core.plural
 
 /**
  * Termux keeps its home and packages in its own private folder, which no other app can read. The steward
@@ -35,14 +35,22 @@ object TermuxScript {
 }
 
 enum class TermuxGroup(val title: String, val description: String) {
-    SAFE("Downloads and temp files", "Package downloads, downloaded distro images, APT's derived indexes, trash, and temp files and logs older than a week."),
-    DEV("Developer caches", "Download caches of npm, npx, pip, uv, Poetry, Yarn, Go, Cargo, rustup, Bun, Gradle and the Android SDK, and Python bytecode. Tools re-download or rebuild what they need."),
+    SAFE(
+        "Downloads and temp files",
+        "Package downloads, downloaded distro images, APT's derived indexes, trash, crash logs and dumps, and temp files and logs older than a week.",
+    ),
+    DEV(
+        "Developer caches",
+        "Download caches of npm, npx, pip, uv, Poetry, Yarn, Go, Cargo, rustup, Bun, Gradle, Maven, CPAN and the Android SDK, old Gradle " +
+            "versions, Chromium and VS Code caches, and Python bytecode. Tools re-download or rebuild what they need.",
+    ),
     PROOT("Linux distributions", "Package caches and old temp files inside proot distributions that are not running."),
     BUILD("Build outputs", "Folders Git ignores in your projects (build, node_modules, target, .venv...). Rebuilt on the next build or install."),
     OTHER("Other caches", "Everything else in ~/.cache. Often model or download caches that are slow to fetch again - review first."),
     LEFTOVERS(
         "Leftovers",
-        "Decompiled apps, APKs, NDKs the phone can't run, and files proot no longer uses. Not caches: review each one.",
+        "Decompiled apps, APKs, what the phone can't run (x86-64 NDKs, emulator images, Kotlin/Native), folders no package " +
+            "installed, a replaced Python's packages, and files proot no longer uses. Not caches: review each one.",
     ),
 }
 
@@ -94,6 +102,26 @@ object TermuxCatalog {
             "home-node-modules", "npm packages in your home", TermuxGroup.DEV, false,
             "~/node_modules: npm install run in the home folder itself; it puts them back",
         ),
+        TermuxTargetInfo("cpan-build", "CPAN build folders", TermuxGroup.DEV, true, "Perl modules cpan unpacked to build; it unpacks them again"),
+        TermuxTargetInfo("cpan-sources", "CPAN downloads", TermuxGroup.DEV, true, "Perl module archives cpan already installed"),
+        TermuxTargetInfo("go-mod", "Go module sources", TermuxGroup.DEV, false, "go downloads them again on the next build"),
+        TermuxTargetInfo("m2-repository", "Maven repository", TermuxGroup.DEV, false, "Maven and Gradle download them again: slow on a phone"),
+        TermuxTargetInfo("gradle-wrapper-old", "Old Gradle versions", TermuxGroup.DEV, true, "Versions no project in your home asks for; the newest stays"),
+        TermuxTargetInfo("code-server-vsix", "Downloaded VS Code extensions", TermuxGroup.DEV, true, "code-server's copies of extension installers"),
+        TermuxTargetInfo("sdk-temp", "Android SDK downloads", TermuxGroup.SAFE, true, "sdkmanager's unfinished downloads"),
+        TermuxTargetInfo(
+            "app-cache", "App cache", TermuxGroup.DEV, true,
+            "A Chromium or Electron app's cache (Chromium, VS Code, Code - OSS): rebuilt as the app is used",
+        ),
+        TermuxTargetInfo("app-logs", "App logs", TermuxGroup.SAFE, true, "Only logs older than 7 days"),
+        TermuxTargetInfo("crash-log", "Crash log", TermuxGroup.SAFE, true, "What a crashed Java program wrote (hs_err_pid, replay_pid)"),
+        TermuxTargetInfo("heap-dump", "Heap or core dump", TermuxGroup.SAFE, true, "A crashed program's memory, written for debugging"),
+        TermuxTargetInfo("sdk-system-images", "Android emulator images", TermuxGroup.LEFTOVERS, false, "The Android emulator can't run on a phone"),
+        TermuxTargetInfo("sdk-emulator", "Android emulator for PCs", TermuxGroup.LEFTOVERS, false, "Built for x86-64 PCs: it can't run on this phone"),
+        TermuxTargetInfo(
+            "konan", "Kotlin/Native toolchains", TermuxGroup.LEFTOVERS, false,
+            "Built for PCs: Kotlin/Native can't compile on an ARM phone, so Gradle's downloads for it can't run here",
+        ),
         TermuxTargetInfo("decompiled", "Decompiled app", TermuxGroup.LEFTOVERS, false, "apktool or jadx output: decompile the APK again to get it back"),
         TermuxTargetInfo("home-apk", "APK file", TermuxGroup.LEFTOVERS, false, "An installer in your home"),
         TermuxTargetInfo(
@@ -104,14 +132,34 @@ object TermuxCatalog {
             "l2s-orphan", "Orphaned hard-link copy", TermuxGroup.LEFTOVERS, false,
             "A file proot kept for hard links that nothing in the distribution points at any more",
         ),
+        TermuxTargetInfo(
+            "prefix-unowned", "Not from any package", TermuxGroup.LEFTOVERS, false,
+            "No Termux package installed anything in it: put there by hand, or left behind by an uninstall",
+        ),
+        TermuxTargetInfo(
+            "old-python", "Packages of a Python that is gone", TermuxGroup.LEFTOVERS, false,
+            "What pip installed for a Python version Termux has since replaced; the Python you have can't use them",
+        ),
         TermuxTargetInfo("proot-cache", "Distro package cache", TermuxGroup.PROOT, true),
         TermuxTargetInfo("proot-tmp", "Distro temp files", TermuxGroup.PROOT, true, "Only files older than 7 days"),
         TermuxTargetInfo("build", "Build output", TermuxGroup.BUILD, false),
         TermuxTargetInfo("other-cache", "Cache folder", TermuxGroup.OTHER, false),
     ).associateBy { it.id }
 
+    /**
+     * Targets that only take files by age, or what the next run rebuilds: they can't break anything kept, so the keep
+     * rule leaves them be (the script's clean_one says the same).
+     */
+    val KEEP_EXEMPT = setOf(
+        "pycache", "proot-tmp", "termux-tmp", "var-tmp", "termux-var-log", "npm-logs", "gradle-daemon-logs", "apt-archives",
+        "apt-pkgcache", "claude-versions", "claude-versions-unsure", "app-logs",
+    )
+
     /** Targets whose records carry a path the script must re-validate (`id=path`). */
-    val PATH_TARGETS = setOf("other-cache", "proot-cache", "proot-tmp", "build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan")
+    val PATH_TARGETS = setOf(
+        "other-cache", "proot-cache", "proot-tmp", "build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "prefix-unowned", "old-python",
+        "app-cache", "app-logs", "crash-log", "heap-dump",
+    )
 }
 
 data class TermuxItem(
@@ -125,9 +173,18 @@ data class TermuxItem(
     val files: Int,
     val defaultSelected: Boolean,
     val note: String,
+    /** Commands in $PREFIX/bin that lead into it, and when you last ran one (ms, 0 when never or unknown). */
+    val commands: List<String> = emptyList(),
+    val lastUsed: Long = 0,
 )
 
 data class TermuxUsage(val path: String, val bytes: Long)
+
+/**
+ * Something in Termux that stays whatever you pick, and why: a relay Layla's Sidekick mini apps talk to, what Termux:Boot,
+ * termux-services, a Widget shortcut, Tasker or cron starts, what runs right now, or what you chose to keep.
+ */
+data class TermuxKept(val path: String, val bytes: Long, val why: String)
 
 data class TermuxRootfs(val path: String, val bytes: Long, val active: Boolean)
 
@@ -230,14 +287,19 @@ data class TermuxPackage(
     val uses: Int = 0,
     /** Commands it puts in $PREFIX/bin. */
     val commands: List<String> = emptyList(),
+    /** Why it stays: something kept runs with it (Layla's relay, a Boot script, what runs now). Empty when nothing does. */
+    val keptBy: String = "",
 )
 
-/** One package apt would remove: [kind] is requested, dependent (it needs a requested one) or orphan (nothing needs it after). */
-data class PlannedRemoval(val name: String, val bytes: Long, val kind: String, val protected: Boolean)
+/**
+ * One package apt would remove: [kind] is requested, dependent (it needs a requested one) or orphan (nothing needs it
+ * after). [keptBy]: something kept runs with it, so it stays.
+ */
+data class PlannedRemoval(val name: String, val bytes: Long, val kind: String, val protected: Boolean, val keptBy: String = "")
 
 data class TermuxRemovalPlan(val packages: List<PlannedRemoval>, val warnings: List<String>) {
-    /** Something Termux needs would go: nothing is removed. */
-    val blocked: Boolean get() = packages.any { it.protected }
+    /** Something Termux needs, or something kept runs with, would go: nothing is removed. */
+    val blocked: Boolean get() = packages.any { it.protected || it.keptBy.isNotEmpty() }
     fun withoutOrphans(): List<PlannedRemoval> = packages.filter { it.kind != "orphan" }
 }
 
@@ -264,7 +326,36 @@ data class TermuxReport(
     val foreign: List<TermuxForeignFile> = emptyList(),
     /** How long each part of the audit took (milliseconds), for the run log. */
     val timings: Map<String, Long> = emptyMap(),
+    /** What stays whatever you pick (see [TermuxKept]). */
+    val kept: List<TermuxKept> = emptyList(),
+    /** Clean-up items the keep rule holds back: they would touch something kept. Never picked, shown so you know. */
+    val held: List<TermuxItem> = emptyList(),
 ) {
+    /**
+     * Why [path] has to stay, or null: it is kept, inside something kept, or holds something kept (removing it would
+     * take that too). The script checks the same again before anything goes.
+     */
+    fun keptWhy(path: String): String? {
+        val k = kept.firstOrNull { path == it.path || path.startsWith(it.path + "/") || it.path.startsWith("$path/") } ?: return null
+        return TermuxProtocol.relative(k.path, home, prefix) + ": " + k.why
+    }
+
+    /**
+     * This report with [list] as what is kept: clean-up items that would touch any of it are held back from every pick
+     * (the goal planner's too), and ones that no longer would come back.
+     */
+    fun withKept(list: List<TermuxKept>): TermuxReport {
+        val next = copy(kept = list.sortedByDescending { it.bytes })
+        val (hold, free) = (items + held).partition { it.targetId !in TermuxCatalog.KEEP_EXEMPT && next.keptWhy(it.path) != null }
+        return next.copy(items = free.sortedByDescending { it.bytes }, held = hold.sortedByDescending { it.bytes })
+    }
+
+    /** After "Always keep" ([keep]) or "Stop keeping" on [paths], without a new scan. */
+    fun keeping(paths: Collection<String>, keep: Boolean): TermuxReport = withKept(
+        if (keep) kept.filterNot { it.path in paths } + paths.map { TermuxKept(it, entry(it)?.bytes ?: 0, CHOSEN) }
+        else kept.filterNot { it.path in paths && it.why == CHOSEN },
+    )
+
     private val byParent: Map<String, List<TermuxEntry>> by lazy {
         entries.groupBy { it.path.substringBeforeLast('/') }.mapValues { (_, list) -> list.sortedByDescending { it.bytes } }
     }
@@ -345,16 +436,19 @@ data class TermuxReport(
 
     fun without(specs: Set<String>): TermuxReport = copy(items = items.filterNot { it.spec in specs })
 
-    private companion object {
+    companion object {
+        /** Why something you kept yourself stays (the script's keep_listed says the same). */
+        const val CHOSEN = "you chose to keep it"
+
         /** Clean-up targets that remove the folder or file itself, not what is in it. */
-        val WHOLE_TARGETS = setOf("build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "path")
+        val WHOLE_TARGETS = setOf("build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "path", "prefix-unowned", "old-python", "crash-log", "heap-dump")
     }
 }
 
 data class TermuxCleanResult(val targetId: String, val status: String, val before: Long, val after: Long, val path: String, val note: String) {
     /** REMOVED is an uninstalled package: its installed size, as dpkg reports it. */
     val freed: Long get() = if (status == "CLEARED" || status == "PARTIAL" || status == "REMOVED") (before - after).coerceAtLeast(0) else 0
-    val ok: Boolean get() = status == "CLEARED" || status == "NO_CHANGE" || status == "REMOVED" || status == "MOVED"
+    val ok: Boolean get() = status in setOf("CLEARED", "NO_CHANGE", "REMOVED", "MOVED", "KEPT", "UNKEPT")
 }
 
 data class TermuxCleanSummary(val results: List<TermuxCleanResult>) {
@@ -383,6 +477,7 @@ object TermuxLocks {
             return if (DISTRO_FREE.matches(path.removePrefix(r.path + "/"))) null else "Part of the distribution's system"
         }
         if (path == home || path == prefix || path == report.filesRoot) return "Termux itself"
+        report.keptWhy(path)?.let { return "Kept - $it" }
         if (path.startsWith("$home/")) {
             val top = path.removePrefix("$home/").substringBefore('/')
             if (top == "storage") return "Links to shared storage"
@@ -447,6 +542,7 @@ object TermuxProtocol {
         val owners = HashMap<String, Pair<Int, String>>()
         val foreign = ArrayList<TermuxForeignFile>()
         val timings = LinkedHashMap<String, Long>()
+        val kept = ArrayList<TermuxKept>()
         for (p in parsed.records) {
             when (p[0]) {
                 "V" -> if (p.size >= 5) {
@@ -460,7 +556,11 @@ object TermuxProtocol {
                     val path = p[4]
                     val spec = if (info.id in TermuxCatalog.PATH_TARGETS) "${info.id}=$path" else info.id
                     val title = if (info.id in TermuxCatalog.PATH_TARGETS) "${info.title}: ${relative(path, home, prefix)}" else info.title
-                    items += TermuxItem(spec, info.id, title, info.group, path, p[2].toLong(), p[3].toInt(), info.defaultSelected, info.note)
+                    items += TermuxItem(
+                        spec, info.id, title, info.group, path, p[2].toLong(), p[3].toInt(), info.defaultSelected, info.note,
+                        commands = p.getOrNull(6)?.split(',')?.filter { it.isNotEmpty() }.orEmpty(),
+                        lastUsed = (p.getOrNull(5)?.toLongOrNull() ?: 0) * 1000,
+                    )
                 }
                 "B" -> if (p.size >= 6) {
                     val artifacts = p[3] == "1"
@@ -490,6 +590,7 @@ object TermuxProtocol {
                 "O" -> if (p.size >= 4) owners[p[3]] = (p[1].toIntOrNull() ?: 1) to p[2]
                 "F" -> if (p.size >= 4) foreign += TermuxForeignFile(p[3], p[1], p[2].toLongOrNull() ?: 0)
                 "Y" -> if (p.size >= 3) p[2].toLongOrNull()?.let { timings[p[1]] = it }
+                "A" -> if (p.size >= 4) kept += TermuxKept(p[2], p[1].toLongOrNull() ?: 0, p[3])
                 "H" -> if (p.size >= 5) {
                     val hashes = p[3].split(',').mapNotNull { it.toLongOrNull() }.toLongArray()
                     if (hashes.isNotEmpty()) sketches += TermuxSketch(p[4], p[1].toIntOrNull() ?: 0, p[2].toLongOrNull() ?: 0, hashes)
@@ -509,7 +610,7 @@ object TermuxProtocol {
         return TermuxReport(
             home, prefix, active, usage, named.sortedByDescending { it.bytes }, rootfs, large, warnings, unsafe, entries, duplicates, sketches,
             owners, foreign.sortedByDescending { it.bytes }, timings,
-        )
+        ).withKept(kept)
     }
 
     fun parsePackages(output: String): List<TermuxPackage> {
@@ -528,8 +629,15 @@ object TermuxProtocol {
                 lastUsed = seconds(p.getOrNull(9)),
                 uses = p.getOrNull(10)?.toIntOrNull() ?: 0,
                 commands = p.getOrNull(11).orEmpty().split(',').filter { it.isNotEmpty() },
+                keptBy = p.getOrNull(12).orEmpty(),
             )
         }.sortedByDescending { it.bytes }
+    }
+
+    /** The J record of a packages run: how far back the shell history goes, which says how far "never run" holds. */
+    fun parseHistorySpan(output: String): HistorySpan {
+        val j = parse(output).records.lastOrNull { it[0] == "J" && it.size >= 3 } ?: return HistorySpan(0, 0)
+        return HistorySpan(seconds(j[1]), j[2].toIntOrNull() ?: 0)
     }
 
     private fun seconds(field: String?): Long = (field?.toLongOrNull() ?: 0L).coerceAtLeast(0) * 1000
@@ -584,7 +692,7 @@ object TermuxProtocol {
         val parsed = parse(output)
         check(parsed)
         val packages = parsed.records.filter { it[0] == "P" && it.size >= 5 }.map { p ->
-            PlannedRemoval(p[1], p[2].toLongOrNull() ?: 0, p[3], p[4] == "1")
+            PlannedRemoval(p[1], p[2].toLongOrNull() ?: 0, p[3], p[4] == "1", p.getOrNull(5).orEmpty())
         }
         val order = listOf("requested", "dependent", "orphan")
         return TermuxRemovalPlan(

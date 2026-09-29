@@ -39,6 +39,7 @@ import com.galaxy.steward.ui.screens.AppFolderBrowserScreen
 import com.galaxy.steward.ui.screens.AppFoldersScreen
 import com.galaxy.steward.ui.screens.AppStorageScreen
 import com.galaxy.steward.ui.screens.AppsScreen
+import com.galaxy.steward.ui.screens.DeepSpaceScreen
 import com.galaxy.steward.ui.screens.DuplicatesScreen
 import com.galaxy.steward.ui.screens.ExplorerScreen
 import com.galaxy.steward.ui.screens.GoalScreen
@@ -48,6 +49,7 @@ import com.galaxy.steward.ui.screens.JunkScreen
 import com.galaxy.steward.ui.screens.OptimizeScreen
 import com.galaxy.steward.ui.screens.OrganizeScreen
 import com.galaxy.steward.ui.screens.PermissionScreen
+import com.galaxy.steward.ui.screens.PrivateDataScreen
 import com.galaxy.steward.ui.screens.SettingsScreen
 import com.galaxy.steward.ui.screens.TermuxBrowserScreen
 import com.galaxy.steward.ui.screens.TermuxPackagesScreen
@@ -69,6 +71,8 @@ object Routes {
     const val APP_STORAGE = "app-storage"
     const val APP_FOLDERS = "app-folders"
     const val APP_BROWSER = "app-browser"
+    const val DEEP_SPACE = "deep-space"
+    const val PRIVATE_DATA = "private-data"
     const val TERMUX = "termux"
     const val TERMUX_BROWSER = "termux-browser"
     const val TERMUX_PACKAGES = "termux-packages"
@@ -159,6 +163,8 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.APP_STORAGE) { AppStorageScreen(vm) { nav.popBackStack() } }
             composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm, { nav.navigate(Routes.APP_BROWSER) }) { nav.popBackStack() } }
             composable(Routes.APP_BROWSER) { AppFolderBrowserScreen(vm) { nav.popBackStack() } }
+            composable(Routes.DEEP_SPACE) { DeepSpaceScreen(vm, { nav.navigate(Routes.PRIVATE_DATA) }) { nav.popBackStack() } }
+            composable(Routes.PRIVATE_DATA) { PrivateDataScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX) { TermuxScreen(vm, { nav.navigate(it) }) { nav.popBackStack() } }
             composable(Routes.TERMUX_BROWSER) { TermuxBrowserScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX_PACKAGES) { TermuxPackagesScreen(vm) { nav.popBackStack() } }

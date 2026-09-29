@@ -147,6 +147,11 @@ object StorageReportText {
                 appendLine("    ${it.title}  ${it.bytes.humanBytes()}${if (it.defaultSelected) "" else " (review)"}  ${short(it.path)}")
             }
         }
+        if (report.kept.isNotEmpty()) {
+            appendLine("  Kept whatever is picked (Layla's relays, what Termux starts, what runs, your list):")
+            report.kept.take(20).forEach { appendLine("    ${short(it.path)}  ${it.bytes.humanBytes()}  ${it.why}") }
+            report.held.forEach { appendLine("    held back: ${it.title}  ${it.bytes.humanBytes()}") }
+        }
         if (report.largeFiles.isNotEmpty()) {
             appendLine("  Largest files:")
             report.largeFiles.take(15).forEach { appendLine("    ${short(it.path)}  ${it.size.humanBytes()}") }

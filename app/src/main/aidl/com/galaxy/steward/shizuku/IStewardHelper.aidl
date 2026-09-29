@@ -33,4 +33,21 @@ interface IStewardHelper {
     // package against core's AppPolicy.clearDataBlock and that it is not a system package. Returns "exit=<code>" or
     // "error=<reason>".
     String clearAppData(String packageName, int userId, long timeoutMs) = 9;
+
+    // Lists ("list"), or removes chosen entries of ("remove" and one path per line), the places only the shell user
+    // reaches: /data/local/tmp and Android's bug reports. Request and result use core's ShellSpace line format.
+    ParcelFileDescriptor shellSpace(in ParcelFileDescriptor request) = 10;
+
+    // Android's own storage breakdown (a fixed `dumpsys diskstats`), streamed back as text.
+    ParcelFileDescriptor diskStats() = 11;
+
+    // One of Android's own clean-ups, by name: "trim-caches" (a fixed `pm trim-caches`, which frees every app's cache
+    // the way Android does when storage runs low) or "art-cleanup" (`pm art cleanup`, compiled code no app uses any
+    // more). Returns "exit=<code>" and the command's last output.
+    String systemClean(String what, long timeoutMs) = 12;
+
+    // Lists ("list") or removes ("remove" and one relative path per line) the private data of one debuggable app,
+    // through `run-as`, which Android allows the shell user only for apps built debuggable. Checked with core's
+    // PrivateData rules; the app is stopped before anything is removed.
+    ParcelFileDescriptor privateData(String packageName, in ParcelFileDescriptor request) = 13;
 }

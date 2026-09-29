@@ -29,6 +29,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.core.ageText
@@ -38,6 +39,7 @@ import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.TermuxLocks
 import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.core.termux.TermuxRepo
+import com.galaxy.steward.core.termux.TermuxReport
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.termux.TermuxStatus
 import com.galaxy.steward.ui.StewardViewModel
@@ -446,5 +448,54 @@ fun TermuxForeign(vm: StewardViewModel) {
             },
             onDismiss = { confirm = false },
         )
+    }
+}
+
+/**
+ * What stays in Termux whatever you pick, and why: Layla's Sidekick relays, what Termux:Boot, services, Widget
+ * shortcuts, Tasker or cron start, what runs right now, and what you chose to keep (which you can let go again here).
+ * Clean-ups that would touch any of it are held back, and counted.
+ */
+@Composable
+fun TermuxKeptCard(vm: StewardViewModel) {
+    val state by vm.termux.state.collectAsStateWithLifecycle()
+    val report = state.report ?: return
+    if (report.kept.isEmpty()) return
+    var all by rememberSaveable { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Kept for you", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "${report.kept.size.plural("thing")} in Termux stay${if (report.kept.size == 1) "s" else ""} whatever you pick, with what they run with: " +
+                "the relays Layla's Sidekick mini apps talk to, what Termux starts by itself, what runs right now, and what you chose to keep." +
+                (if (report.held.isNotEmpty()) " ${report.held.size.plural("clean-up")} (${report.held.sumOf { it.bytes }.humanBytes()}) would touch them, so they aren't offered." else ""),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val shown = if (all) report.kept else report.kept.take(6)
+        shown.forEach { k ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+                    Text(
+                        TermuxProtocol.relative(k.path, report.home, report.prefix),
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.MiddleEllipsis,
+                    )
+                    Text(
+                        listOfNotNull(k.why, k.bytes.takeIf { it > 0 }?.humanBytes()).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (k.why == TermuxReport.CHOSEN) {
+                    TextButton(onClick = { vm.keepTermuxPaths(listOf(k.path), keep = false) }) { Text("Stop keeping") }
+                }
+            }
+        }
+        if (report.kept.size > shown.size || all) {
+            TextButton(onClick = { all = !all }) { Text(if (all) "Show fewer" else "Show all ${report.kept.size}") }
+        }
     }
 }

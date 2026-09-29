@@ -4,10 +4,14 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.galaxy.steward.apps.AppsController
+import com.galaxy.steward.apps.DeepSpaceController
 import com.galaxy.steward.core.exec.JournalStore
+import com.galaxy.steward.core.learn.DecisionLog
+import com.galaxy.steward.core.learn.ScanMemory
 import com.galaxy.steward.data.AndroidEnvironment
 import com.galaxy.steward.data.SettingsStore
 import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.shizuku.ShizukuBridge
 import com.galaxy.steward.termux.TermuxController
@@ -15,9 +19,6 @@ import com.galaxy.steward.ui.StewardSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import com.galaxy.steward.core.learn.DecisionLog
-import com.galaxy.steward.core.learn.ScanMemory
-import com.galaxy.steward.diagnostics.StewardLog
 import java.io.File
 
 class StewardApp : Application() {
@@ -30,6 +31,10 @@ class StewardApp : Application() {
 
     /** App data outside shared storage: per-app sizes, caches, and Android/data|obb|media through Shizuku. */
     lateinit var apps: AppsController
+        private set
+
+    /** What only the shell user sees (through Shizuku): Android's breakdown and clean-ups, shell places, debug builds. */
+    lateinit var deepSpace: DeepSpaceController
         private set
 
     /** Termux's private home, reached through Termux's RUN_COMMAND bridge. */
@@ -64,6 +69,7 @@ class StewardApp : Application() {
         journals = JournalStore(File(filesDir, "journals"))
         val shizuku = ShizukuBridge(this)
         apps = AppsController(this, journals, shizuku, appScope)
+        deepSpace = DeepSpaceController(this, shizuku, appScope)
         termux = TermuxController(this, journals, appScope) { decisions.takeIf { settings.settings.value.learnFromChoices } }
         logcat = LogcatExporter(this, shizuku, appScope)
         storageReport = StorageReportExporter(this, appScope)

@@ -42,9 +42,9 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.apps.AppStorage
+import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
-import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.shizuku.ShizukuStatus
 import com.galaxy.steward.termux.TermuxBridge
 import com.galaxy.steward.termux.TermuxStatus
@@ -209,6 +209,18 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     if (apps.folders == null && !apps.foldersScanning) vm.apps.scanFolders()
                     navigate(Routes.APP_BROWSER)
                 }
+            }
+
+            item {
+                OverviewCard(
+                    icon = Icons.Rounded.Key,
+                    title = "Beyond app folders",
+                    text = "Through Shizuku: what Android itself counts (System, Other), its own cache and compiled-code clean-ups, what adb " +
+                        "left in /data/local/tmp, bug reports, Layla's and UserLAnd's private data, and your debuggable builds' data.",
+                    fraction = null,
+                    busy = false,
+                    action = if (shizuku == ShizukuStatus.READY) "Open" else null,
+                ) { navigate(Routes.DEEP_SPACE) }
             }
 
             item { SectionHeader("Termux") }

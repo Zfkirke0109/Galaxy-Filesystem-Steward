@@ -13,6 +13,7 @@
 #   bash -c "<this script>" steward git-gc [--out FILE] REPO...
 #   bash -c "<this script>" steward relocate [--out FILE] SHARED_FOLDER
 #   bash -c "<this script>" steward relocate-back [--out FILE] TERMUX_FOLDER SHARED_FOLDER
+#   bash -c "<this script>" steward keep|unkeep [--out FILE] PATH...
 #
 # Ported from the Koa Whole-Device Storage Steward v18 (safe_clean, dev_cache_clean,
 # deep_termux_known_cache_cleanup, clean_proot_rebuildable_caches, cleanup_git_rebuildables).
@@ -197,6 +198,8 @@ measure() {
     pycache) pycache_dirs "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     oldversions) old_versions "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     oldversions-unsure) old_versions "$p" unsure | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
+    oldgradle) old_gradle_dists "$p" | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
+    gomod) find "$p" -xdev -mindepth 1 -maxdepth 1 ! -name cache -print0 2>/dev/null | xargs -0 -r -I{} find {} -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
     *) find "$p" -xdev -type f -printf '%s\n' 2>/dev/null | sum_sizes ;;
   esac
 }
@@ -234,9 +237,109 @@ pycache_dirs() {
     -o -type d -name __pycache__ -print0 -prune 2>/dev/null
 }
 
+# Gradle versions in ~/.gradle/wrapper/dists that no project's wrapper in the home asks for. The newest always stays,
+# so the next build of anything recent starts without a download.
+old_gradle_dists() {
+  local p="$1" f u d name newest want=" "
+  while IFS= read -r -d '' f; do
+    u="$(sed -n 's#^distributionUrl=.*/\(gradle-[^/]*\)\.zip.*#\1#p' -- "$f" 2>/dev/null | head -n 1)"
+    [ -n "$u" ] && want+="$u "
+  done < <(find "$HOME" -xdev -maxdepth 7 \( -path "$HOME/storage" -o -path "$HOME/.gradle" -o -name node_modules -o -name .git \) -prune \
+      -o -name gradle-wrapper.properties -print0 2>/dev/null)
+  newest="$(find "$p" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%f\n' 2>/dev/null | sort -rn | head -n 1 | cut -f2)"
+  for d in "$p"/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    name="${d##*/}"
+    [ "$name" = "$newest" ] && continue
+    case "$want" in *" $name "*) continue ;; esac
+    printf '%s\0' "$d"
+  done
+}
+
+# Caches Chromium, Electron apps (VS Code, Code - OSS) and browsers keep under ~/.config: rebuilt as they are used.
+# Only in a folder that is plainly such an app's profile (Local State, Preferences, Local Storage, User, Cookies).
+APP_CACHE_FIND=( -name Cache -o -name 'Code Cache' -o -name GPUCache -o -name CachedData -o -name DawnCache -o -name DawnGraphiteCache
+  -o -name DawnWebGPUCache -o -name GrShaderCache -o -name ShaderCache -o -name Crashpad -o -name CachedExtensionVSIXs -o -name logs )
+
+app_profile() {
+  [ -e "$1/Local State" ] || [ -e "$1/Preferences" ] || [ -d "$1/Local Storage" ] || [ -d "$1/User" ] || [ -e "$1/Cookies" ]
+}
+
+# app-cache|app-logs PATH: still one of those folders (logs only go by age).
+app_cache_ok() {
+  local id="$1" p="$2" name
+  case "$p" in "$HOME"/.config/*/*) ;; *) return 1 ;; esac
+  name="${p##*/}"
+  case "$id:$name" in
+    app-logs:logs) ;;
+    app-cache:Cache|"app-cache:Code Cache"|app-cache:GPUCache|app-cache:CachedData|app-cache:DawnCache|app-cache:DawnGraphiteCache) ;;
+    app-cache:DawnWebGPUCache|app-cache:GrShaderCache|app-cache:ShaderCache|app-cache:Crashpad|app-cache:CachedExtensionVSIXs) ;;
+    *) return 1 ;;
+  esac
+  app_profile "${p%/*}" && dir_beneath "$p" "$HOME"
+}
+
+app_caches() {
+  local d
+  [ -d "$HOME/.config" ] || return 0
+  while IFS= read -r -d '' d; do
+    has_controls "$d" && continue
+    if [ "${d##*/}" = logs ]; then app_cache_ok app-logs "$d" && printf 'app-logs\t%s\0' "$d"
+    else app_cache_ok app-cache "$d" && printf 'app-cache\t%s\0' "$d"; fi
+  done < <(find "$HOME/.config" -xdev -mindepth 2 -maxdepth 4 -type d \( "${APP_CACHE_FIND[@]}" \) -print0 -prune 2>/dev/null)
+}
+
+# crash-log|heap-dump PATH: what a crashed Java program (Gradle, Android Studio's tools) or process left in the home:
+# hs_err_pid*.log and replay_pid*.log, heap dumps (.hprof) and core dumps. Only ones older than a day.
+crash_dump_kind() {
+  local p="$1" n="${1##*/}" hex
+  file_beneath "$p" "$HOME" || return 1
+  [ -n "$(find "$p" -maxdepth 0 -mtime +0 2>/dev/null)" ] || return 1
+  case "$n" in
+    hs_err_pid*.log|replay_pid*.log) echo crash-log ;;
+    *.hprof) echo heap-dump ;;
+    core|core.[0-9]*)
+      hex="$(head -c 18 -- "$p" 2>/dev/null | od -An -tx1 -v | tr -d ' \n')"
+      case "$hex" in 7f454c46????????????????????????0400) echo heap-dump ;; *) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+crash_dumps() {
+  local f k
+  while IFS= read -r -d '' f; do
+    has_controls "$f" && continue
+    k="$(crash_dump_kind "$f")" && printf '%s\t%s\0' "$k" "$f"
+  done < <(find "$HOME" -xdev -maxdepth 5 \( -path "$HOME/storage" -o -name .git -o -name node_modules -o -iname '*-rootfs' \) -prune \
+      -o -type f \( -name 'hs_err_pid*.log' -o -name 'replay_pid*.log' -o -name '*.hprof' -o -name core -o -name 'core.[0-9]*' \) -print0 2>/dev/null)
+}
+
 # ---------------------------------------------------------------- known targets
 
-FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches claude-versions claude-versions-unsure koa-archives apt-lists home-node-modules"
+FIXED_IDS="apt-archives apt-pkgcache termux-tmp var-tmp termux-var-log proot-dlcache trash npm-logs termux-app-cache npm-cache npx-cache pip-cache uv-cache poetry-cache pycache yarn-cache yarn-berry-cache go-build go-mod-download cargo-registry-cache cargo-registry-src cargo-registry-index cargo-git-db cargo-git-checkouts rustup-downloads rustup-tmp bun-cache android-cache gradle-daemon-logs gradle-caches claude-versions claude-versions-unsure koa-archives apt-lists home-node-modules cpan-build cpan-sources go-mod m2-repository gradle-wrapper-old code-server-vsix sdk-temp sdk-system-images sdk-emulator konan"
+
+# The Android SDK, wherever it is: ANDROID_HOME, ANDROID_SDK_ROOT, or where people put it in Termux.
+SDK_DIR=""
+for d in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/android-sdk" "$HOME/Android/Sdk" "$HOME/Android/sdk" "$PREFIX/opt/android-sdk" "$PREFIX/share/android-sdk"; do
+  [ -n "$d" ] && [ -d "$d" ] && [ ! -L "$d" ] || continue
+  if beneath "$d" "$HOME" || beneath "$d" "$PREFIX"; then SDK_DIR="$d"; break; fi
+done
+unset d
+
+# A program for an x86 PC on an ARM phone that has no x86 emulator (box64, qemu) to start it.
+arm_phone() {
+  case "$ARCH" in aarch64|arm*) ;; *) return 1 ;; esac
+  [ ! -e "$PREFIX/bin/box64" ] && [ ! -e "$PREFIX/bin/qemu-x86_64" ]
+}
+
+elf_foreign() {
+  local hex
+  arm_phone && [ -f "${1:-}" ] || return 1
+  hex="$(head -c 20 -- "$1" 2>/dev/null | od -An -tx1 -v | tr -d ' \n')"
+  case "$hex" in 7f454c46*) case "${hex:36:4}" in 3e00|0300) return 0 ;; esac ;; esac
+  return 1
+}
 
 # id -> path|allowed-root|mode
 target_info() {
@@ -276,6 +379,18 @@ target_info() {
     koa-archives) echo "$HOME/.storage-autopilot-archives|$HOME|contents" ;;
     gradle-caches) echo "$HOME/.gradle/caches|$HOME|contents" ;;
     home-node-modules) echo "$HOME/node_modules|$HOME|contents" ;;
+    cpan-build) echo "$HOME/.cpan/build|$HOME|contents" ;;
+    cpan-sources) echo "$HOME/.cpan/sources|$HOME|contents" ;;
+    go-mod) echo "$HOME/go/pkg/mod|$HOME|gomod" ;;
+    m2-repository) echo "$HOME/.m2/repository|$HOME|contents" ;;
+    gradle-wrapper-old) echo "$HOME/.gradle/wrapper/dists|$HOME|oldgradle" ;;
+    code-server-vsix) echo "$HOME/.local/share/code-server/CachedExtensionVSIXs|$HOME|contents" ;;
+    sdk-temp) [ -n "$SDK_DIR" ] || return 1; echo "$SDK_DIR/.temp|$FILES|contents" ;;
+    # The emulator can't run on a phone: neither its images nor, when it is built for x86 PCs, the emulator itself.
+    sdk-system-images) [ -n "$SDK_DIR" ] && arm_phone || return 1; echo "$SDK_DIR/system-images|$FILES|contents" ;;
+    sdk-emulator) [ -n "$SDK_DIR" ] && elf_foreign "$SDK_DIR/emulator/emulator" || return 1; echo "$SDK_DIR/emulator|$FILES|contents" ;;
+    # Kotlin/Native's compilers only run on PCs: what Gradle downloaded for them is dead weight on an ARM phone.
+    konan) arm_phone && compgen -G "$HOME/.konan/*x86_64*" > /dev/null || return 1; echo "$HOME/.konan|$HOME|contents" ;;
     *) return 1 ;;
   esac
 }
@@ -603,14 +718,21 @@ foreign_binaries() {
 
 # O, number of packages, up to three of them, path: every file and folder of the size map under $PREFIX that packages
 # installed or hold files in, so the browser can lock them the way delete refuses them (one pass over dpkg's lists).
+# What no package touched at all goes on to prefix_leftovers.
 emit_owners() {
-  local info="$PREFIX/var/lib/dpkg/info" tmp p
+  local info="$PREFIX/var/lib/dpkg/info" tmp p line
+  local -a unowned=()
   [ -d "$info" ] || return 0
   tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/steward-owners.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)" || return 0
   for p in "${!BIG[@]}"; do
     case "$p" in "$PREFIX"/var/lib/proot-distro|"$PREFIX"/var/lib/proot-distro/*) ;; "$PREFIX"/*) printf '%s\n' "$p" ;; esac
   done > "$tmp"
-  awk -v prefix="$PREFIX" 'FNR == NR { want[$0] = 1; next }
+  while IFS= read -r line; do
+    case "$line" in
+      O$'\t'*) printf '%s\n' "$line" >&3 ;;
+      N$'\t'*) unowned+=("${line#N$'\t'}") ;;
+    esac
+  done < <(awk -v prefix="$PREFIX" 'FNR == NR { want[$0] = 1; next }
     FNR == 1 { pkg = FILENAME; sub(/.*\//, "", pkg); sub(/\.list$/, "", pkg); sub(/:.*/, "", pkg) }
     {
       p = $0
@@ -623,8 +745,400 @@ emit_owners() {
         sub(/\/[^\/]*$/, "", p)
       }
     }
-    END { for (p in n) printf "O\t%d\t%s\t%s\n", n[p], names[p], p }' "$tmp" "$info"/*.list 2>/dev/null >&3
+    END {
+      for (p in n) printf "O\t%d\t%s\t%s\n", n[p], names[p], p
+      for (p in want) if (!(p in n)) printf "N\t%s\n", p
+    }' "$tmp" "$info"/*.list 2>/dev/null)
   rm -f -- "$tmp"
+  [ "${#unowned[@]}" -gt 0 ] && prefix_leftovers "${unowned[@]}"
+  return 0
+}
+
+# A folder in $PREFIX the steward may offer as a leftover: one level into opt, share, lib, libexec or include, and none
+# of what package managers other than dpkg keep there (npm's globals are listed as programs).
+prefix_leftover_ok() {
+  local rel="${1#"$PREFIX"/}"
+  case "$rel" in
+    opt/*/*|share/*/*|lib/*/*|libexec/*/*|include/*/*) return 1 ;;
+    opt/?*|share/?*|lib/?*|libexec/?*|include/?*) ;;
+    *) return 1 ;;
+  esac
+  case "$rel" in lib/node_modules|lib/jvm|lib/proot-distro|share/doc|share/man|share/terminfo) return 1 ;; esac
+  dir_beneath "$1" "$PREFIX"
+}
+
+# T prefix-unowned|old-python, bytes, files, path, last run, commands: folders of 8 MiB or more in $PREFIX that no
+# package installed anything in (put there by hand, or left by an uninstall), and the pip packages of a Python that
+# isn't installed any more. With the commands in $PREFIX/bin that lead into each, and when you last ran one.
+prefix_leftovers() {
+  local p rel id b target cmds last c
+  local -a list
+  declare -A into=()
+  load_history
+  for b in "$PREFIX/bin"/*; do
+    [ -L "$b" ] || continue
+    target="$(readlink -f -- "$b" 2>/dev/null)" || continue
+    for p in "$@"; do
+      [ -n "$p" ] || continue
+      case "$target" in "$p"/*) into["$p"]+="${into[$p]:+,}${b##*/}" ;; esac
+    done
+  done
+  for p in "$@"; do
+    [ -n "$p" ] && [ -d "$p" ] && [ ! -L "$p" ] && [ "${BIG[$p]:-0}" -ge 8192 ] || continue
+    prefix_leftover_ok "$p" || continue
+    rel="${p#"$PREFIX"/}"
+    id=prefix-unowned
+    if [[ "$rel" =~ ^lib/python([0-9]+\.[0-9]+)$ ]]; then
+      # The installed Python's own folder belongs to its package; pip's additions there are listed as programs.
+      [ -e "$PREFIX/bin/python${BASH_REMATCH[1]}" ] && continue
+      id=old-python
+    fi
+    cmds="${into[$p]:-}"
+    last=0
+    IFS=, read -r -a list <<< "$cmds"
+    for c in "${list[@]}"; do [ -n "$c" ] && [ "${CMD_LAST[$c]:-0}" -gt "$last" ] && last="${CMD_LAST[$c]}"; done
+    emit T "$id" "$(( ${BIG[$p]} * 1024 ))" "$(find "$p" -xdev -type f 2>/dev/null | wc -l)" "$p" "$last" "$(printf '%s' "$cmds" | cut -d, -f1-8)"
+  done
+}
+
+# ---------------------------------------------------------------- kept: what Termux runs for you and for other apps
+
+# Nothing kept is cleaned, deleted, moved out or suggested for removal, and neither is what it runs with:
+#  - anything named after Layla, a Sidekick, a relay or a mini app: Layla's Sidekick mini apps talk to relays that run
+#    in Termux, started by another app through RUN_COMMAND, so they never show up in shell history;
+#  - what Termux starts by itself (Termux:Boot scripts, enabled termux-services services, Termux:Widget shortcuts,
+#    Termux:Tasker tasks, cron jobs) and every file and folder those name;
+#  - what runs right now, other than a plain shell: its program, the script it runs and the folder it runs in;
+#  - what you listed in ~/.config/galaxy-steward/keep (one path per line; "Always keep" in the app adds to it).
+# KEPT: path -> why. KEPT_CMDS: command -> why; the packages that provide those commands stay installed.
+declare -A KEPT=() KEPT_CMDS=()
+KEEP_LOADED=""
+KEEP_FILE="$HOME/.config/galaxy-steward/keep"
+KEEP_NAMES='layla|sidekick|relay|mini-?apps?'
+MARKER='Galaxy Steward - Termux helper'
+NAMED="named like Layla's Sidekick relays"
+
+# What a kept PATH stands for. In the home: its project (the nearest folder up with a package.json, .git,
+# pyproject.toml, requirements.txt, Cargo.toml or go.mod), else its own folder; in a hidden folder of the home (a
+# tool's own, like ~/.cargo) just the path itself, so the tool's caches can still go. In $PREFIX: the add-on it
+# belongs to (an npm or pip package, a folder in opt, share, lib or libexec, a service). Never the home or $PREFIX.
+keep_unit() {
+  local p="$1" d rel
+  case "$p" in
+    "$HOME"/*)
+      if [ -d "$p" ] && [ ! -L "$p" ]; then d="$p"; else d="${p%/*}"; fi
+      while [ "$d" != "$HOME" ] && [ -n "$d" ]; do
+        if [ -e "$d/package.json" ] || [ -e "$d/.git" ] || [ -e "$d/pyproject.toml" ] || [ -e "$d/requirements.txt" ] ||
+          [ -e "$d/Cargo.toml" ] || [ -e "$d/go.mod" ]; then
+          printf '%s' "$d"
+          return 0
+        fi
+        d="${d%/*}"
+      done
+      rel="${p#"$HOME"/}"
+      case "$rel" in
+        .*) printf '%s' "$p" ;;
+        */*) if [ -d "$p" ] && [ ! -L "$p" ]; then printf '%s' "$p"; else printf '%s' "${p%/*}"; fi ;;
+        *) printf '%s' "$p" ;;
+      esac
+      ;;
+    "$PREFIX"/*)
+      rel="${p#"$PREFIX"/}"
+      if [[ "$rel" =~ ^(lib/node_modules/(@[^/]+/)?[^/]+) ]] || [[ "$rel" =~ ^(lib/python[0-9.]+/site-packages/[^/]+) ]] ||
+        [[ "$rel" =~ ^((opt|share|libexec|var/service)/[^/]+) ]] || [[ "$rel" =~ ^(lib/[^/]+)/ ]]; then
+        printf '%s' "$PREFIX/${BASH_REMATCH[1]}"
+      else
+        printf '%s' "$p"
+      fi
+      ;;
+    *) printf '%s' "$p" ;;
+  esac
+}
+
+# keep_add PATH WHY [exact]: PATH (or, without exact, what it stands for) stays. A link keeps what it leads to as well.
+keep_add() {
+  local p="${1:-}" why="$2" how="${3:-}" u t
+  [ -n "$p" ] && ! has_controls "$p" || return 0
+  p="$(realpath -m -s -- "$p" 2>/dev/null)" || return 0
+  [ -e "$p" ] || [ -L "$p" ] || return 0
+  case "$p" in "$HOME"/*|"$PREFIX"/*|"$APPDIR"/*) ;; *) return 0 ;; esac
+  if [ -L "$p" ]; then
+    t="$(readlink -f -- "$p" 2>/dev/null)"
+    [ -n "$t" ] && [ "$t" != "$p" ] && case "$t" in "$HOME"/*|"$PREFIX"/*) keep_add "$t" "$why" "$how" ;; esac
+  fi
+  if [ "$how" = exact ]; then u="$p"; else u="$(keep_unit "$p")"; fi
+  [ -n "$u" ] || return 0
+  case "$u" in "$HOME"|"$PREFIX"|"$FILES"|"$APPDIR"|"$HOME/storage"|"$HOME/storage"/*) return 0 ;; esac
+  [ -n "${KEPT[$u]:-}" ] || KEPT["$u"]="$why"
+}
+
+# The paths a script names (~/x, $HOME/x, ${HOME}/x, $PREFIX/x, ${PREFIX}/x, or the Termux folders spelled out), one
+# per line, spelled out.
+paths_in() {
+  local t
+  while IFS= read -r t; do
+    # shellcheck disable=SC2088 # a literal "~/" as the script wrote it
+    case "$t" in
+      "~/"*) t="$HOME/${t#"~/"}" ;;
+      '$HOME/'*) t="$HOME/${t#'$HOME/'}" ;;
+      '${HOME}/'*) t="$HOME/${t#'${HOME}/'}" ;;
+      '$PREFIX/'*) t="$PREFIX/${t#'$PREFIX/'}" ;;
+      '${PREFIX}/'*) t="$PREFIX/${t#'${PREFIX}/'}" ;;
+    esac
+    printf '%s\n' "$t"
+  done < <(grep -aoE '(~|\$HOME|\$\{HOME\}|\$PREFIX|\$\{PREFIX\}|/data/data/com\.termux/files|/data/user/[0-9]+/com\.termux/files)/[A-Za-z0-9._+@%,~/-]+' -- "$1" 2>/dev/null)
+}
+
+# The commands of $PREFIX/bin a script runs: its #! line and every word outside comments that names one.
+commands_in() {
+  local w
+  while IFS= read -r w; do
+    [ -n "$w" ] && [ -x "$PREFIX/bin/$w" ] && printf '%s\n' "$w"
+  done < <({ head -n 1 -- "$1" | grep -a '^#!'; grep -avE '^[[:space:]]*#' -- "$1"; } 2>/dev/null | tr -c 'A-Za-z0-9._+-' '\n' | sort -u)
+}
+
+# Everything one start-up script names stays, with the commands it runs. With "named", only the paths named after
+# Layla's relays: a shell's own start-up files mostly set things up (PATH, sourced tool settings), which says nothing.
+keep_from_script() {
+  local f="$1" why="$2" only="${3:-}" p w shown
+  [ -f "$f" ] || return 0
+  [ "$(stat -L -c %s -- "$f" 2>/dev/null || echo 0)" -le 1048576 ] || return 0
+  shown="${f/#"$HOME"/\~}"
+  [ -z "$only" ] && keep_add "$f" "$why" exact
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -n "$only" ]; then
+      [[ "${p,,}" =~ $KEEP_NAMES ]] || continue
+    fi
+    # A command named by its full path (#!$PREFIX/bin/python3) is a command it runs, not a file to list.
+    case "$p" in
+      "$PREFIX"/bin/*/*) ;;
+      "$PREFIX"/bin/*) [ -L "$p" ] || { keep_cmd "${p##*/}" "$why"; continue; } ;;
+    esac
+    keep_add "$p" "$why ($shown)"
+  done < <(paths_in "$f")
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    [ -n "${KEPT_CMDS[$w]:-}" ] || KEPT_CMDS["$w"]="$why"
+    # A command that leads out of $PREFIX/bin (a link to a relay's own script) keeps where it leads.
+    [ -L "$PREFIX/bin/$w" ] && keep_add "$PREFIX/bin/$w" "$why ($shown)"
+  done < <(commands_in "$f")
+}
+
+keep_scripts() {
+  local why f d
+  while IFS=$'\t' read -r why f; do
+    [ -n "$f" ] && ! has_controls "$f" || continue
+    keep_from_script "$f" "$why"
+  done < <(
+    find "$HOME/.termux/boot" -maxdepth 2 \( -type f -o -type l \) -printf 'started by Termux:Boot\t%p\n' 2>/dev/null
+    find "$HOME/.shortcuts" -maxdepth 3 \( -type f -o -type l \) -printf 'a Termux:Widget shortcut\t%p\n' 2>/dev/null
+    find "$HOME/.termux/tasker" -maxdepth 2 \( -type f -o -type l \) -printf 'a Termux:Tasker task\t%p\n' 2>/dev/null
+    find "$PREFIX/var/spool/cron" -maxdepth 3 -type f -printf 'a cron job\t%p\n' 2>/dev/null
+  )
+  # termux-services: a service without a "down" file starts with Termux.
+  for d in "$PREFIX/var/service"/*; do
+    [ -d "$d" ] && [ -f "$d/run" ] && [ ! -e "$d/down" ] || continue
+    keep_add "$d" "a termux-services service" exact
+    keep_from_script "$d/run" "a termux-services service"
+  done
+  for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.config/fish/config.fish"; do
+    keep_from_script "$f" "started with every Termux session" named
+  done
+}
+
+# Processes that run right now (other than this helper and what it started, and plain shells).
+keep_running() {
+  local d pid s ppid exe cwd arg first up n name
+  local -a argv
+  declare -A parent=() ours=()
+  # Read with builtins only: a phone runs a few hundred processes, and a fork for each adds up.
+  for d in /proc/[0-9]*; do
+    pid="${d#/proc/}"
+    { read -r s < "$d/stat"; } 2>/dev/null || continue
+    s="${s##*) }"
+    read -r _ ppid _ <<< "$s"
+    [[ "$ppid" =~ ^[0-9]+$ ]] && parent["$pid"]="$ppid"
+    argv=()
+    { mapfile -d '' -t argv < "$d/cmdline"; } 2>/dev/null
+    [[ "${argv[*]:0:3}" == *"$MARKER"* ]] && ours["$pid"]=1
+  done
+  ours["$$"]=1
+  [ -n "${BASHPID:-}" ] && ours["$BASHPID"]=1
+  for pid in "${!parent[@]}"; do
+    # Ours when this helper, or anything it started, is on the way up.
+    up="$pid"; n=0
+    while [ -n "$up" ] && [ "$up" != 0 ] && [ "$up" != 1 ] && [ "$n" -lt 64 ]; do
+      [ -n "${ours[$up]:-}" ] && continue 2
+      up="${parent[$up]:-}"; n=$((n + 1))
+    done
+    d="/proc/$pid"
+    exe="$(readlink -- "$d/exe" 2>/dev/null)" || continue
+    exe="${exe% (deleted)}"
+    name="${exe##*/}"
+    [ -n "$name" ] || continue
+    cwd="$(readlink -- "$d/cwd" 2>/dev/null)"
+    # A plain shell says nothing by where it sits: only the scripts it runs count.
+    case "$name" in
+      bash|zsh|fish|dash|sh|mksh|login|tmux|screen|su|sudo) ;;
+      *)
+        [ -n "${KEPT_CMDS[$name]:-}" ] || KEPT_CMDS["$name"]="running now"
+        case "$exe" in "$PREFIX"/bin/*) ;; *) keep_add "$exe" "running now ($name)" ;; esac
+        [ -n "$cwd" ] && [ "$cwd" != "$HOME" ] && keep_add "$cwd" "running now ($name)"
+        ;;
+    esac
+    argv=()
+    { mapfile -d '' -t argv < "$d/cmdline"; } 2>/dev/null
+    first=1
+    for arg in "${argv[@]}"; do
+      [ -n "$first" ] && { first=""; continue; }
+      [ -n "$arg" ] && ! has_controls "$arg" || continue
+      case "$arg" in -*) continue ;; /*) ;; *) [ -n "$cwd" ] && arg="$cwd/$arg" ;; esac
+      case "$arg" in "$HOME"/*|"$PREFIX"/*) [ -e "$arg" ] && keep_add "$arg" "running now ($name)" ;; esac
+    done
+  done
+}
+
+keep_cmd() {
+  [ -n "${1:-}" ] && [ -x "$PREFIX/bin/$1" ] && [ -z "${KEPT_CMDS[$1]:-}" ] && KEPT_CMDS["$1"]="$2"
+  return 0
+}
+
+# What a kept relay or script runs with, when nothing runs it right now: Node.js for JavaScript, Python for Python.
+# Layla starts its relays through RUN_COMMAND, so neither shell history nor dpkg knows they need these.
+keep_runtimes() {
+  local k ext
+  for k in "${!KEPT[@]}"; do
+    case "$k" in "$HOME"/*|"$PREFIX"/opt/*|"$PREFIX"/share/*|"$PREFIX"/lib/node_modules/*) ;; *) continue ;; esac
+    while IFS= read -r ext; do
+      case "$ext" in
+        js|mjs|cjs|ts) keep_cmd node "${KEPT[$k]}" ;;
+        py) keep_cmd python3 "${KEPT[$k]}"; keep_cmd python "${KEPT[$k]}" ;;
+      esac
+    done < <(find "$k" -maxdepth 3 \( -name node_modules -o -name .git -o -name __pycache__ \) -prune -o -type f \
+        \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' -o -name '*.py' \) -printf '%f\n' 2>/dev/null | sed 's/.*\.//' | sort -u)
+  done
+}
+
+keep_named() {
+  local p
+  while IFS= read -r -d '' p; do
+    has_controls "$p" && continue
+    # A decompiled Layla, or its installer, is no relay.
+    case "${p,,}" in *.apk|*.apks|*.xapk|*.apkm) continue ;; esac
+    decompiled_root "$p" && continue
+    keep_add "$p" "$NAMED" exact
+  done < <(
+    find "$HOME" -xdev -mindepth 1 -maxdepth 4 \( -path "$HOME/storage" -o -name .git -o -name node_modules \
+      -o -iname '*-rootfs' -o -name installed-rootfs -o -name .gradle -o -name .m2 -o -name .rustup -o -name .npm \) -prune \
+      -o -regextype posix-extended -iregex ".*/[^/]*(${KEEP_NAMES})[^/]*" -print0 -prune 2>/dev/null
+    find "$PREFIX" -xdev -mindepth 1 -maxdepth 4 \( -path "$PREFIX/var/lib/proot-distro" -o -path "$PREFIX/share/doc" \
+      -o -path "$PREFIX/share/man" -o -path "$PREFIX/include" -o -path "$PREFIX/glibc" -o -path "$PREFIX/tmp" \) -prune \
+      -o -regextype posix-extended -iregex ".*/[^/]*(${KEEP_NAMES})[^/]*" -print0 -prune 2>/dev/null
+  )
+}
+
+keep_listed() {
+  local line
+  [ -f "$KEEP_FILE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    # shellcheck disable=SC2088 # a literal "~/" as the list says it
+    case "$line" in ''|'#'*) continue ;; "~/"*) line="$HOME/${line#"~/"}" ;; esac
+    keep_add "$line" "you chose to keep it" exact
+  done < "$KEEP_FILE"
+}
+
+# ~/node_modules serves every script of the home that doesn't find a package closer: kept when a kept script is one.
+home_modules_needed() {
+  local k
+  [ -d "$HOME/node_modules" ] || return 1
+  for k in "${!KEPT[@]}"; do
+    case "$k" in "$HOME"/node_modules|"$HOME"/node_modules/*|"$HOME"/.*) continue ;; "$HOME"/*) ;; *) continue ;; esac
+    if [ -f "$k" ]; then
+      case "$k" in *.js|*.mjs|*.cjs|*.ts) printf '%s' "$k"; return 0 ;; esac
+    elif find "$k" -maxdepth 3 -name node_modules -prune -o -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' \) \
+      -print -quit 2>/dev/null | grep -q .; then
+      printf '%s' "$k"
+      return 0
+    fi
+  done
+  return 1
+}
+
+load_keep() {
+  local k
+  [ -n "$KEEP_LOADED" ] && return 0
+  KEEP_LOADED=1
+  keep_listed
+  keep_named
+  keep_scripts
+  keep_running
+  keep_runtimes
+  if [ -z "${KEPT[$HOME/node_modules]:-}" ] && k="$(home_modules_needed)"; then
+    KEPT["$HOME/node_modules"]="${k/#"$HOME"/\~} runs with it (${KEPT[$k]})"
+  fi
+  return 0
+}
+
+# Why PATH has to stay, when it is kept, inside something kept or holds something kept; fails when it may go.
+kept_why() {
+  local p="$1" k
+  for k in "${!KEPT[@]}"; do
+    case "$p" in "$k"|"$k"/*) printf '%s: %s' "${k/#"$HOME"/\~}" "${KEPT[$k]}"; return 0 ;; esac
+    case "$k" in "$p"/*) printf '%s: %s' "${k/#"$HOME"/\~}" "${KEPT[$k]}"; return 0 ;; esac
+  done
+  return 1
+}
+
+# Packages the kept things run with: those that put a kept command in $PREFIX/bin or installed a kept path, to why.
+declare -A KEPT_PKGS=()
+load_kept_pkgs() {
+  local info="$PREFIX/var/lib/dpkg/info" tmp k c pkg why
+  load_keep
+  [ -d "$info" ] || return 0
+  tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/steward-kept.XXXXXX" 2>/dev/null || mktemp 2>/dev/null)" || return 0
+  {
+    for c in "${!KEPT_CMDS[@]}"; do printf '%s\t%s\n' "$PREFIX/bin/$c" "${KEPT_CMDS[$c]} ($c)"; done
+    # Not what is kept only for its name: a package's own files named "relay" say nothing about Layla.
+    for k in "${!KEPT[@]}"; do
+      [ "${KEPT[$k]}" = "$NAMED" ] && continue
+      case "$k" in "$PREFIX"/*) printf '%s\t%s\n' "$k" "${KEPT[$k]}" ;; esac
+    done
+  } > "$tmp"
+  while IFS=$'\t' read -r pkg why; do
+    [ -n "$pkg" ] && [ -z "${KEPT_PKGS[$pkg]:-}" ] && KEPT_PKGS["$pkg"]="$why"
+  done < <(awk -F'\t' 'FNR == NR { want[$1] = $2; next }
+    FNR == 1 { pkg = FILENAME; sub(/.*\//, "", pkg); sub(/\.list$/, "", pkg); sub(/:.*/, "", pkg) }
+    ($0 in want) && !(pkg in done) { done[pkg] = 1; print pkg "\t" want[$0] }' "$tmp" "$info"/*.list 2>/dev/null)
+  rm -f -- "$tmp"
+  return 0
+}
+
+# keep|unkeep PATH...: adds to or takes from ~/.config/galaxy-steward/keep.
+keep_edit() {
+  local op="$1" p tmp
+  shift
+  emit V 1 "$HOME" "$PREFIX" 0
+  [ "$#" -gt 0 ] || refuse "no paths given"
+  mkdir -p -- "${KEEP_FILE%/*}" 2>/dev/null
+  if [ ! -f "$KEEP_FILE" ]; then
+    printf '%s\n' "# Galaxy Steward never cleans, deletes or moves what is listed here: one path per line, ~ for the home." > "$KEEP_FILE" 2>/dev/null
+  fi
+  for p in "$@"; do
+    if has_controls "$p"; then result keep SKIP_UNSAFE 0 0 "" "control characters"; continue; fi
+    case "$p" in "$FILES"/*) ;; *) result keep SKIP_UNSAFE 0 0 "$p" "outside Termux"; continue ;; esac
+    if [ "$op" = keep ]; then
+      grep -qxF -- "$p" "$KEEP_FILE" 2>/dev/null || printf '%s\n' "$p" >> "$KEEP_FILE"
+      result keep KEPT 0 0 "$p" ""
+    else
+      tmp="$KEEP_FILE.steward-tmp"
+      grep -vxF -- "$p" "$KEEP_FILE" > "$tmp" 2>/dev/null
+      mv -f -- "$tmp" "$KEEP_FILE"
+      result keep UNKEPT 0 0 "$p" ""
+    fi
+  done
+  finish ok
 }
 
 # ---------------------------------------------------------------- audit
@@ -655,7 +1169,10 @@ audit() {
   local id info p root mode m bytes files d name active=0 r s k count=0 repo art rest
   proot_running && active=1
   emit V 1 "$HOME" "$PREFIX" "$active"
+  timed keep load_keep
   timed sizes load_sizes
+  # A, bytes, path, why: what stays whatever you pick (the app leaves it out of every clean-up).
+  for k in "${!KEPT[@]}"; do emit A "$(size_of "$k")" "$k" "${KEPT[$k]}"; done
 
   # The optional extras only go into the --out file. They read the size map and nothing else of this function, so
   # they run alongside the rest (a phone has eight cores and the storage answers in parallel); each in its own
@@ -708,6 +1225,15 @@ audit() {
       [ "${files:-0}" -gt 0 ] && emit T other-cache "$bytes" "$files" "$d"
     done
   fi
+
+  # Caches of Chromium and Electron apps in ~/.config, and what crashed programs left in the home.
+  while IFS=$'\t' read -r -d '' id d; do
+    if [ "$id" = app-logs ]; then m="$(measure old "$d")"; else m="$(measure contents "$d")"; fi
+    [ "${m#*$'\t'}" -gt 0 ] && emit T "$id" "${m%%$'\t'*}" "${m#*$'\t'}" "$d"
+  done < <(app_caches)
+  while IFS=$'\t' read -r -d '' id d; do
+    emit T "$id" "$(stat -c %s -- "$d" 2>/dev/null || echo 0)" 1 "$d"
+  done < <(crash_dumps)
 
   # proot distributions: inventory, and caches of inactive ones.
   while IFS= read -r -d '' r; do
@@ -847,6 +1373,19 @@ clear_path() {
         beneath "$e" "$p" && rm -rf -- "$e"
       done < <(if [ "$mode" = oldversions ]; then old_versions "$p"; else old_versions "$p" unsure; fi)
       ;;
+    oldgradle)
+      dir_beneath "$p" "$root" || return 1
+      while IFS= read -r -d '' e; do
+        beneath "$e" "$p" && rm -rf -- "$e"
+      done < <(old_gradle_dists "$p")
+      ;;
+    gomod)
+      # Everything but the download cache, which has its own target; Go makes it read-only.
+      dir_beneath "$p" "$root" || return 1
+      while IFS= read -r -d '' e; do
+        beneath "$e" "$p" && chmod -R u+w -- "$e" 2>/dev/null && rm -rf -- "$e"
+      done < <(find "$p" -xdev -mindepth 1 -maxdepth 1 ! -name cache -print0 2>/dev/null)
+      ;;
     contents|contents-rw)
       dir_beneath "$p" "$root" || return 1
       # Go makes its module cache read-only; make it writable again before removing it.
@@ -858,11 +1397,21 @@ clear_path() {
 }
 
 clean_one() {
-  local spec="$1" id p info root mode before after repo r suffix
+  local spec="$1" id p info root mode before after repo r suffix why
   id="${spec%%=*}"
   p=""
   [ "$id" != "$spec" ] && p="${spec#*=}"
   if has_controls "$spec"; then result "$id" SKIP_UNSAFE 0 0 "" "control characters"; return; fi
+  # What only goes by age, or is rebuilt on the next run, can't break what is kept; anything else that would touch a
+  # kept path stays.
+  case "$id" in
+    pycache|proot-tmp|termux-tmp|var-tmp|termux-var-log|npm-logs|gradle-daemon-logs|apt-archives|apt-pkgcache|claude-versions|claude-versions-unsure|app-logs) ;;
+    *)
+      # Fixed targets name their folder in target_info; the others carry it.
+      [ -n "$p" ] || { info="$(target_info "$id")" && p="${info%%|*}"; }
+      if [ -n "$p" ] && why="$(kept_why "$p")"; then result "$id" SKIP_KEPT 0 0 "$p" "$why"; return; fi
+      ;;
+  esac
 
   case "$id" in
     other-cache)
@@ -902,9 +1451,14 @@ clean_one() {
       fi
       return
       ;;
-    decompiled|home-apk|foreign-ndk|l2s-orphan)
+    decompiled|home-apk|foreign-ndk|l2s-orphan|prefix-unowned|old-python|crash-log|heap-dump)
       leftover_one "$id" "$p"
       return
+      ;;
+    app-cache|app-logs)
+      app_cache_ok "$id" "$p" || { result "$id" SKIP_UNSAFE 0 0 "$p" "not a cache folder of an app's profile in ~/.config"; return; }
+      root="$HOME"
+      if [ "$id" = app-logs ]; then mode=old; else mode=contents; fi
       ;;
     *)
       info="$(target_info "$id")" || { result "$id" SKIP_UNKNOWN 0 0 "" "unknown target"; return; }
@@ -930,6 +1484,7 @@ leftover_one() {
   case "$id" in
     decompiled) decompiled_ok "$p" || why="no longer a decompiled app on its own (in a Git project, or holds a key)" ;;
     home-apk) home_apk_ok "$p" || why="not an APK in the home" ;;
+    crash-log|heap-dump) [ "$(crash_dump_kind "$p")" = "$id" ] || why="not a crash log or dump older than a day" ;;
     foreign-ndk)
       if r="$(rootfs_of "$p")"; then
         if ! [[ "${p#"$r"/}" =~ $DISTRO_FREE ]] || ! dir_beneath "$p" "$r"; then why="part of the distribution's system"; fi
@@ -939,6 +1494,18 @@ leftover_one() {
       fi
       if [ -z "$why" ] && ! foreign_ndk_ok "$p"; then why="not an NDK built only for x86-64"; fi
       if [ -z "$why" ] && x86_emulator "${r:-$HOME}"; then why="an x86-64 emulator is installed"; fi
+      ;;
+    prefix-unowned|old-python)
+      if ! prefix_leftover_ok "$p" || [ ! -d "$p" ]; then
+        why="not a folder directly in \$PREFIX's opt, share, lib, libexec or include"
+      elif [ -n "$(pkg_owners "$p")" ]; then
+        why="a package installed files in it"
+      elif [ "$id" = old-python ] && [[ "${p#"$PREFIX"/}" =~ ^lib/python([0-9]+\.[0-9]+)$ ]] && [ -e "$PREFIX/bin/python${BASH_REMATCH[1]}" ]; then
+        why="that Python is installed again"
+      else
+        why="$(private_key_in "$p")"
+        [ -n "$why" ] && why="holds ${why##*/}"
+      fi
       ;;
     l2s-orphan)
       if r="$(rootfs_of "$p")"; then
@@ -954,6 +1521,8 @@ leftover_one() {
   before="$(size_now "$p")"
   [ -d "$p" ] && chmod -R u+rwX -- "$p" 2>/dev/null
   rm -rf -- "$p" 2>/dev/null
+  # Commands that led into a folder of $PREFIX now lead nowhere: they go with it.
+  case "$id" in prefix-unowned|old-python) [ -e "$p" ] || drop_dead_links "$p" ;; esac
   if [ -e "$p" ]; then
     result "$id" PARTIAL "$before" "$(size_now "$p")" "$p" "some files could not be removed"
   else
@@ -961,9 +1530,21 @@ leftover_one() {
   fi
 }
 
+# Removes the links in $PREFIX/bin that pointed into DIR (now gone) and point nowhere.
+drop_dead_links() {
+  local gone="$1" b raw abs
+  for b in "$PREFIX/bin"/*; do
+    [ -L "$b" ] && [ ! -e "$b" ] || continue
+    raw="$(readlink -- "$b" 2>/dev/null)" || continue
+    case "$raw" in /*) abs="$raw" ;; *) abs="$(realpath -m -- "$PREFIX/bin/$raw" 2>/dev/null)" || continue ;; esac
+    case "$abs" in "$gone"/*) rm -f -- "$b" ;; esac
+  done
+}
+
 clean() {
   local spec
   emit V 1 "$HOME" "$PREFIX" 0
+  load_keep
   for spec in "$@"; do clean_one "$spec"; done
   finish ok
 }
@@ -1010,6 +1591,8 @@ function seen(line, ts,    n, i, m, j, w, seg, words) {
       if (w == "sudo" || w == "env" || w == "time" || w == "nohup" || w == "exec" || w == "command" || w == "builtin" || w == "nice" || w == "then" || w == "do" || w == "!") continue
       sub(/^.*\//, "", w)
       if (w ~ /^[A-Za-z0-9][A-Za-z0-9._+-]*$/) { if (ts > last[w]) last[w] = ts; count[w]++ }
+      total++
+      if (ts > 0 && (oldest == 0 || ts < oldest)) oldest = ts
       break
     }
   }
@@ -1021,7 +1604,7 @@ kind[FILENAME] == "fish" && /^- cmd: / { pending = substr($0, 8); next }
 kind[FILENAME] == "fish" && /^  when: [0-9]+/ { if (pending != "") seen(pending, substr($0, 9) + 0); pending = ""; next }
 kind[FILENAME] == "fish" { next }
 { seen($0, ts); if (kind[FILENAME] == "bash") ts = 0 }
-END { for (w in count) printf "%s\t%d\t%d\n", w, last[w], count[w] }'
+END { for (w in count) printf "%s\t%d\t%d\n", w, last[w], count[w]; printf "#span\t%d\t%d\n", oldest, total }'
 
 declare -A CMD_LAST=() CMD_USES=()
 load_history() {
@@ -1056,6 +1639,7 @@ packages() {
   emit V 1 "$HOME" "$PREFIX" 0
   [ -x "$PREFIX/bin/dpkg-query" ] || refuse "dpkg-query is missing"
   crash_point packages
+  load_kept_pkgs
   while IFS= read -r name; do [ -n "$name" ] && manual["$name"]=1; done < <("$PREFIX/bin/apt-mark" showmanual 2>/dev/null)
   load_history
   # The commands each package put in $PREFIX/bin, and when it was installed or last updated (its file list's time).
@@ -1074,9 +1658,11 @@ packages() {
     m=0; [ -n "${manual[$name]:-}" ] && m=1
     usage_of "${commands[$name]:-}"
     emit K "$name" "$size" "$m" "$protected" "$version" "$deps" "$summary" "${installed[$name]:-0}" "$LAST" "$USES" \
-      "$(printf '%s' "${commands[$name]:-}" | cut -d, -f1-12)"
+      "$(printf '%s' "${commands[$name]:-}" | cut -d, -f1-12)" "${KEPT_PKGS[$name]:-}"
   done < <(load_packages)
   # Each package manager on its own: one that trips can't cost the package list.
+  # J, oldest time in the history (0 when it keeps none), commands in it: how far "never run" can be trusted.
+  emit J "${CMD_LAST[#span]:-0}" "${CMD_USES[#span]:-0}"
   optional npm npm_programs
   optional pip pip_programs
   optional cargo cargo_programs
@@ -1168,8 +1754,9 @@ PY_NAME='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
 # Uninstalls programs with the package manager that installed them, and checks each is gone.
 prog_remove() {
-  local mgr="${1:-}" n d before log
+  local mgr="${1:-}" n d before log why b w
   emit V 1 "$HOME" "$PREFIX" 0
+  load_keep
   shift || true
   [ "$#" -gt 0 ] || refuse "no programs given"
   case "$mgr" in
@@ -1180,6 +1767,7 @@ prog_remove() {
         d="$PREFIX/lib/node_modules/$n"
         case "$n" in npm|corepack) result "$n" SKIP_PROTECTED 0 0 "$d" "npm needs it"; continue ;; esac
         dir_beneath "$d" "$PREFIX" || { result "$n" NO_CHANGE 0 0 "$d" "not installed"; continue; }
+        if why="$(kept_why "$d")"; then result "$n" SKIP_KEPT 0 0 "$d" "$why"; continue; fi
         before="$(size_now "$d")"
         log="$(npm rm -g -- "$n" 2>&1 < /dev/null)" || emit W "npm: $(printf '%s\n' "$log" | tail -n 1)"
         if [ -e "$d" ]; then result "$n" FAILED "$before" "$before" "$d" "still installed"; else result "$n" REMOVED "$before" 0 "$d" ""; fi
@@ -1204,6 +1792,13 @@ prog_remove() {
       command -v cargo > /dev/null 2>&1 || refuse "cargo is not installed"
       for n in "$@"; do
         grep -q "^\"$n " "$HOME/.cargo/.crates.toml" 2>/dev/null || { result "$n" NO_CHANGE 0 0 "" "not installed with cargo"; continue; }
+        why=""
+        for b in $(grep "^\"$n " "$HOME/.cargo/.crates.toml" 2>/dev/null | head -n 1 | sed 's/^[^=]*=//' | tr -d '[]" ' | tr ',' ' '); do
+          [ -n "$b" ] || continue
+          if w="$(kept_why "$HOME/.cargo/bin/$b")"; then why="$w"; break; fi
+          [ -n "${KEPT_CMDS[$b]:-}" ] && { why="$b: ${KEPT_CMDS[$b]}"; break; }
+        done
+        if [ -n "$why" ]; then result "$n" SKIP_KEPT 0 0 "" "$why"; continue; fi
         before="$(cargo_bytes "$n")"
         log="$(cargo uninstall -- "$n" 2>&1 < /dev/null)" || emit W "cargo: $(printf '%s\n' "$log" | tail -n 1)"
         if grep -q "^\"$n " "$HOME/.cargo/.crates.toml" 2>/dev/null; then result "$n" FAILED "$before" "$before" "" "still installed"
@@ -1261,13 +1856,14 @@ pkg_plan() {
   emit V 1 "$HOME" "$PREFIX" 0
   valid_packages "$@"
   load_packages > /dev/null
+  load_kept_pkgs
   for n in "$@"; do want["$n"]=1; done
   if ! err="$(simulate_remove "$@" 2>&1 >/dev/null)"; then emit W "apt refused: $err"; finish ok; fi
   while IFS= read -r n; do base["$n"]=1; done < <(simulate_remove "$@" 2>/dev/null)
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     if [ -n "${want[$n]:-}" ]; then kind=requested; elif [ -n "${base[$n]:-}" ]; then kind=dependent; else kind=orphan; fi
-    emit P "$n" "${PKG_SIZE[$n]:-0}" "$kind" "${PKG_PROTECTED[$n]:-0}"
+    emit P "$n" "${PKG_SIZE[$n]:-0}" "$kind" "${PKG_PROTECTED[$n]:-0}" "${KEPT_PKGS[$n]:-}"
   done < <(simulate_remove --autoremove "$@" 2>/dev/null)
   finish ok
 }
@@ -1279,11 +1875,13 @@ pkg_remove() {
   if [ "${1:-}" = --autoremove ]; then auto=--autoremove; shift; fi
   valid_packages "$@"
   load_packages > /dev/null
+  load_kept_pkgs
   # Checked again here: the dry run decides, and one protected package stops the whole removal.
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     gone["$n"]=1
-    if [ "${PKG_PROTECTED[$n]:-0}" = 1 ]; then result "$n" SKIP_PROTECTED 0 0 "" "Termux needs it"; refused=1; fi
+    if [ "${PKG_PROTECTED[$n]:-0}" = 1 ]; then result "$n" SKIP_PROTECTED 0 0 "" "Termux needs it"; refused=1
+    elif [ -n "${KEPT_PKGS[$n]:-}" ]; then result "$n" SKIP_KEPT 0 0 "" "${KEPT_PKGS[$n]}"; refused=1; fi
   done < <(simulate_remove $auto "$@" 2>/dev/null)
   [ "${#gone[@]}" -gt 0 ] || { emit W "apt would not remove anything"; finish ok; }
   [ "$refused" = 1 ] && finish ok
@@ -1372,6 +1970,7 @@ delete_one() {
   local p="$1" rel r c owners before after key inside=""
   if has_controls "$p"; then result path SKIP_UNSAFE 0 0 "" "control characters"; return; fi
   if [ ! -e "$p" ] && [ ! -L "$p" ]; then result path NO_CHANGE 0 0 "$p" "already gone"; return; fi
+  if key="$(kept_why "$p")"; then result path SKIP_KEPT 0 0 "$p" "$key"; return; fi
   while IFS= read -r -d '' c; do
     case "$p" in "$c"/*) rootfs_allowed "$c" && inside="$c" ;; esac
   done < <(list_rootfs)
@@ -1418,6 +2017,7 @@ delete_one() {
 delete_paths() {
   local p
   emit V 1 "$HOME" "$PREFIX" 0
+  load_keep
   for p in "$@"; do delete_one "$p"; done
   finish ok
 }
@@ -1584,11 +2184,13 @@ relocate() {
 
 # Back again: a folder relocate made, to where it came from.
 relocate_back() {
-  local src="${1:-}" dest="${2:-}"
+  local src="${1:-}" dest="${2:-}" why
   emit V 1 "$HOME" "$PREFIX" 0
   case "$src" in "$HOME"/projects/*) ;; *) result move SKIP_UNSAFE 0 0 "$src" "not a folder in ~/projects"; finish ok ;; esac
   case "${src#"$HOME"/projects/}" in */*|.*) result move SKIP_UNSAFE 0 0 "$src" "not a folder in ~/projects"; finish ok ;; esac
   dir_beneath "$src" "$HOME" || { result move SKIP_UNSAFE 0 0 "$src" "missing or symlinked"; finish ok; }
+  load_keep
+  if why="$(kept_why "$src")"; then result move SKIP_KEPT 0 0 "$src" "$why"; finish ok; fi
   case "$dest" in "$SHARED"/*/*) ;; *) result move SKIP_UNSAFE 0 0 "$src" "not a place in shared storage"; finish ok ;; esac
   has_controls "$dest" && { result move SKIP_UNSAFE 0 0 "$src" "unsafe name"; finish ok; }
   case "/${dest#"$SHARED"/}/" in */../*|*/./*|*//*|/Android/*) result move SKIP_UNSAFE 0 0 "$src" "not a place in shared storage"; finish ok ;; esac
@@ -1611,5 +2213,6 @@ case "$MODE" in
   git-gc) git_gc "$@" ;;
   relocate) relocate "$@" ;;
   relocate-back) relocate_back "$@" ;;
+  keep|unkeep) keep_edit "$MODE" "$@" ;;
   *) refuse "unknown mode: $MODE" ;;
 esac

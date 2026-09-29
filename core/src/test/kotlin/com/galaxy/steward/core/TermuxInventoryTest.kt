@@ -340,6 +340,10 @@ class TermuxInventoryTest {
         assertEquals(1_700_002_000_000L, packages.getValue("python").lastUsed)
         assertEquals(2, packages.getValue("python").uses)
         assertEquals(0L, packages.getValue("bash").lastUsed)
+        // The history reaches back to its oldest dated command: "never run" holds from then on.
+        val span = TermuxProtocol.parseHistorySpan(output)
+        assertEquals(1_700_000_000_000L, span.since)
+        assertTrue(span.commands > 0)
 
         val programs = TermuxProtocol.parsePrograms(output).associateBy { it.key }
         assertEquals(setOf("npm:@mmmbuto/codex-cli-termux", "npm:npm", "pip:requests", "cargo:ripgrep"), programs.keys)
@@ -381,6 +385,172 @@ class TermuxInventoryTest {
         assertTrue(report.entries.isNotEmpty())
         assertTrue(report.timings.keys.toString(), report.timings.keys.containsAll(setOf("sizes", "targets", "duplicates", "sketches", "owners", "foreign")))
         assertTrue(com.galaxy.steward.core.RunLog.termux(report, 1000).contains("; parts "))
+    }
+
+    @Test
+    fun whatLaylasRelaysAndTermuxItselfStartIsNeverTouched() {
+        fakeDpkg()
+        tool("python3", "exit 0")
+        tool("node", "exit 0")
+        File(prefix, "var/lib/dpkg/fake-status.tsv").appendText("nodejs\t50000\tinstall ok installed\t\toptional\t24.0\t\t\tJavaScript runtime\n")
+        text(File(prefix, "var/lib/dpkg/info/nodejs.list"), "${prefix.path}/bin/node\n")
+        tool("apt-get", "[ \"\$1\" = -s ] || exit 1; shift 3; for n; do [ \"\$n\" = --autoremove ] || echo \"Remv \$n [1]\"; done")
+        // Layla's Sidekick relay: a Node script in the home that runs with ~/node_modules. Nothing starts it here;
+        // Layla does, through RUN_COMMAND, so only its name tells.
+        text(File(home, "sidekick-relay/relay.js"), "require('ws')\n")
+        write(File(home, "node_modules/ws/index.js"), 2 * mib, 1)
+        // A server Termux:Boot starts with Python.
+        text(File(home, ".termux/boot/start-bridge"), "#!/data/data/com.termux/files/usr/bin/sh\n# keep the phone awake\npython3 ~/bridge/serve.py &\n")
+        text(File(home, "bridge/serve.py"), "print('up')\n")
+        // A tool running right now, from its own folder; something you chose to keep; something nobody keeps.
+        val running = File(home, "tools/watcher").apply { mkdirs() }
+        write(File(home, "models/keepme.bin"), 1000)
+        write(File(home, "scratch/old.bin"), 1000)
+        // An add-on in \$PREFIX named after the relay (no package installed it, so it would be a leftover).
+        write(File(prefix, "opt/layla-sidekick/relay.bin"), 9 * mib, 2)
+
+        val sleeper = ProcessBuilder("sleep", "120").directory(running).start()
+        try {
+            val kept = File(home, "models/keepme.bin").path
+            assertEquals("KEPT", TermuxProtocol.parseClean(run("keep", listOf(kept))).results.single().status)
+            assertTrue(File(home, ".config/galaxy-steward/keep").readText().lines().contains(kept))
+
+            val report = TermuxProtocol.parseAudit(run("audit"))
+            val why = report.kept.associate { it.path to it.why }
+            assertEquals("named like Layla's Sidekick relays", why[File(home, "sidekick-relay").path])
+            assertEquals("named like Layla's Sidekick relays", why[File(prefix, "opt/layla-sidekick").path])
+            assertTrue(why.toString(), why[File(home, "node_modules").path].orEmpty().contains("runs with it"))
+            assertEquals("started by Termux:Boot (~/.termux/boot/start-bridge)", why[File(home, "bridge").path])
+            assertEquals("started by Termux:Boot", why[File(home, ".termux/boot/start-bridge").path])
+            assertEquals("running now (sleep)", why[running.path])
+            assertEquals("you chose to keep it", why[kept])
+            assertNull(why[File(home, "scratch").path])
+            // Nothing kept is offered: ~/node_modules and the \$PREFIX add-on are held back, and say why.
+            assertTrue(report.items.none { it.targetId == "home-node-modules" || it.path.contains("layla") })
+            assertEquals(setOf("home-node-modules", "prefix-unowned"), report.held.map { it.targetId }.toSet())
+            assertTrue(com.galaxy.steward.core.termux.TermuxLocks.reason(File(home, "tools").path, report)!!.startsWith("Kept - ~/tools/watcher"))
+
+            // The helper refuses them itself, whatever the app sends.
+            val deleted = TermuxProtocol.parseClean(
+                run("delete", listOf("sidekick-relay", "bridge/serve.py", "tools", "models/keepme.bin", "scratch").map { File(home, it).path }),
+            ).results
+            assertEquals(listOf("SKIP_KEPT", "SKIP_KEPT", "SKIP_KEPT", "SKIP_KEPT", "CLEARED"), deleted.map { it.status })
+            assertTrue(File(home, "sidekick-relay/relay.js").exists() && File(home, "bridge/serve.py").exists() && running.exists())
+            val cleaned = TermuxProtocol.parseClean(run("clean", listOf("home-node-modules", "prefix-unowned=" + File(prefix, "opt/layla-sidekick").path))).results
+            assertEquals(listOf("SKIP_KEPT", "SKIP_KEPT"), cleaned.map { it.status })
+            assertTrue(File(home, "node_modules/ws/index.js").exists())
+
+            // Python stays installed: the Boot script runs it.
+            val packages = TermuxProtocol.parsePackages(run("packages")).associateBy { it.name }
+            assertEquals("started by Termux:Boot (python3)", packages.getValue("python").keptBy)
+            // Nothing runs the relay now and no history shows it (Layla starts it): Node.js stays for it all the same.
+            assertEquals("named like Layla's Sidekick relays (node)", packages.getValue("nodejs").keptBy)
+            assertEquals("", packages.getValue("git").keptBy)
+            assertTrue(TermuxProtocol.parsePlan(run("pkg-plan", listOf("python"))).blocked)
+            assertEquals("SKIP_KEPT", TermuxProtocol.parseClean(run("pkg-remove", listOf("python"))).results.single().status)
+            assertTrue(File(prefix, "var/lib/dpkg/info/python.list").exists())
+
+            // Taken off your list, it can go.
+            assertEquals("UNKEPT", TermuxProtocol.parseClean(run("unkeep", listOf(kept))).results.single().status)
+            assertEquals("CLEARED", TermuxProtocol.parseClean(run("delete", listOf(kept))).results.single().status)
+        } finally {
+            sleeper.destroy()
+        }
+    }
+
+    @Test
+    fun foldersNoPackageInstalledSayWhatLeadsIntoThemAndGoWithTheirCommands() {
+        fakeDpkg()
+        write(File(prefix, "opt/old-tool/lib/core.bin"), 9 * mib, 4)
+        text(File(prefix, "opt/old-tool/bin/oldtool"), "#!/bin/sh\n")
+        Files.createSymbolicLink(File(prefix, "bin/oldtool").toPath(), File("../opt/old-tool/bin/oldtool").toPath())
+        text(File(home, ".bash_history"), "#1700000000\noldtool --help\n")
+        // pip's packages for Python 3.11, which Termux has since replaced with 3.12 (python owns lib/python3.12).
+        write(File(prefix, "lib/python3.11/site-packages/numpy/core.so"), 9 * mib, 5)
+
+        val report = TermuxProtocol.parseAudit(run("audit"))
+        val unowned = report.items.single { it.targetId == "prefix-unowned" }
+        assertEquals(File(prefix, "opt/old-tool").path, unowned.path)
+        assertEquals(listOf("oldtool"), unowned.commands)
+        assertEquals(1_700_000_000_000L, unowned.lastUsed)
+        assertEquals(File(prefix, "lib/python3.11").path, report.items.single { it.targetId == "old-python" }.path)
+        assertTrue(report.items.none { it.path == File(prefix, "lib/python3.12").path })
+
+        val results = TermuxProtocol.parseClean(run("clean", listOf(unowned.spec, "old-python=" + File(prefix, "lib/python3.11").path))).results
+        assertEquals(listOf("CLEARED", "CLEARED"), results.map { it.status })
+        assertFalse(File(prefix, "opt/old-tool").exists())
+        // Its command led nowhere after it: it went too.
+        assertFalse(Files.isSymbolicLink(File(prefix, "bin/oldtool").toPath()))
+    }
+
+    @Test
+    fun deeperPlacesInTheHomeAreFoundAndCheckedAgain() {
+        val old = System.currentTimeMillis() - 30 * DAY_MS
+        // Chromium's and Code - OSS's caches, in folders that are plainly their profiles; a look-alike that isn't.
+        text(File(home, ".config/chromium/Default/Preferences"), "{}")
+        write(File(home, ".config/chromium/Default/Cache/data_1"), 2 * mib, 1)
+        text(File(home, ".config/chromium/Local State"), "{}")
+        write(File(home, ".config/chromium/GrShaderCache/data_0"), 1000, 2)
+        text(File(home, ".config/Code - OSS/User/settings.json"), "{}")
+        write(File(home, ".config/Code - OSS/Code Cache/js/index"), 3000, 3)
+        write(File(home, ".config/Code - OSS/logs/20260801/main.log"), 500, 4, mtime = old)
+        write(File(home, ".config/some-tool/Cache/state.db"), 4000, 5)
+        // Three Gradle versions: a project asks for 8.2, 8.9 is the newest, 8.7 nobody needs.
+        write(File(home, ".gradle/wrapper/dists/gradle-8.2-bin/a/gradle-8.2-bin.zip"), 1000, 6)
+        write(File(home, ".gradle/wrapper/dists/gradle-8.7-bin/b/gradle-8.7-bin.zip"), 2000, 7)
+        write(File(home, ".gradle/wrapper/dists/gradle-8.9-bin/c/gradle-8.9-bin.zip"), 3000, 8)
+        File(home, ".gradle/wrapper/dists/gradle-8.2-bin").setLastModified(old)
+        File(home, ".gradle/wrapper/dists/gradle-8.7-bin").setLastModified(old + DAY_MS)
+        text(File(home, "app/gradle/wrapper/gradle-wrapper.properties"), "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.2-bin.zip\n")
+        write(File(home, ".cpan/build/Foo-1.0/Makefile"), 1000, 9)
+        // What crashed Java programs left: logs and a heap dump from last month, and one being written now.
+        write(File(home, "hs_err_pid123.log"), 800, 10, mtime = old)
+        write(File(home, "app/java_pid9.hprof"), 5000, 11, mtime = old)
+        write(File(home, "app/fresh.hprof"), 5000, 12)
+        // An Android SDK with emulator images, the x86-64 emulator and an unfinished download.
+        write(File(home, "android-sdk/system-images/android-34/google_apis/arm64-v8a/system.img"), 2 * mib, 13)
+        val elf = ByteArray(64).also { b ->
+            byteArrayOf(0x7f, 0x45, 0x4c, 0x46, 2, 1, 1).copyInto(b)
+            b[16] = 2
+            b[18] = 0x3e
+        }
+        File(home, "android-sdk/emulator").mkdirs()
+        File(home, "android-sdk/emulator/emulator").writeBytes(elf)
+        write(File(home, "android-sdk/.temp/PackageOperation01/x.zip"), 1000, 14)
+        write(File(home, ".konan/kotlin-native-prebuilt-linux-x86_64-2.0.21/bin/konanc"), 1000, 15)
+
+        val report = TermuxProtocol.parseAudit(run("audit", env = mapOf("STEWARD_FIXTURE_ARCH" to "aarch64")))
+        fun at(id: String) = report.items.filter { it.targetId == id }.map { it.path.removePrefix(home.path + "/") }.toSet()
+        assertEquals(setOf(".config/chromium/Default/Cache", ".config/chromium/GrShaderCache", ".config/Code - OSS/Code Cache"), at("app-cache"))
+        assertEquals(setOf(".config/Code - OSS/logs"), at("app-logs"))
+        assertEquals(setOf("hs_err_pid123.log"), at("crash-log"))
+        assertEquals(setOf("app/java_pid9.hprof"), at("heap-dump"))
+        assertEquals(2000L, report.items.single { it.targetId == "gradle-wrapper-old" }.bytes)
+        listOf("cpan-build", "sdk-system-images", "sdk-emulator", "sdk-temp", "konan").forEach { id ->
+            assertTrue("$id missing: ${report.items.map { it.targetId }}", report.items.any { it.targetId == id })
+        }
+        // On a PC the emulator and Kotlin/Native run: nothing to say about them there.
+        val pc = TermuxProtocol.parseAudit(run("audit", env = mapOf("STEWARD_FIXTURE_ARCH" to "x86_64")))
+        assertTrue(pc.items.none { it.targetId in setOf("sdk-system-images", "sdk-emulator", "konan") })
+
+        val results = TermuxProtocol.parseClean(
+            run(
+                "clean",
+                listOf(
+                    "gradle-wrapper-old",
+                    "app-cache=" + File(home, ".config/some-tool/Cache").path,
+                    "app-cache=" + File(home, ".config/chromium/Default/Cache").path,
+                    "heap-dump=" + File(home, "app/fresh.hprof").path,
+                    "heap-dump=" + File(home, "app/java_pid9.hprof").path,
+                ),
+                mapOf("STEWARD_FIXTURE_ARCH" to "aarch64"),
+            ),
+        ).results
+        assertEquals(listOf("CLEARED", "SKIP_UNSAFE", "CLEARED", "SKIP_UNSAFE", "CLEARED"), results.map { it.status })
+        assertFalse(File(home, ".gradle/wrapper/dists/gradle-8.7-bin").exists())
+        assertTrue(File(home, ".gradle/wrapper/dists/gradle-8.2-bin").exists() && File(home, ".gradle/wrapper/dists/gradle-8.9-bin").exists())
+        assertTrue(File(home, ".config/chromium/Default/Preferences").exists())
+        assertTrue(File(home, ".config/some-tool/Cache/state.db").exists() && File(home, "app/fresh.hprof").exists())
     }
 
     @Test

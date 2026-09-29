@@ -76,11 +76,33 @@ object RunLog {
             append(" (").append(groups.entries.joinToString(", ") { (g, items) -> "${g.name.lowercase()} ${items.sumOf { it.bytes }.humanBytes()}" }).append(')')
         }
         append(", ").append(count(report.unsafe.size)).append(" unsafe paths skipped")
+        // What the keep rule protects (Layla's relays, Boot scripts, running programs), by reason only: no paths.
+        if (report.kept.isNotEmpty()) {
+            append("; kept ").append(count(report.kept.size)).append(" (")
+            append(report.kept.groupingBy { keptKind(it.why) }.eachCount().entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" })
+            append(')')
+            if (report.held.isNotEmpty()) append(", ").append(count(report.held.size)).append(" clean-ups held back (").append(report.held.sumOf { it.bytes }.humanBytes()).append(')')
+        }
         // The parts that took longest, so a slow audit says where its time went.
         if (report.timings.isNotEmpty()) {
             append("; parts ").append(report.timings.entries.sortedByDescending { it.value }.joinToString(", ") { (k, v) -> "$k ${seconds(v)}" })
         }
         if (report.warnings.isNotEmpty()) append("; warnings: ").append(report.warnings.take(3).joinToString(" | "))
+    }
+
+    /** Why something in Termux is kept, as a kind: the reasons themselves can name scripts and folders. */
+    private fun keptKind(why: String): String = when {
+        why.startsWith("named like") -> "Layla relays"
+        why.startsWith("started by Termux:Boot") -> "Termux:Boot"
+        why.startsWith("a termux-services") -> "services"
+        why.startsWith("a Termux:Widget") -> "Widget shortcuts"
+        why.startsWith("a Termux:Tasker") -> "Tasker"
+        why.startsWith("a cron") -> "cron"
+        why.startsWith("started with every") -> "shell start-up"
+        why.startsWith("running now") -> "running now"
+        why.startsWith("you chose") -> "your list"
+        "runs with it" in why -> "what they run with"
+        else -> "other"
     }
 
     fun rolledBack(title: String, s: RollbackSummary, millis: Long): String =

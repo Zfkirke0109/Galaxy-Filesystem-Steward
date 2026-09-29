@@ -29,6 +29,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.ViewModelProvider
@@ -511,7 +512,9 @@ class AppFlowTest {
         compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("open:Packages and programs"))
         compose.onNodeWithTag("open:Packages and programs").performClick()
         compose.onNodeWithText("never run from your shell history", substring = true).assertExists()
-        compose.onNodeWithText("npm, pip, cargo").performClick()
+        // Smart remove comes first among the filters; the others are further along the row.
+        compose.onNodeWithText("Suggested (0)").assertExists()
+        compose.onNodeWithText("npm, pip, cargo").performScrollTo().performClick()
         compose.onNodeWithText("runs as codex", substring = true).assertExists()
         compose.onNodeWithText("last run 2 days ago (14 times)", substring = true).assertExists()
         shot("22-termux-programs")

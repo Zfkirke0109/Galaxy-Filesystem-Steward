@@ -5,6 +5,7 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import com.galaxy.steward.StewardApp
 import com.galaxy.steward.apps.AppsController
+import com.galaxy.steward.apps.DeepSpaceController
 import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.ScanPhase
 import com.galaxy.steward.core.ScanProgress
@@ -19,28 +20,28 @@ import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
+import com.galaxy.steward.core.goal.GoalPlan
+import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.learn.LearnedChoice
 import com.galaxy.steward.core.learn.PreferenceModel
+import com.galaxy.steward.core.learn.StoragePoint
 import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
 import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
-import com.galaxy.steward.core.humanBytes
-import com.galaxy.steward.core.goal.GoalPlan
-import com.galaxy.steward.core.learn.StoragePoint
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.TermuxCleanResult
 import com.galaxy.steward.core.termux.TermuxCleanSummary
+import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.core.termux.TermuxProgram
 import com.galaxy.steward.core.termux.TermuxProtocol
-import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.diagnostics.LogcatExporter
-import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.diagnostics.StewardLog
+import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.work.AuditWorker
 import com.galaxy.steward.work.KeepAlive
@@ -108,6 +109,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     /** App data (per-app storage, caches, Android/data|obb|media) and Termux. */
     val apps: AppsController = app.apps
     val termux: TermuxController = app.termux
+    val deepSpace: DeepSpaceController = app.deepSpace
     val logcat: LogcatExporter = app.logcat
     val storageReport: StorageReportExporter = app.storageReport
 
@@ -592,6 +594,70 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         progress(0, 1, "Waiting for Termux")
         val summary = termux.deletePaths(paths)
         termuxOutcome("Deleted in Termux", summary, "item", "items")
+    }
+
+    /** Removes what was picked in /data/local/tmp and bug reports (Shizuku). Deleted for good. */
+    fun removeShellSpace(paths: List<String>) = launchRun("Removing shell leftovers") { progress ->
+        progress(0, 1, "Asking the Shizuku helper")
+        val results = deepSpace.removeShell(paths)
+        shellOutcome("Shell leftovers removed", results)
+    }
+
+    /** Removes picked parts of a debuggable app's private data, through run-as (the app is stopped first). */
+    fun removePrivateData(packageName: String, rels: List<String>) = launchRun("Removing private data") { progress ->
+        progress(0, 1, "Stopping the app and removing")
+        shellOutcome("Private data removed", deepSpace.removePrivate(packageName, rels))
+    }
+
+    private fun shellOutcome(title: String, results: List<com.galaxy.steward.core.device.ShellRemoval>): Outcome.Report {
+        val removed = results.filter { it.removed }
+        val left = results.filterNot { it.removed || it.status == "NO_CHANGE" }
+        return Outcome.Report(
+            title,
+            listOfNotNull(
+                "Freed ${removed.sumOf { it.bytes }.humanBytes()}",
+                "${removed.size.plural("item")} deleted for good",
+                left.takeIf { it.isNotEmpty() }?.let { "${it.size.plural("item")} left alone" },
+            ),
+            left.map { "${it.path.substringAfterLast('/')}: ${it.note.ifEmpty { it.status.lowercase().replace('_', ' ') }}" },
+        )
+    }
+
+    /** Android's own clean-up through Shizuku: "trim-caches" or "art-cleanup". Freed space is measured, not assumed. */
+    fun systemClean(what: String) = launchRun(if (what == "trim-caches") "Trimming app caches" else "Cleaning up compiled code") { progress ->
+        progress(0, 1, "Android is working on it")
+        val (freed, answer) = deepSpace.systemClean(what)
+        val ok = answer.startsWith("exit=0")
+        Outcome.Report(
+            if (what == "trim-caches") "App caches trimmed" else "Compiled code cleaned up",
+            listOfNotNull(
+                "Free space grew by ${freed.humanBytes()}",
+                when {
+                    !ok -> "Android refused: ${answer.lineSequence().drop(1).firstOrNull { it.isNotBlank() } ?: answer.lineSequence().first()}"
+                    freed == 0L && what == "trim-caches" -> "Nothing changed: caches were already small, or this Android version doesn't let the shell user clear them"
+                    freed == 0L -> "Nothing to clean: no compiled code was left over"
+                    else -> null
+                },
+            ),
+            emptyList(),
+        ).also { deepSpace.load() }
+    }
+
+    /** "Always keep" in the Termux browser, or "Stop keeping" on the Termux screen. */
+    fun keepTermuxPaths(paths: List<String>, keep: Boolean) = launchRun(if (keep) "Keeping in Termux" else "No longer keeping") { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.keep(paths, keep)
+        val done = summary.results.count { it.status == "KEPT" || it.status == "UNKEPT" }
+        val report = termux.state.value.report
+        Outcome.Report(
+            if (keep) "Kept in Termux" else "No longer kept",
+            listOf(
+                if (keep) "${done.plural("item")} kept: the steward never cleans, deletes, moves or suggests removing them, nor what they run with"
+                else "${done.plural("item")} can be cleaned up again",
+                "The list is ~/.config/galaxy-steward/keep in Termux: one path per line, and you can edit it there",
+            ),
+            TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty()),
+        )
     }
 
     fun removeTermuxPrograms(programs: List<TermuxProgram>) = launchRun("Removing programs") { progress ->

@@ -37,16 +37,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.galaxy.steward.core.ageText
 import com.galaxy.steward.core.humanBytes
-import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.learn.LearnedChoice
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.TermuxGroup
 import com.galaxy.steward.core.termux.TermuxItem
 import com.galaxy.steward.core.termux.TermuxProtocol
@@ -189,6 +190,7 @@ fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () ->
                 }
                 item { TermuxCopies(vm) }
                 item { TermuxForeign(vm) }
+                item { TermuxKeptCard(vm) }
                 if (report.prootActive) {
                     item { InlineNotice("A proot distribution is running, so distro caches were only measured. Stop it and scan again to clean them.") }
                 }
@@ -258,6 +260,13 @@ fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () ->
     }
 }
 
+/** For a folder in $PREFIX: the commands that lead into it and when you last ran one ("\nruns as code-oss · last run 3 months ago"). */
+private fun leadsInto(item: TermuxItem, now: Long): String = when {
+    item.commands.isEmpty() -> if (item.targetId == "prefix-unowned") "\nNo command leads into it" else ""
+    else -> "\nRuns as " + item.commands.take(4).joinToString(", ") + " · " +
+        if (item.lastUsed > 0) "last run ${ageText(item.lastUsed, now)}" else "never run from your shell history"
+}
+
 @Composable
 private fun GroupCard(
     group: TermuxGroup,
@@ -270,6 +279,7 @@ private fun GroupCard(
     prefix: String,
     onExpand: () -> Unit,
 ) {
+    val now = remember { System.currentTimeMillis() }
     ReviewCard {
         Column {
             GroupHeader(
@@ -293,7 +303,7 @@ private fun GroupCard(
                         onCheckedChange = { vm.termux.toggle(item.spec) },
                         title = item.title,
                         subtitle = listOf(TermuxProtocol.relative(item.path, home, prefix), item.files.plural("file"), item.note)
-                            .filter { it.isNotEmpty() }.joinToString(" · ") + (learned[item.spec]?.let { "\n${it.note}" } ?: ""),
+                            .filter { it.isNotEmpty() }.joinToString(" · ") + leadsInto(item, now) + (learned[item.spec]?.let { "\n${it.note}" } ?: ""),
                         subtitleLines = 3,
                         trailing = { SizeText(item.bytes) },
                     )

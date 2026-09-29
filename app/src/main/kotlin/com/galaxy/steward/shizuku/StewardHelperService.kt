@@ -8,6 +8,8 @@ import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.core.appdata.AppDataHelper
 import com.galaxy.steward.core.appdata.AppDataWire
 import com.galaxy.steward.core.appdata.AppPolicy
+import com.galaxy.steward.core.device.PrivateData
+import com.galaxy.steward.core.device.ShellSpace
 import com.galaxy.steward.diagnostics.LogcatDump
 import kotlinx.coroutines.runBlocking
 import java.io.BufferedWriter
@@ -19,8 +21,9 @@ import kotlin.system.exitProcess
  * The privileged half of the steward. Shizuku starts it in a separate process running as Android's shell user
  * (uid 2000), from this APK. It only exposes the fixed operations in [IStewardHelper]: the app-data scanner and
  * executor from `core` (with all their run-time checks), a read-only folder listing for the app folder browser, a
- * cache-only clear or a full data clear for one validated package name, granting the app usage access, and a fixed
- * dump of the device log. There is no generic command runner.
+ * cache-only clear or a full data clear for one validated package name, granting the app usage access, a fixed
+ * dump of the device log, the shell-only places (/data/local/tmp, bug reports), Android's own storage breakdown and
+ * clean-ups, and run-as for debuggable apps. There is no generic command runner.
  */
 @Keep
 class StewardHelperService : IStewardHelper.Stub {
@@ -103,6 +106,66 @@ class StewardHelperService : IStewardHelper.Stub {
             }
         }.apply { name = "steward-logcat" }.start()
         return read
+    }
+
+    override fun shellSpace(request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> ShellSpace.handle(text, out) }
+    }
+
+    override fun diskStats(): ParcelFileDescriptor = stream { out ->
+        val (code, text) = capture(listOf("/system/bin/dumpsys", "diskstats"), 30_000)
+        if (code != 0 && text.isBlank()) out("dumpsys diskstats failed: exit $code") else text.lineSequence().forEach(out)
+    }
+
+    override fun systemClean(what: String, timeoutMs: Long): String {
+        val command = when (what) {
+            "trim-caches" -> listOf("/system/bin/pm", "trim-caches", "4096G")
+            "art-cleanup" -> listOf("/system/bin/pm", "art", "cleanup")
+            else -> return "error=unknown clean-up"
+        }
+        val (code, text) = capture(command, timeoutMs.coerceIn(10_000, 600_000))
+        return "exit=$code\n" + text.trim().takeLast(2_000)
+    }
+
+    override fun privateData(packageName: String, request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> privateDataOp(packageName, text, out) }
+    }
+
+    /** list: `run-as <pkg> du` of its data folder. remove: stops the app, then `run-as <pkg> rm -rf` each checked path. */
+    private fun privateDataOp(pkg: String, request: String, out: (String) -> Unit) {
+        val lines = request.lines().filter { it.isNotEmpty() }
+        if (!AppPolicy.isPackageName(pkg) || AppPolicy.isProtected(pkg, BuildConfig.APPLICATION_ID) || pkg == AppPolicy.SHIZUKU) {
+            out("E\tprotected or not a package")
+        } else {
+            when (lines.firstOrNull()) {
+                "list" -> {
+                    val (code, text) = capture(listOf("/system/bin/run-as", pkg, "du", "-a", "-k", "-d", "3", "."), 180_000)
+                    if (code != 0 && PrivateData.parseDu(pkg, text.lineSequence()).isEmpty()) {
+                        out("E\t" + (text.lineSequence().firstOrNull { it.isNotBlank() }?.take(200) ?: "run-as failed: exit $code").replace('\t', ' '))
+                    } else {
+                        PrivateData.parseDu(pkg, text.lineSequence()).forEach { e -> out("S\t${e.bytes}\t${e.rel}") }
+                    }
+                }
+                "remove" -> {
+                    if (AppPolicy.mayForceStop(pkg)) exec(listOf("/system/bin/am", "force-stop", "--user", "0", pkg), 10_000)
+                    for (rel in lines.drop(1)) {
+                        if (!PrivateData.validRel(rel)) {
+                            out("D\tSKIP_UNSAFE\t0\t$rel\tnot a path inside the app's data")
+                            continue
+                        }
+                        val before = capture(listOf("/system/bin/run-as", pkg, "du", "-s", "-k", "--", rel), 120_000).second
+                            .trim().substringBefore('\t').substringBefore(' ').toLongOrNull()?.times(1024) ?: 0L
+                        exec(listOf("/system/bin/run-as", pkg, "rm", "-rf", "--", rel), 300_000)
+                        val still = exec(listOf("/system/bin/run-as", pkg, "ls", "-d", "--", rel), 10_000) == 0
+                        out(if (still) "D\tPARTIAL\t0\t$rel\tsome files could not be removed" else "D\tREMOVED\t$before\t$rel\t")
+                    }
+                }
+                else -> out("E\tunknown request")
+            }
+        }
+        out(ShellSpace.END)
     }
 
     /** Runs a fixed command without a shell. Returns the exit code, 124 on timeout (like `timeout`), -1 on error. */

@@ -14,6 +14,7 @@ import com.galaxy.steward.core.learn.DecisionLog
 import com.galaxy.steward.core.learn.LearnedChoice
 import com.galaxy.steward.core.learn.PreferenceFeatures
 import com.galaxy.steward.core.learn.PreferenceModel
+import com.galaxy.steward.core.termux.HistorySpan
 import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxException
 import com.galaxy.steward.core.termux.TermuxItem
@@ -56,6 +57,8 @@ data class TermuxState(
     val plan: TermuxRemovalPlan? = null,
     /** Files and folders picked in the Termux browser, by path. */
     val browseSelected: Set<String> = emptySet(),
+    /** How far back the shell history goes, from the same Packages run: "never run" only counts within it. */
+    val history: HistorySpan = HistorySpan(0, 0),
     /** Programs npm, pip and cargo installed, from the same Packages run. */
     val programs: List<TermuxProgram>? = null,
     val programSelected: Set<String> = emptySet(),
@@ -185,6 +188,7 @@ class TermuxController(
                 val output = run("packages", emptyList(), PACKAGES_TIMEOUT_MS)
                 val list = TermuxProtocol.parsePackages(output)
                 val programs = TermuxProtocol.parsePrograms(output)
+                val history = TermuxProtocol.parseHistorySpan(output)
                 StewardLog.i(
                     "Termux packages listed: ${list.size}, ${list.sumOf { it.bytes }.humanBytes()}; programs ${programs.size}, " +
                         "${programs.sumOf { it.bytes }.humanBytes()}; ${list.count { it.lastUsed > 0 }} with a last use in shell history",
@@ -193,6 +197,7 @@ class TermuxController(
                     s.copy(
                         packagesLoading = false,
                         packages = list,
+                        history = history,
                         packageSelected = s.packageSelected.filterTo(HashSet()) { n -> list.any { it.name == n } },
                         programs = programs,
                         programSelected = s.programSelected.filterTo(HashSet()) { k -> programs.any { it.key == k } },
@@ -380,6 +385,22 @@ class TermuxController(
         return summary
     }
 
+    /**
+     * Adds [paths] to Termux's keep list (~/.config/galaxy-steward/keep), or takes them off it: nothing kept is cleaned,
+     * deleted or moved, whatever is picked. The list lives in Termux, so it holds for any tool that reads it.
+     */
+    suspend fun keep(paths: List<String>, keep: Boolean): TermuxCleanSummary {
+        val summary = TermuxProtocol.parseClean(run(if (keep) "keep" else "unkeep", paths, PACKAGES_TIMEOUT_MS))
+        val done = summary.results.filter { it.status == "KEPT" || it.status == "UNKEPT" }.map { it.path }
+        _state.update { s ->
+            val next = s.report?.keeping(done, keep)
+            // A pick that is now held back can't stay picked.
+            val offered = next?.items?.mapTo(HashSet()) { it.spec }
+            s.copy(report = next, browseSelected = s.browseSelected - paths.toSet(), selected = if (offered == null) s.selected else s.selected.intersect(offered))
+        }
+        return summary
+    }
+
     /** Drops what is gone from the size map, so the browser shows the space as free without a new audit. */
     private fun forget(summary: TermuxCleanSummary) {
         val gone = summary.results.filter { (it.status == "CLEARED" || it.status == "MOVED") && it.path.isNotEmpty() }.associate { it.path to it.before }
@@ -468,6 +489,7 @@ class TermuxController(
                     "SKIP_ACTIVE" -> "in use"
                     "SKIP_EXISTS" -> "already there"
                     "SKIP_SPACE" -> "not enough space"
+                    "SKIP_KEPT" -> "kept"
                     "PARTIAL" -> "partly removed"
                     "FAILED" -> "failed"
                     else -> r.note.ifEmpty { r.status.lowercase().replace('_', ' ') }.substringBefore(';').take(60)
@@ -486,6 +508,7 @@ class TermuxController(
                     "SKIP_ACTIVE" -> if (r.targetId == "gc") r.note else "a proot distribution is running"
                     "SKIP_EXISTS" -> r.note
                     "SKIP_SPACE" -> "not enough free space for a checked copy"
+                    "SKIP_KEPT" -> "kept, ${r.note}"
                     else -> r.note.ifEmpty { r.status.lowercase().replace('_', ' ') }
                 }
                 "$what: $why"

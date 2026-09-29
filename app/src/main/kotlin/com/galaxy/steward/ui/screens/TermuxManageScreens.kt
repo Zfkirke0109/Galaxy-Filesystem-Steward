@@ -42,6 +42,8 @@ import com.galaxy.steward.core.ageText
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.termux.PackageAdvisor
+import com.galaxy.steward.core.termux.PackageSuggestion
 import com.galaxy.steward.core.termux.PlannedRemoval
 import com.galaxy.steward.core.termux.TermuxEntry
 import com.galaxy.steward.core.termux.TermuxLocks
@@ -101,7 +103,11 @@ fun TermuxBrowserScreen(vm: StewardViewModel, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             ReviewTopBar(if (atRoot) "Browse Termux" else path.substringAfterLast('/'), { if (atRoot) onBack() else up() }) {
-                if (state.browseSelected.isNotEmpty()) TextButton(onClick = { vm.termux.clearBrowseSelection() }) { Text("None") }
+                if (state.browseSelected.isNotEmpty()) {
+                    // Layla's relay, a script something starts, a model you need: the steward then never touches it.
+                    TextButton(onClick = { vm.keepTermuxPaths(state.browseSelected.toList(), keep = true) }, enabled = ui.applying == null) { Text("Always keep") }
+                    TextButton(onClick = { vm.termux.clearBrowseSelection() }) { Text("None") }
+                }
             }
         },
         bottomBar = {
@@ -181,6 +187,7 @@ fun TermuxBrowserScreen(vm: StewardViewModel, onBack: () -> Unit) {
 }
 
 private enum class PackageFilter(val label: String) {
+    SUGGESTED("Suggested"),
     YOURS("Installed by you"),
     ALL("All"),
     DEPENDENCIES("Dependencies"),
@@ -237,15 +244,25 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
         packages.forEach { p -> p.depends.forEach { d -> map.getOrPut(d) { ArrayList() } += p.name } }
         map
     }
-    val shown = remember(packages, filter, query, unusedFirst) {
+    // Smart remove: what you installed and may not need, with why (PackageAdvisor).
+    val suggestions = remember(packages, state.history) { PackageAdvisor.suggest(packages, state.history, now) }
+    val advice = remember(suggestions) { suggestions.associateBy { it.pkg.name } }
+    val shown = remember(packages, filter, query, unusedFirst, suggestions) {
         packages.filter {
             when (filter) {
+                PackageFilter.SUGGESTED -> it.name in advice
                 PackageFilter.YOURS -> it.manual
                 PackageFilter.ALL -> true
                 PackageFilter.DEPENDENCIES -> !it.manual
                 PackageFilter.PROGRAMS -> false
             } && (query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) || it.summary.contains(query.trim(), ignoreCase = true))
-        }.let { list -> if (unusedFirst) list.sortedBy { unusedKey(it.installed, it.lastUsed, it.uses, it.commands) } else list }
+        }.let { list ->
+            when {
+                unusedFirst -> list.sortedBy { unusedKey(it.installed, it.lastUsed, it.uses, it.commands) }
+                filter == PackageFilter.SUGGESTED -> list.sortedByDescending { advice[it.name]?.total ?: it.bytes }
+                else -> list
+            }
+        }
     }
     val selected = packages.filter { it.name in state.packageSelected }
 
@@ -297,10 +314,39 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
                     )
                 }
+                if (suggestions.isNotEmpty() && filter != PackageFilter.SUGGESTED) {
+                    item {
+                        InlineNotice(
+                            "Smart remove: ${PackageAdvisor.summary(suggestions)}. Open Suggested to see why for each one.",
+                        )
+                    }
+                }
                 item {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
                         PackageFilter.entries.forEach { f ->
-                            FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f.label) }, modifier = Modifier.padding(end = 8.dp))
+                            val label = if (f == PackageFilter.SUGGESTED) "${f.label} (${suggestions.size})" else f.label
+                            FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(label) }, modifier = Modifier.padding(end = 8.dp))
+                        }
+                    }
+                }
+                if (filter == PackageFilter.SUGGESTED) {
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
+                            Text(
+                                if (suggestions.isEmpty()) "Nothing to suggest: everything you installed is in use, needed or kept."
+                                else PackageAdvisor.summary(suggestions).replaceFirstChar { it.uppercase() } + ". " +
+                                    "Only what you installed yourself, that nothing needs and nothing kept runs with. apt's own dry run " +
+                                    "shows everything that would go before anything does.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (suggestions.isNotEmpty()) {
+                                val names = suggestions.map { it.pkg.name }
+                                val all = names.all { it in state.packageSelected }
+                                TextButton(onClick = { names.forEach { n -> if ((n in state.packageSelected) == all) vm.termux.togglePackage(n) } }) {
+                                    Text(if (all) "Unpick all suggested" else "Pick all ${suggestions.size} suggested")
+                                }
+                            }
                         }
                     }
                 }
@@ -354,7 +400,7 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
                 }
             } else {
                 items(shown, key = { it.name }) { p ->
-                    PackageRow(p, p.name in state.packageSelected, neededBy[p.name].orEmpty(), now) { vm.termux.togglePackage(p.name) }
+                    PackageRow(p, p.name in state.packageSelected, neededBy[p.name].orEmpty(), now, advice[p.name]) { vm.termux.togglePackage(p.name) }
                 }
             }
         }
@@ -391,26 +437,34 @@ fun TermuxPackagesScreen(vm: StewardViewModel, onBack: () -> Unit) {
 }
 
 @Composable
-private fun PackageRow(p: TermuxPackage, checked: Boolean, neededBy: List<String>, now: Long, onToggle: () -> Unit) {
+private fun PackageRow(p: TermuxPackage, checked: Boolean, neededBy: List<String>, now: Long, advice: PackageSuggestion?, onToggle: () -> Unit) {
     val needs = when {
         neededBy.isEmpty() -> null
         neededBy.size <= 3 -> "needed by ${neededBy.sorted().joinToString()}"
         else -> "needed by ${neededBy.sorted().take(3).joinToString()} and ${neededBy.size - 3} more"
     }
+    val locked = p.protected || p.keptBy.isNotEmpty()
     SelectRow(
-        checked = checked && !p.protected,
+        checked = checked && !locked,
         onCheckedChange = { onToggle() },
-        enabled = !p.protected,
+        enabled = !locked,
         title = p.name,
         subtitle = listOfNotNull(p.summary.ifEmpty { null }, p.version, needs).joinToString(" · ") +
-            (usageText(p.installed, p.lastUsed, p.uses, p.commands, now)?.let { "\n$it" } ?: ""),
+            (usageText(p.installed, p.lastUsed, p.uses, p.commands, now)?.let { "\n$it" } ?: "") +
+            (p.keptBy.takeIf { it.isNotEmpty() }?.let { "\nKept: $it" } ?: "") +
+            (advice?.let { a ->
+                "\n${a.why}" + if (a.alsoGoes.isEmpty()) "" else
+                    "; also removes ${a.alsoGoes.take(3).joinToString()}${if (a.alsoGoes.size > 3) " and ${a.alsoGoes.size - 3} more" else ""} (${a.alsoFrees.humanBytes()})"
+            } ?: ""),
         modifier = Modifier.padding(horizontal = 8.dp),
-        subtitleLines = 4,
+        subtitleLines = 6,
         trailing = {
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 SizeText(p.bytes)
                 when {
                     p.protected -> Pill("Termux needs it")
+                    p.keptBy.isNotEmpty() -> Pill("Kept")
+                    advice != null -> Pill(advice.advice.title)
                     !p.manual -> Pill("Dependency")
                 }
             }
@@ -433,8 +487,14 @@ private fun PlanDialog(plan: TermuxRemovalPlan, onConfirm: (autoremove: Boolean)
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (plan.blocked) {
+                    val needed = plan.packages.filter { it.protected }
+                    val kept = plan.packages.filter { it.keptBy.isNotEmpty() }
                     Text(
-                        "apt would also remove what Termux itself needs: ${names(plan.packages.filter { it.protected })}. Nothing was changed.",
+                        listOfNotNull(
+                            needed.takeIf { it.isNotEmpty() }?.let { "apt would also remove what Termux itself needs: ${names(it)}." },
+                            kept.takeIf { it.isNotEmpty() }?.let { list -> "Something kept runs with ${list.joinToString { "${it.name} (${it.keptBy})" }}." },
+                            "Nothing was changed.",
+                        ).joinToString(" "),
                         color = MaterialTheme.colorScheme.error,
                     )
                 } else if (plan.packages.isEmpty()) {
