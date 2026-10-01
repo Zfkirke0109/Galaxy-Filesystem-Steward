@@ -37,6 +37,7 @@ import com.galaxy.steward.ui.components.ApplyProgressDialog
 import com.galaxy.steward.ui.components.OutcomeDialog
 import com.galaxy.steward.ui.screens.AppFolderBrowserScreen
 import com.galaxy.steward.ui.screens.AppFoldersScreen
+import com.galaxy.steward.ui.screens.AppLeftoversScreen
 import com.galaxy.steward.ui.screens.AppStorageScreen
 import com.galaxy.steward.ui.screens.AppsScreen
 import com.galaxy.steward.ui.screens.DeepSpaceScreen
@@ -72,6 +73,7 @@ object Routes {
     const val APP_FOLDERS = "app-folders"
     const val APP_BROWSER = "app-browser"
     const val DEEP_SPACE = "deep-space"
+    const val APP_LEFTOVERS = "app-leftovers"
     const val PRIVATE_DATA = "private-data"
     const val TERMUX = "termux"
     const val TERMUX_BROWSER = "termux-browser"
@@ -165,6 +167,7 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.APP_BROWSER) { AppFolderBrowserScreen(vm) { nav.popBackStack() } }
             composable(Routes.DEEP_SPACE) { DeepSpaceScreen(vm, { nav.navigate(Routes.PRIVATE_DATA) }) { nav.popBackStack() } }
             composable(Routes.PRIVATE_DATA) { PrivateDataScreen(vm) { nav.popBackStack() } }
+            composable(Routes.APP_LEFTOVERS) { AppLeftoversScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX) { TermuxScreen(vm, { nav.navigate(it) }) { nav.popBackStack() } }
             composable(Routes.TERMUX_BROWSER) { TermuxBrowserScreen(vm) { nav.popBackStack() } }
             composable(Routes.TERMUX_PACKAGES) { TermuxPackagesScreen(vm) { nav.popBackStack() } }

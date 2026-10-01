@@ -184,6 +184,8 @@ data class FolderMerge(
     val uniqueFiles: Int,
     val uniqueBytes: Long,
     override val operations: List<Operation>,
+    /** Two folders of one name in different places (Documents/LogcatX, Reports/Diagnostics/LogcatX): one is enough. */
+    val sameName: Boolean = false,
 ) : PlanItem {
     override val title: String get() = source.substringAfterLast('/') + " → " + target.substringAfterLast('/')
     override val reclaimBytes: Long get() = commonBytes

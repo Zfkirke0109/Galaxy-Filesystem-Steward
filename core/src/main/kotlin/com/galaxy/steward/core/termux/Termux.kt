@@ -122,6 +122,11 @@ object TermuxCatalog {
             "konan", "Kotlin/Native toolchains", TermuxGroup.LEFTOVERS, false,
             "Built for PCs: Kotlin/Native can't compile on an ARM phone, so Gradle's downloads for it can't run here",
         ),
+        TermuxTargetInfo(
+            "old-snapshot", "Old report or snapshot", TermuxGroup.LEFTOVERS, false,
+            "Named with the date it was made, and nothing in it changed for three days: a report, debug dump or backup",
+        ),
+        TermuxTargetInfo("file-copy", "Older copy", TermuxGroup.LEFTOVERS, false, "A copy kept before an edit (.bak, .orig, ~): the file it copies is still there"),
         TermuxTargetInfo("decompiled", "Decompiled app", TermuxGroup.LEFTOVERS, false, "apktool or jadx output: decompile the APK again to get it back"),
         TermuxTargetInfo("home-apk", "APK file", TermuxGroup.LEFTOVERS, false, "An installer in your home"),
         TermuxTargetInfo(
@@ -158,7 +163,7 @@ object TermuxCatalog {
     /** Targets whose records carry a path the script must re-validate (`id=path`). */
     val PATH_TARGETS = setOf(
         "other-cache", "proot-cache", "proot-tmp", "build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "prefix-unowned", "old-python",
-        "app-cache", "app-logs", "crash-log", "heap-dump",
+        "app-cache", "app-logs", "crash-log", "heap-dump", "old-snapshot", "file-copy",
     )
 }
 
@@ -441,7 +446,7 @@ data class TermuxReport(
         const val CHOSEN = "you chose to keep it"
 
         /** Clean-up targets that remove the folder or file itself, not what is in it. */
-        val WHOLE_TARGETS = setOf("build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "path", "prefix-unowned", "old-python", "crash-log", "heap-dump")
+        val WHOLE_TARGETS = setOf("build", "decompiled", "home-apk", "foreign-ndk", "l2s-orphan", "path", "prefix-unowned", "old-python", "crash-log", "heap-dump", "old-snapshot", "file-copy")
     }
 }
 

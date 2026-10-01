@@ -213,6 +213,18 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
 
             item {
                 OverviewCard(
+                    icon = Icons.Rounded.FolderOpen,
+                    title = "What an app left behind",
+                    text = "Pick an app you removed (or one still installed), or type a name: its folders and backups in shared " +
+                        "storage, its installers, Android/data, Termux files and what adb pushed, in one list to remove in one run.",
+                    fraction = null,
+                    busy = false,
+                    action = "Find",
+                ) { navigate(Routes.APP_LEFTOVERS) }
+            }
+
+            item {
+                OverviewCard(
                     icon = Icons.Rounded.Key,
                     title = "Beyond app folders",
                     text = "Through Shizuku: what Android itself counts (System, Other), its own cache and compiled-code clean-ups, what adb " +

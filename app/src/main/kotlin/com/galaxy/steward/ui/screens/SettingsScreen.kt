@@ -50,8 +50,8 @@ import androidx.core.content.ContextCompat
 import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.humanBytes
-import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.organize.KeywordRule
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.data.SettingsStore
 import com.galaxy.steward.diagnostics.LogcatExporter
 import com.galaxy.steward.shizuku.ShizukuStatus
@@ -291,8 +291,8 @@ private fun LogcatExportRow(exporter: LogcatExporter, wholeDevice: Boolean) {
         state.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error) }
         Text(
             "Android keeps only the latest part of the log, so export right after something goes wrong (Developer options > " +
-                "Logger buffer sizes keeps more). The whole device log can include names and file paths from other apps, so " +
-                "share it only with people you trust.",
+                "Logger buffer sizes keeps more). The newest ${LogcatExporter.KEEP_EXPORTS} exports stay; older ones go. The whole " +
+                "device log can include names and file paths from other apps, so share it only with people you trust.",
             style = small,
             color = muted,
         )

@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import com.galaxy.steward.StewardApp
+import com.galaxy.steward.apps.AppFootprintController
 import com.galaxy.steward.apps.AppsController
 import com.galaxy.steward.apps.DeepSpaceController
 import com.galaxy.steward.core.RunLog
@@ -12,6 +13,7 @@ import com.galaxy.steward.core.ScanProgress
 import com.galaxy.steward.core.Steward
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.appdata.AppJunkItem
+import com.galaxy.steward.core.appdata.AppJunkKind
 import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.ExecutorOptions
@@ -20,6 +22,8 @@ import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
+import com.galaxy.steward.core.footprint.AppFootprint
+import com.galaxy.steward.core.footprint.FootprintPlace
 import com.galaxy.steward.core.goal.GoalPlan
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.learn.LearnedChoice
@@ -110,6 +114,9 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     val apps: AppsController = app.apps
     val termux: TermuxController = app.termux
     val deepSpace: DeepSpaceController = app.deepSpace
+
+    /** Everything an app left behind, across shared storage, app folders, Termux and the shell's places. */
+    val footprint = AppFootprintController(app, app.environment, app.apps, app.termux, app.deepSpace, app.appScope) { app.session.state.value.report }
     val logcat: LogcatExporter = app.logcat
     val storageReport: StorageReportExporter = app.storageReport
 
@@ -594,6 +601,67 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         progress(0, 1, "Waiting for Termux")
         val summary = termux.deletePaths(paths)
         termuxOutcome("Deleted in Termux", summary, "item", "items")
+    }
+
+    /**
+     * Removes what [appName] left behind, each place its own way: shared storage into the quarantine (undoable),
+     * Android/data|obb|media leftovers through Shizuku into the quarantine, Termux paths and the shell's through their
+     * helpers, each checked again there.
+     */
+    fun removeFootprint(appName: String, hits: List<com.galaxy.steward.core.footprint.FootprintHit>) = launchRun("Removing $appName's leftovers") { progress ->
+        val title = "$appName's leftovers"
+        val byPlace = hits.filter { it.lock == null }.groupBy { it.place }
+        val lines = ArrayList<String>()
+        val details = ArrayList<String>()
+        val gone = HashSet<String>()
+        byPlace[FootprintPlace.SHARED]?.let { shared ->
+            val items = AppFootprint.toJunk(shared, appName)
+            val s = settings.value
+            val started = SystemClock.uptimeMillis()
+            val summary = withContext(Dispatchers.IO) {
+                ActionExecutor(rootPath, app.journals, ExecutorOptions(s.quarantineDuplicates, s.protectedFolders))
+                    .execute(title, "footprint", items) { done, count, current -> progress(done, count, current) }
+            }
+            StewardLog.i(RunLog.applied(title, "footprint", summary, SystemClock.uptimeMillis() - started))
+            lines += "Shared storage: ${summary.quarantined.plural("item")} (${summary.bytesQuarantined.humanBytes()}) into the quarantine; History can undo it"
+            details += summary.messages
+            gone += summary.changedPaths
+            _state.update { it.copy(stale = true) }
+            reindexLater(summary.changedPaths)
+        }
+        byPlace[FootprintPlace.APP_FOLDERS]?.let { folders ->
+            val wanted = folders.mapTo(HashSet()) { it.path }
+            val items = apps.state.value.folders?.items.orEmpty().filter {
+                it.kind == AppJunkKind.LEFTOVERS && "$rootPath/Android/${it.area.dir}/${it.packageName}" in wanted
+            }
+            if (items.isNotEmpty()) {
+                val summary = apps.applyFolders(title, items, progress)
+                lines += "Android/data, obb and media: ${summary.quarantined.plural("folder")} (${summary.bytesQuarantined.humanBytes()}) into the quarantine"
+                gone += wanted
+            }
+        }
+        byPlace[FootprintPlace.TERMUX]?.let { inTermux ->
+            progress(0, 1, "Waiting for Termux")
+            try {
+                val t = termux.deletePaths(inTermux.map { it.path })
+                lines += "Termux: ${t.freed.humanBytes()} deleted" + (TermuxController.reasonTally(t)?.let { " ($it)" } ?: "")
+                gone += t.results.filter { it.status == "CLEARED" }.map { it.path }
+                details += TermuxController.skippedNotes(t, termux.state.value.report?.home.orEmpty(), termux.state.value.report?.prefix.orEmpty())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lines += "Termux: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        byPlace[FootprintPlace.SHELL]?.let { shell ->
+            progress(0, 1, "Asking the Shizuku helper")
+            val results = deepSpace.removeShell(shell.map { it.path })
+            lines += "Left by adb: ${results.filter { it.removed }.sumOf { it.bytes }.humanBytes()} deleted"
+            gone += results.filter { it.removed }.map { it.path }
+            details += results.filterNot { it.removed || it.status == "NO_CHANGE" }.map { "${it.path.substringAfterLast('/')}: ${it.note}" }
+        }
+        footprint.forget(gone)
+        Outcome.Report("$appName's leftovers removed", lines, details)
     }
 
     /** Removes what was picked in /data/local/tmp and bug reports (Shizuku). Deleted for good. */

@@ -71,14 +71,25 @@ class LogcatExporter(
                 _state.value = LogcatExportState(error = "Couldn't save the log: ${e.message ?: e.javaClass.simpleName}")
                 return@launch
             }
+            val pruned = withContext(Dispatchers.IO) { prune(saved.file.parentFile) }
             StewardLog.i(
                 "logcat saved in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${saved.bytes.humanBytes()}, " +
-                    if (saved.wholeDevice) "whole device" else "own lines only",
+                    (if (saved.wholeDevice) "whole device" else "own lines only") +
+                    if (pruned > 0) "; $pruned older exports removed" else "",
             )
             _state.value = LogcatExportState(saved = saved)
             // So the file also shows up over USB and in apps that browse the media index.
             StorageAccess.rescan(context, listOf(saved.file.path))
         }
+    }
+
+    /**
+     * Exports pile up in a folder no clean-up touches (102 MiB in five on the 9-30 phone): the newest [KEEP_EXPORTS]
+     * stay, older logcat exports go. Storage reports are small and stay.
+     */
+    private fun prune(folder: File?): Int {
+        val exports = folder?.listFiles { f -> f.isFile && f.name.startsWith("logcat-") && f.name.endsWith(".txt") } ?: return 0
+        return exports.sortedByDescending { it.lastModified() }.drop(KEEP_EXPORTS).count { it.delete() }
     }
 
     /** A share sheet for [file], through this app's FileProvider (which only serves the logcat folder). */
@@ -199,5 +210,8 @@ class LogcatExporter(
         private val HEADER_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss xxx")
         private const val BUFFER_BYTES = 256 * 1024
         private const val PROGRESS_STEP_BYTES = 1L shl 20
+
+        /** Logcat exports kept in the folder; older ones go after each new export. */
+        const val KEEP_EXPORTS = 3
     }
 }

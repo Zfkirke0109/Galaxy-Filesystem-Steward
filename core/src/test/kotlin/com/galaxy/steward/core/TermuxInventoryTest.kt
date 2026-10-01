@@ -459,6 +459,66 @@ class TermuxInventoryTest {
     }
 
     @Test
+    fun aServiceThatNamesBinKeepsItsCommandsNotEveryPackageAndCopiesOfTheRelayCanGo() {
+        fakeDpkg()
+        val old = System.currentTimeMillis() - 30 * DAY_MS
+        tool("python3", "exit 0")
+        tool("coreutils", "exit 0")
+        Files.createSymbolicLink(File(prefix, "bin/sleep").toPath(), File("coreutils").toPath())
+        text(File(prefix, "var/lib/dpkg/info/coreutils.list"), "${prefix.path}/bin\n${prefix.path}/bin/coreutils\n${prefix.path}/bin/sleep\n")
+        File(prefix, "var/lib/dpkg/fake-status.tsv").appendText("coreutils\t9000\tinstall ok installed\t\toptional\t9.5\t\t\tCore tools\n")
+        // Every package lists $PREFIX/bin itself among its files.
+        File(prefix, "var/lib/dpkg/info/git.list").appendText("${prefix.path}/bin\n")
+        // Layla's relay as a termux-services service, the way the 9-30 phone had it: its run script names the folder.
+        text(
+            File(prefix, "var/service/layla-relay/run"),
+            "#!${prefix.path}/bin/sh\nexport PATH=${prefix.path}/bin:\$PATH\ncd ~ && exec python3 ~/relay.py 2>&1\n",
+        )
+        text(File(home, "relay.py"), "print('relay')\n")
+        // What is about the relay but isn't it: copies made before edits, its log, a dated debug dump.
+        write(File(home, "relay.py.bak-layla-route-20260903-173538"), 3000, 1, mtime = old)
+        write(File(home, "relay.py.before-sidekick-v32-20260903-190303"), 3000, 2, mtime = old)
+        write(File(home, "relay.log"), 2000, 3, mtime = old)
+        write(File(home, "Layla-Debug-20260928-114347/dump.txt"), 4000, 4, mtime = old)
+        File(home, "Layla-Debug-20260928-114347").setLastModified(old)
+        write(File(home, "Android-Update-Audit-20260928-085258/report.txt"), 5000, 5, mtime = old)
+        File(home, "Android-Update-Audit-20260928-085258").setLastModified(old)
+        // A copy whose original is gone is no copy of anything here; a fresh snapshot is still in use.
+        write(File(home, "notes.md.orig"), 100, 6, mtime = old)
+        write(File(home, "Report-20991231/now.txt"), 100, 7)
+
+        val report = TermuxProtocol.parseAudit(run("audit"))
+        val kept = report.kept.map { it.path.removePrefix(prefix.path).removePrefix(home.path) }.toSet()
+        assertFalse(kept.toString(), kept.any { it == "/bin" || it.startsWith("/bin/") || it == "/var/service" })
+        assertTrue(kept.toString(), "/relay.py" in kept && "/var/service/layla-relay" in kept)
+        assertFalse(kept.toString(), kept.any { "bak" in it || "before" in it || it == "/relay.log" || "Debug" in it })
+        fun at(id: String) = report.items.filter { it.targetId == id }.map { it.path.removePrefix(home.path + "/") }.toSet()
+        assertEquals(setOf("relay.py.bak-layla-route-20260903-173538", "relay.py.before-sidekick-v32-20260903-190303"), at("file-copy"))
+        assertEquals(setOf("Layla-Debug-20260928-114347", "Android-Update-Audit-20260928-085258"), at("old-snapshot"))
+        assertTrue(report.timings.keys.toString(), report.timings.keys.containsAll(setOf("targets.fixed", "targets.home", "targets.build")))
+
+        // Packages: Python runs the relay and stays; git and coreutils' package are not held by the folder they share.
+        val packages = TermuxProtocol.parsePackages(run("packages")).associateBy { it.name }
+        assertTrue(packages.getValue("python").keptBy.isNotEmpty())
+        assertEquals("", packages.getValue("git").keptBy)
+        // The relay itself still can't go; its copies can, and the snapshot is checked again before it goes.
+        val results = TermuxProtocol.parseClean(
+            run(
+                "clean",
+                listOf(
+                    "file-copy=" + File(home, "relay.py.bak-layla-route-20260903-173538").path,
+                    "file-copy=" + File(home, "notes.md.orig").path,
+                    "old-snapshot=" + File(home, "Layla-Debug-20260928-114347").path,
+                    "old-snapshot=" + File(home, "Report-20991231").path,
+                ),
+            ),
+        ).results
+        assertEquals(listOf("CLEARED", "SKIP_UNSAFE", "CLEARED", "SKIP_UNSAFE"), results.map { it.status })
+        assertEquals("SKIP_KEPT", TermuxProtocol.parseClean(run("delete", listOf(File(home, "relay.py").path))).results.single().status)
+        assertTrue(File(home, "relay.py").exists())
+    }
+
+    @Test
     fun foldersNoPackageInstalledSayWhatLeadsIntoThemAndGoWithTheirCommands() {
         fakeDpkg()
         write(File(prefix, "opt/old-tool/lib/core.bin"), 9 * mib, 4)

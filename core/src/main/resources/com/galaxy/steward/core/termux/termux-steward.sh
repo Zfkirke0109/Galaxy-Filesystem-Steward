@@ -110,6 +110,15 @@ timed() {
 }
 
 # Runs an optional part of a report in a subshell, so one that fails can't take the rest with it, and times it.
+# Y for the time since the last lap (LAP), for the parts of one long step.
+LAP=0
+lap() {
+  local t
+  t="$(now_ms)"
+  emit Y "$1" "$(( t - LAP ))"
+  LAP="$t"
+}
+
 optional() {
   local name="$1" t
   shift
@@ -304,6 +313,64 @@ crash_dump_kind() {
       ;;
     *) return 1 ;;
   esac
+}
+
+# old-snapshot PATH: dated reports, debug dumps and snapshots at the top of the home (Android-Update-Audit-20260928-
+# 085258, Layla-Debug-20260928-114347), made once at that time, with nothing in them changed for three days. Not a
+# project or repository, nothing hidden, no keys.
+snapshot_ok() {
+  local p="$1"
+  case "$p" in "$HOME"/*/*|"$HOME"/.*) return 1 ;; "$HOME"/*) ;; *) return 1 ;; esac
+  [[ "${p##*/}" =~ $SNAPSHOT_DATE ]] || return 1
+  [ -e "$p" ] && [ ! -L "$p" ] && beneath "$p" "$HOME" || return 1
+  if [ -d "$p" ]; then
+    [ -e "$p/.git" ] || [ -e "$p/build.gradle" ] || [ -e "$p/build.gradle.kts" ] || [ -e "$p/package.json" ] || [ -e "$p/Cargo.toml" ] ||
+      [ -e "$p/pyproject.toml" ] && return 1
+    [ -n "$(find "$p" -xdev -mtime -3 -print -quit 2>/dev/null)" ] && return 1
+    [ -n "$(private_key_in "$p")" ] && return 1
+  else
+    [ -n "$(find "$p" -maxdepth 0 -mtime -3 2>/dev/null)" ] && return 1
+    case "${p,,}" in *.jks|*.keystore|*.p12|*.pfx|*.pem|*.key|*.kdbx|*.env) return 1 ;; esac
+    # A dated copy of a file that is still there is offered as a copy, once.
+    file_copy_ok "$p" && return 1
+  fi
+  return 0
+}
+
+home_snapshots() {
+  local p
+  while IFS= read -r -d '' p; do
+    has_controls "$p" && continue
+    snapshot_ok "$p" && printf '%s\0' "$p"
+  done < <(find "$HOME" -xdev -mindepth 1 -maxdepth 1 ! -name '.*' \( -type d -o -type f \) -print0 2>/dev/null)
+}
+
+# file-copy PATH: a copy made before an edit, next to the file it copies (relay.py.bak-layla-route-20260903-173538,
+# x.orig, x.old, x~), in the home outside hidden folders. Only while the file it copies is still there.
+copy_original() {
+  local f="$1"
+  if [[ "$f" =~ ^(.*[^/])\.(bak|backup|orig|old|prev|save|before)([-._][^/]*)?$ ]]; then printf '%s' "${BASH_REMATCH[1]}"
+  elif [[ "$f" == *[^/]~ ]]; then printf '%s' "${f%\~}"
+  else return 1; fi
+}
+
+file_copy_ok() {
+  local f="$1" o
+  file_beneath "$f" "$HOME" || return 1
+  case "${f#"$HOME"/}" in .*|*/.*) return 1 ;; esac
+  o="$(copy_original "$f")" || return 1
+  [ -f "$o" ] && [ "$o" != "$f" ] || return 1
+  case "${f,,}" in *.jks*|*.keystore*|*.p12*|*.pfx*|*.pem*|*.key*|*.kdbx*|*.env*) return 1 ;; esac
+  return 0
+}
+
+file_copies() {
+  local f
+  while IFS= read -r -d '' f; do
+    has_controls "$f" && continue
+    file_copy_ok "$f" && printf '%s\0' "$f"
+  done < <(find "$HOME" -xdev -mindepth 1 -maxdepth 4 \( -path "$HOME/storage" -o -name node_modules -o -name '.*' \) -prune \
+      -o -type f -regextype posix-extended \( -iregex '.*\.(bak|backup|orig|old|prev|save|before)([-._][^/]*)?' -o -name '*~' \) -print0 2>/dev/null)
 }
 
 crash_dumps() {
@@ -657,8 +724,9 @@ BEGIN { P = 4294967291; for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i }
   h = mulmod(h + 1, 2654435761); h = (mulmod(h, h) + h) % P; printf "%.0f\n", h }'
 
 sketch_dirs() {
-  local p rest k distros
-  distros="$(list_rootfs | tr '\0' '\n')"
+  local p rest k r chosen=$'\n' n=0 skip
+  local -a distros
+  mapfile -d '' -t distros < <(list_rootfs)
   for p in "${!BIG[@]}"; do
     [ "${BIG[$p]}" -ge "$SKETCH_MIN_KIB" ] && [ -d "$p" ] && [ ! -L "$p" ] || continue
     case "$p" in
@@ -667,10 +735,21 @@ sketch_dirs() {
       *) continue ;;
     esac
     case "$rest" in storage|storage/*|*/*/*/*|*/.git|*/.git/*) continue ;; esac
-    printf '%s\n' "$distros" | grep -qxF -e "$p" && continue
-    printf '%s\n' "$distros" | awk -v p="$p/" '$0 != "" && index(p, $0 "/") == 1 { f = 1 } END { exit !f }' && continue
+    skip=""
+    for r in "${distros[@]}"; do case "$p" in "$r"|"$r"/*) skip=1; break ;; esac; done
+    [ -n "$skip" ] && continue
     printf '%s\t%s\n' "${BIG[$p]}" "$p"
-  done | sort -t "$(printf '\t')" -k1,1nr | head -n 25 | {
+  done | sort -t "$(printf '\t')" -k1,1nr | while IFS=$'\t' read -r k p; do
+    # Largest first; a folder inside one already chosen would only hash the same files again (android-sdk, its ndk,
+    # and that ndk's version were three passes over one tree).
+    skip=""
+    while IFS= read -r r; do [ -n "$r" ] && case "$p" in "$r"/*) skip=1; break ;; esac; done <<< "$chosen"
+    [ -n "$skip" ] && continue
+    chosen+="$p"$'\n'
+    printf '%s\t%s\n' "$k" "$p"
+    n=$((n + 1))
+    [ "$n" -ge 25 ] && break
+  done | {
     # Four folders at a time: hashing every file name in awk is the slow part, and it is all CPU.
     while IFS=$'\t' read -r k p; do
       while [ "$(jobs -rp | wc -l)" -ge 4 ]; do wait -n 2>/dev/null || break; done
@@ -701,7 +780,8 @@ foreign_binaries() {
   [ -e "$PREFIX/bin/box64" ] || [ -e "$PREFIX/bin/qemu-x86_64" ] && return 0
   for f in "${!BIG[@]}"; do
     [ "${BIG[$f]}" -ge "$DUP_MIN_KIB" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
-    hex="$(head -c 20 -- "$f" 2>/dev/null | od -An -tx1 -v | tr -d ' \n')"
+    hex="$(od -An -tx1 -v -N20 -- "$f" 2>/dev/null)"
+    hex="${hex//[$' \n']/}"
     arch=""
     case "$hex" in
       7f454c46*)
@@ -747,7 +827,12 @@ emit_owners() {
     }
     END {
       for (p in n) printf "O\t%d\t%s\t%s\n", n[p], names[p], p
-      for (p in want) if (!(p in n)) printf "N\t%s\n", p
+      # Only folders one level into opt, share, lib, libexec or include can be leftovers: the rest (thousands of npm
+      # globals and caches no package lists) would only slow prefix_leftovers down (98 s on the 9-30 phone).
+      for (p in want) if (!(p in n)) {
+        rel = substr(p, length(prefix) + 2)
+        if (rel ~ /^(opt|share|lib|libexec|include)\/[^\/]+$/) printf "N\t%s\n", p
+      }
     }' "$tmp" "$info"/*.list 2>/dev/null)
   rm -f -- "$tmp"
   [ "${#unowned[@]}" -gt 0 ] && prefix_leftovers "${unowned[@]}"
@@ -774,13 +859,19 @@ prefix_leftovers() {
   local p rel id b target cmds last c
   local -a list
   declare -A into=()
+  local -a links targets
   load_history
-  for b in "$PREFIX/bin"/*; do
-    [ -L "$b" ] || continue
-    target="$(readlink -f -- "$b" 2>/dev/null)" || continue
+  # Every link in bin resolved in one go (a readlink per link was a fork for each of thousands of commands).
+  mapfile -d '' -t links < <(find "$PREFIX/bin" -mindepth 1 -maxdepth 1 -type l -print0 2>/dev/null)
+  if [ "${#links[@]}" -gt 0 ]; then
+    mapfile -d '' -t targets < <(printf '%s\0' "${links[@]}" | xargs -0 -r realpath -m -z -- 2>/dev/null)
+  fi
+  for b in "${!links[@]}"; do
+    target="${targets[$b]:-}"
+    [ -n "$target" ] || continue
     for p in "$@"; do
       [ -n "$p" ] || continue
-      case "$target" in "$p"/*) into["$p"]+="${into[$p]:+,}${b##*/}" ;; esac
+      case "$target" in "$p"/*) into["$p"]+="${into[$p]:+,}${links[$b]##*/}" ;; esac
     done
   done
   for p in "$@"; do
@@ -817,6 +908,10 @@ KEEP_FILE="$HOME/.config/galaxy-steward/keep"
 KEEP_NAMES='layla|sidekick|relay|mini-?apps?'
 MARKER='Galaxy Steward - Termux helper'
 NAMED="named like Layla's Sidekick relays"
+# A date in a name (20260928, 2026-09-28, 20260928-114347): a snapshot, report or backup made at that time.
+SNAPSHOT_DATE='(^|[^0-9])20[0-9][0-9]-?[01][0-9]-?[0-3][0-9]([^0-9]|$)'
+# What a copy made before an edit is called: relay.py.bak-x, relay.py.backup.x, relay.py.before-x, x.orig, x.old, x~.
+COPY_MARK='\.(bak|backup|orig|old|prev|save|before)([-._]|$)|~$'
 
 # What a kept PATH stands for. In the home: its project (the nearest folder up with a package.json, .git,
 # pyproject.toml, requirements.txt, Cargo.toml or go.mod), else its own folder; in a hidden folder of the home (a
@@ -862,14 +957,48 @@ keep_add() {
   p="$(realpath -m -s -- "$p" 2>/dev/null)" || return 0
   [ -e "$p" ] || [ -L "$p" ] || return 0
   case "$p" in "$HOME"/*|"$PREFIX"/*|"$APPDIR"/*) ;; *) return 0 ;; esac
+  # What sits in $PREFIX/bin is a command it runs: the package that provides it stays (and the browser won't delete a
+  # kept command); a link out of bin, to a relay's own script say, keeps where it leads. The 1.2.10 helper kept all of
+  # usr/bin, because a service's run script named the folder, and with it every package with a command.
+  case "$p" in
+    "$PREFIX"/bin/*/*) ;;
+    "$PREFIX"/bin/*)
+      keep_cmd "${p##*/}" "$why"
+      if [ -L "$p" ]; then
+        t="$(readlink -f -- "$p" 2>/dev/null)"
+        case "$t" in "$PREFIX"/bin/*) keep_cmd "${t##*/}" "$why" ;; "$HOME"/*|"$PREFIX"/*) keep_add "$t" "$why" "$how" ;; esac
+      fi
+      return 0
+      ;;
+  esac
   if [ -L "$p" ]; then
     t="$(readlink -f -- "$p" 2>/dev/null)"
     [ -n "$t" ] && [ "$t" != "$p" ] && case "$t" in "$HOME"/*|"$PREFIX"/*) keep_add "$t" "$why" "$how" ;; esac
   fi
   if [ "$how" = exact ]; then u="$p"; else u="$(keep_unit "$p")"; fi
-  [ -n "$u" ] || return 0
-  case "$u" in "$HOME"|"$PREFIX"|"$FILES"|"$APPDIR"|"$HOME/storage"|"$HOME/storage"/*) return 0 ;; esac
+  [ -n "$u" ] && ! keep_structural "$u" || return 0
   [ -n "${KEPT[$u]:-}" ] || KEPT["$u"]="$why"
+}
+
+# Folders that hold everyone's things, never kept as a whole: Termux's own top folders, $PREFIX's first level and
+# var's (bin, lib, var/service, var/log...), where packages and tools keep everything, and the home's shared ones.
+keep_structural() {
+  local rel
+  case "$1" in
+    "$HOME"|"$PREFIX"|"$FILES"|"$APPDIR"|"$HOME/storage"|"$HOME/storage"/*) return 0 ;;
+    "$HOME"/.config|"$HOME"/.local|"$HOME"/.local/share|"$HOME"/.local/lib|"$HOME"/.local/state|"$HOME"/.cache|"$HOME"/.termux) return 0 ;;
+    "$PREFIX"/*)
+      rel="${1#"$PREFIX"/}"
+      case "$rel" in
+        lib/python*/site-packages) return 0 ;;
+        */*/*) return 1 ;;
+        var/*|lib/node_modules|lib/python*|share/doc|share/man) return 0 ;;
+        */*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
 }
 
 # The paths a script names (~/x, $HOME/x, ${HOME}/x, $PREFIX/x, ${PREFIX}/x, or the Termux folders spelled out), one
@@ -910,11 +1039,6 @@ keep_from_script() {
     if [ -n "$only" ]; then
       [[ "${p,,}" =~ $KEEP_NAMES ]] || continue
     fi
-    # A command named by its full path (#!$PREFIX/bin/python3) is a command it runs, not a file to list.
-    case "$p" in
-      "$PREFIX"/bin/*/*) ;;
-      "$PREFIX"/bin/*) [ -L "$p" ] || { keep_cmd "${p##*/}" "$why"; continue; } ;;
-    esac
     keep_add "$p" "$why ($shown)"
   done < <(paths_in "$f")
   while IFS= read -r w; do
@@ -1024,8 +1148,7 @@ keep_named() {
   local p
   while IFS= read -r -d '' p; do
     has_controls "$p" && continue
-    # A decompiled Layla, or its installer, is no relay.
-    case "${p,,}" in *.apk|*.apks|*.xapk|*.apkm) continue ;; esac
+    relay_like "$p" || continue
     decompiled_root "$p" && continue
     keep_add "$p" "$NAMED" exact
   done < <(
@@ -1036,6 +1159,22 @@ keep_named() {
       -o -path "$PREFIX/share/man" -o -path "$PREFIX/include" -o -path "$PREFIX/glibc" -o -path "$PREFIX/tmp" \) -prune \
       -o -regextype posix-extended -iregex ".*/[^/]*(${KEEP_NAMES})[^/]*" -print0 -prune 2>/dev/null
   )
+}
+
+# Whether something named after Layla's relays can be one: a folder or a program, config or data file. Not a copy
+# kept before an edit (relay.py.bak-...), a log, a dated snapshot (Layla-Debug-20260928-114347), an archive, an
+# installer or a text dump: those are about the relay, not it, and the clean-up may offer them.
+relay_like() {
+  local n="${1##*/}"
+  n="${n,,}"
+  [[ "$n" =~ $SNAPSHOT_DATE ]] && return 1
+  [[ "$n" =~ $COPY_MARK ]] && return 1
+  case "$n" in
+    *.log|*.log.[0-9]*|*.txt|*.md|*.csv|*.html|*.zip|*.7z|*.gz|*.xz|*.tgz|*.tar|*.apk|*.apks|*.xapk|*.apkm|*.bundle) return 1 ;;
+  esac
+  [ -d "$1" ] && return 0
+  case "$n" in *.py|*.js|*.mjs|*.cjs|*.ts|*.sh|*.json|*.toml|*.yaml|*.yml|*.ini|*.conf|*.env|*.sock) return 0 ;; esac
+  [ -x "$1" ] || [ -S "$1" ]
 }
 
 keep_listed() {
@@ -1083,11 +1222,18 @@ load_keep() {
 
 # Why PATH has to stay, when it is kept, inside something kept or holds something kept; fails when it may go.
 kept_why() {
-  local p="$1" k
+  local p="$1" k n
   for k in "${!KEPT[@]}"; do
     case "$p" in "$k"|"$k"/*) printf '%s: %s' "${k/#"$HOME"/\~}" "${KEPT[$k]}"; return 0 ;; esac
     case "$k" in "$p"/*) printf '%s: %s' "${k/#"$HOME"/\~}" "${KEPT[$k]}"; return 0 ;; esac
   done
+  case "$p" in
+    "$PREFIX"/bin/*/*) ;;
+    "$PREFIX"/bin/*)
+      n="${p##*/}"
+      if [ -n "${KEPT_CMDS[$n]:-}" ]; then printf '%s: %s' "$n" "${KEPT_CMDS[$n]}"; return 0; fi
+      ;;
+  esac
   return 1
 }
 
@@ -1185,6 +1331,7 @@ audit() {
   fi
   local started
   started="$(now_ms)"
+  LAP="$started"
 
   # Where the space goes (report only): the whole folder, then the largest folders one level into home and usr.
   emit U "$(size_of "$FILES")" "$FILES"
@@ -1212,6 +1359,7 @@ audit() {
     bytes="${m%%$'\t'*}"; files="${m#*$'\t'}"
     [ "${files:-0}" -gt 0 ] && emit T "$id" "$bytes" "$files" "$p"
   done
+  lap targets.fixed
 
   # Other caches in ~/.cache (review only).
   if dir_beneath "$HOME/.cache" "$HOME"; then
@@ -1234,6 +1382,16 @@ audit() {
   while IFS=$'\t' read -r -d '' id d; do
     emit T "$id" "$(stat -c %s -- "$d" 2>/dev/null || echo 0)" 1 "$d"
   done < <(crash_dumps)
+  # Dated reports and snapshots, and copies made before an edit.
+  while IFS= read -r -d '' d; do
+    m="$(measure contents "$d")"
+    if [ -d "$d" ]; then emit T old-snapshot "$(size_of "$d")" "${m#*$'\t'}" "$d"
+    else emit T old-snapshot "$(stat -c %s -- "$d" 2>/dev/null || echo 0)" 1 "$d"; fi
+  done < <(home_snapshots)
+  while IFS= read -r -d '' d; do
+    emit T file-copy "$(stat -c %s -- "$d" 2>/dev/null || echo 0)" 1 "$d"
+  done < <(file_copies)
+  lap targets.home
 
   # proot distributions: inventory, and caches of inactive ones.
   while IFS= read -r -d '' r; do
@@ -1259,6 +1417,7 @@ audit() {
       [ "${m#*$'\t'}" -gt 0 ] && emit T proot-tmp "${m%%$'\t'*}" "${m#*$'\t'}" "$r/$s"
     done
   done < <(list_rootfs | sort -zu)
+  lap targets.proot
 
   # Rebuildable build outputs inside Git projects in the Termux home.
   if command -v git >/dev/null 2>&1; then
@@ -1282,6 +1441,7 @@ audit() {
   else
     emit W "git is not installed, so project build outputs were not checked"
   fi
+  lap targets.build
 
   # Leftovers that aren't caches: decompiled apps, APKs, x86-64 NDKs, and proot's orphaned hard-link copies.
   while IFS= read -r -d '' d; do
@@ -1305,6 +1465,7 @@ audit() {
     done < <(l2s_orphans "$r")
   done < <(list_rootfs | sort -zu)
 
+  lap targets.leftovers
   emit Y targets "$(( $(now_ms) - started ))"
 
   # The size map itself, for browsing Termux folder by folder in the app: only into the --out file, because the
@@ -1451,7 +1612,7 @@ clean_one() {
       fi
       return
       ;;
-    decompiled|home-apk|foreign-ndk|l2s-orphan|prefix-unowned|old-python|crash-log|heap-dump)
+    decompiled|home-apk|foreign-ndk|l2s-orphan|prefix-unowned|old-python|crash-log|heap-dump|old-snapshot|file-copy)
       leftover_one "$id" "$p"
       return
       ;;
@@ -1485,6 +1646,8 @@ leftover_one() {
     decompiled) decompiled_ok "$p" || why="no longer a decompiled app on its own (in a Git project, or holds a key)" ;;
     home-apk) home_apk_ok "$p" || why="not an APK in the home" ;;
     crash-log|heap-dump) [ "$(crash_dump_kind "$p")" = "$id" ] || why="not a crash log or dump older than a day" ;;
+    old-snapshot) snapshot_ok "$p" || why="no longer a dated snapshot left alone for three days (changed, a project, or holds a key)" ;;
+    file-copy) file_copy_ok "$p" || why="not a copy next to the file it copies" ;;
     foreign-ndk)
       if r="$(rootfs_of "$p")"; then
         if ! [[ "${p#"$r"/}" =~ $DISTRO_FREE ]] || ! dir_beneath "$p" "$r"; then why="part of the distribution's system"; fi
