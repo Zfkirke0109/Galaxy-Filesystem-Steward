@@ -2,16 +2,24 @@ package com.galaxy.steward.apps
 
 import android.app.AppOpsManager
 import android.app.usage.StorageStatsManager
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
+import android.os.UserHandle
 import android.os.storage.StorageManager
 import android.provider.Settings
 import androidx.core.net.toUri
+import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.appdata.AppPolicy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.IOException
 
 /** One app's storage as Android accounts it (StorageStatsManager). */
@@ -24,8 +32,15 @@ data class AppStorageRow(
     val dataBytes: Long,
     val cacheBytes: Long,
     val protected: Boolean,
+    /** When the app was last used (epoch ms), or null when Android has no record of it. */
+    val lastUsed: Long? = null,
+    /** Why "Clear all data" is not offered for this app ([AppPolicy.clearDataBlock]), or null when it is. */
+    val clearBlock: String? = null,
 ) {
     val totalBytes: Long get() = appBytes + dataBytes + cacheBytes
+
+    /** What clearing all its data frees: the data and the cache (the app itself stays installed). */
+    val clearableBytes: Long get() = dataBytes + cacheBytes
 }
 
 object AppStorage {
@@ -48,6 +63,13 @@ object AppStorage {
 
     fun appInfoIntent(packageName: String): Intent =
         Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    /**
+     * Whether the Shizuku helper (Android's shell user) may clear another app's cache. Android 17 (API 37) requires
+     * INTERNAL_DELETE_CACHE_FILES for it, which the shell user doesn't hold: the package manager logs "silently
+     * ignoring" and the command still reports success (every clear in the 1.2.5 log verified nothing).
+     */
+    val shellCanClearCaches: Boolean get() = Build.VERSION.SDK_INT < 37
 
     /** Android user id of this process (0 for the main user, 150 for Secure Folder, ...). */
     val userId: Int get() = Process.myUid() / 100_000
@@ -86,37 +108,94 @@ object AppStorage {
         false
     }
 
-    /** Storage of every installed app. Needs usage access; throws [SecurityException] without it. */
-    fun query(context: Context): List<AppStorageRow> {
+    /**
+     * Every installed app's storage. Needs usage access; throws [SecurityException] without it. Each app is its own
+     * query to the system (and loading its label reads its resources), so they run a few at a time: one after another
+     * took 42 s for 756 apps on a Galaxy S23 Ultra. Android measures an app with a huge number of files by walking
+     * them, which can take a minute on its own, so [onTotal] and [onRow] report each app as soon as it is measured,
+     * with how long its query took.
+     */
+    suspend fun query(
+        context: Context,
+        onTotal: (Int) -> Unit = {},
+        onRow: (AppStorageRow, Long) -> Unit = { _, _ -> },
+    ): List<AppStorageRow> = coroutineScope {
         val pm = context.packageManager
         val stats = context.getSystemService(StorageStatsManager::class.java)
         val user = Process.myUserHandle()
         @Suppress("DEPRECATION")
         val apps = pm.getInstalledApplications(0)
-        return apps.mapNotNull { info ->
-            val s = try {
-                stats.queryStatsForPackage(StorageManager.UUID_DEFAULT, info.packageName, user)
-            } catch (_: PackageManager.NameNotFoundException) {
-                return@mapNotNull null
-            } catch (_: IOException) {
-                return@mapNotNull null
+        onTotal(apps.size)
+        val lastUsed = lastUsed(context)
+        val workers = Dispatchers.IO.limitedParallelism(PARALLEL_QUERIES)
+        apps.map { info ->
+            async(workers) {
+                val started = SystemClock.uptimeMillis()
+                row(context, pm, stats, user, info, lastUsed[info.packageName])?.also { onRow(it, SystemClock.uptimeMillis() - started) }
             }
-            AppStorageRow(
-                packageName = info.packageName,
-                label = pm.getApplicationLabel(info).toString(),
-                system = info.flags and ApplicationInfo.FLAG_SYSTEM != 0,
-                appBytes = s.appBytes,
-                dataBytes = (s.dataBytes - s.cacheBytes).coerceAtLeast(0),
-                cacheBytes = s.cacheBytes,
-                protected = AppPolicy.isProtected(info.packageName, context.packageName),
-            )
-        }.sortedByDescending { it.totalBytes }
+        }.awaitAll().filterNotNull().sortedByDescending { it.totalBytes }
     }
+
+    private fun row(
+        context: Context,
+        pm: PackageManager,
+        stats: StorageStatsManager,
+        user: UserHandle,
+        info: ApplicationInfo,
+        lastUsed: Long?,
+    ): AppStorageRow? {
+        val s = try {
+            stats.queryStatsForPackage(StorageManager.UUID_DEFAULT, info.packageName, user)
+        } catch (_: PackageManager.NameNotFoundException) {
+            return null
+        } catch (_: IOException) {
+            return null
+        }
+        val system = info.flags and ApplicationInfo.FLAG_SYSTEM != 0
+        return AppStorageRow(
+            packageName = info.packageName,
+            label = pm.getApplicationLabel(info).toString(),
+            system = system,
+            appBytes = s.appBytes,
+            dataBytes = (s.dataBytes - s.cacheBytes).coerceAtLeast(0),
+            cacheBytes = s.cacheBytes,
+            protected = AppPolicy.isProtected(info.packageName, context.packageName),
+            lastUsed = lastUsed,
+            clearBlock = AppPolicy.clearDataBlock(info.packageName, context.packageName, system),
+        )
+    }
+
+    /**
+     * When each app was last in use over the past two years (Android keeps yearly usage buckets that long), from
+     * usage statistics. Empty when they can't be read.
+     */
+    fun lastUsed(context: Context, now: Long = System.currentTimeMillis()): Map<String, Long> = try {
+        context.getSystemService(UsageStatsManager::class.java)
+            .queryAndAggregateUsageStats(now - USAGE_WINDOW_MS, now)
+            .mapValues { (_, u) ->
+                maxOf(u.lastTimeUsed, if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) u.lastTimeVisible else 0L)
+            }
+            .filterValues { it > now - USAGE_WINDOW_MS }
+    } catch (_: RuntimeException) {
+        emptyMap()
+    }
+
+    private const val USAGE_WINDOW_MS = 2 * 365 * DAY_MS
+
+    private const val PARALLEL_QUERIES = 8
 
     /** Live cache size of one app, or null when it cannot be read. */
     fun cacheBytes(context: Context, packageName: String): Long? = try {
         context.getSystemService(StorageStatsManager::class.java)
             .queryStatsForPackage(StorageManager.UUID_DEFAULT, packageName, Process.myUserHandle()).cacheBytes
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Live size of all of one app's data, its cache included, or null when it cannot be read. */
+    fun dataBytes(context: Context, packageName: String): Long? = try {
+        context.getSystemService(StorageStatsManager::class.java)
+            .queryStatsForPackage(StorageManager.UUID_DEFAULT, packageName, Process.myUserHandle()).dataBytes
     } catch (_: Exception) {
         null
     }

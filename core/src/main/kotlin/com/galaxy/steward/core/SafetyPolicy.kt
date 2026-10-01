@@ -12,11 +12,20 @@ object SafetyPolicy {
     const val STEWARD_DIR = ".StorageSteward"
     const val QUARANTINE_DIR = "Quarantine"
 
+    /** Where the app saves logcat exports. Treated like a pinned folder: never moved, deduplicated or cleaned. */
+    const val LOGCAT_DIR = "Documents/Galaxy Steward LogCat"
+
     /** Top-level folders Android itself creates; never offered for empty-folder cleanup. */
     val STANDARD_TOP_DIRS = setOf(
         "Alarms", "Android", "Audiobooks", "DCIM", "Documents", "Download", "Movies", "Music",
         "Notifications", "Pictures", "Podcasts", "Recordings", "Ringtones",
     )
+    /** Top-level folders the system writes into (Samsung's dumpstate logs); never removed even when empty. */
+    val SYSTEM_TOP_DIRS = setOf("log")
+
+    /** Top-level folders an empty-folder clean-up must keep. */
+    fun isKeptTopDir(name: String): Boolean = name in STANDARD_TOP_DIRS || name in SYSTEM_TOP_DIRS
+
     val MEDIA_TOP_DIRS = setOf(
         "DCIM", "Pictures", "Movies", "Music", "Recordings", "Audiobooks", "Podcasts", "Ringtones", "Alarms", "Notifications",
     )
@@ -80,10 +89,41 @@ object SafetyPolicy {
 
     fun isCodeTreeDir(name: String): Boolean = CODE_TREE_DIR.matches(name)
 
+    private val SMALI_DIR = Regex("""^smali(_classes\d+)?$""")
+
+    /**
+     * Folder names that hold development work. Below the top level (`Download/Projects`, `Documents/src`) the whole
+     * folder is treated like a project: never moved, bucketed or deduplicated, though it can serve as the kept copy.
+     */
+    private val DEV_CONTAINERS = setOf(
+        "projects", "workspace", "workspaces", "repos", "repositories", "git", "github", "gitlab",
+        "src", "source", "sources", "code", "decompiled", "jadx", "apktool", "smali",
+    )
+
+    fun isDevContainerName(name: String): Boolean = name.trim().lowercase() in DEV_CONTAINERS
+
+    /**
+     * Decompiled apps from a directory listing: apktool output (smali, smali_classesN), jadx output (sources next to
+     * resources), or an unpacked APK (classes.dex next to AndroidManifest.xml). Their folder names are Java packages.
+     */
+    fun isDecompiledAppRoot(childNames: Collection<String>): Boolean {
+        if (childNames.any { SMALI_DIR.matches(it) }) return true
+        if ("sources" in childNames && "resources" in childNames) return true
+        return "classes.dex" in childNames && "AndroidManifest.xml" in childNames
+    }
+
+    /** A subtree this code-heavy is source code, whatever it is called (at least 50 code files and half of all files). */
+    fun isCodeDominated(codeFiles: Int, totalFiles: Int): Boolean = codeFiles >= 50 && codeFiles * 2 >= totalFiles
+
     /** Names containing record separators would corrupt TSV journals, so the steward never touches them. */
     fun isUnsafeName(name: String): Boolean = name.any { it == '\t' || it == '\n' || it == '\r' || it == '\u0000' }
 
     fun isGenericWrapperName(name: String): Boolean = name.trim().lowercase() in GENERIC_WRAPPERS
+
+    private val PACKAGE_LIKE = Regex("^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$")
+
+    /** `com.example.app`: a folder named after an app, which the leftover-folder check looks after. */
+    fun isPackageLikeName(name: String): Boolean = PACKAGE_LIKE.matches(name)
 
     /** Wrappers that are redundant *inside Documents* (Documents/Documents, Documents/Download, ...). */
     fun isDocumentsWrapperName(name: String): Boolean =
@@ -100,6 +140,17 @@ object SafetyPolicy {
 
     /** "IMG_1234 (1).jpg", "report - Copy.pdf", "Copy of notes.txt" - copies a human or app made by accident. */
     fun hasCopyMarker(name: String): Boolean = COPY_MARKER.containsMatchIn(stemOf(name))
+
+    /**
+     * The name a copy was made from: "report (1).pdf" gives "report.pdf", "Camera - Copy" gives "Camera", "Copy of notes.txt"
+     * gives "notes.txt". Null when [name] has no copy marker. A folder's whole name counts ("v1.2 (1)"), a file's stem.
+     */
+    fun withoutCopyMarker(name: String, isDirectory: Boolean = false): String? {
+        val stem = if (isDirectory) name else stemOf(name)
+        val m = COPY_MARKER.find(stem) ?: return null
+        val base = stem.removeRange(m.range).trim()
+        return if (base.isEmpty()) null else base + name.substring(stem.length)
+    }
 
     /** Zone of a top-level folder directly under the storage root. */
     fun topLevelZone(name: String): Zone = when {

@@ -1,0 +1,110 @@
+package com.galaxy.steward.core
+
+import com.galaxy.steward.core.exec.ExecutionSummary
+import com.galaxy.steward.core.exec.RollbackSummary
+import com.galaxy.steward.core.plan.JunkCategory
+import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.termux.TermuxReport
+import java.util.Locale
+
+/**
+ * One-line summaries of what the steward did, for the device log: a logcat export then shows every run's outcome
+ * and timing. Counts, sizes and durations only, never file names.
+ */
+object RunLog {
+    fun seconds(millis: Long): String = String.format(Locale.ROOT, "%.1f s", millis / 1000.0)
+
+    private fun count(n: Int): String = String.format(Locale.ROOT, "%,d", n)
+
+    /** [phases] lists how long each scan phase took, in the order they ran. */
+    fun scan(report: ScanReport, phases: List<Pair<ScanPhase, Long>> = emptyList()): String = buildString {
+        append("scan done in ").append(seconds(report.finishedAt - report.startedAt)).append(": ")
+        append(count(report.summary.totalFiles)).append(" files, ").append(report.summary.totalBytes.humanBytes())
+        append("; duplicate files ").append(count(report.duplicates.size))
+        append(" (").append(report.duplicates.sumOf { it.reclaimBytes }.humanBytes()).append(')')
+        append(", duplicate folders ").append(count(report.folderDuplicates.size))
+        append(" (").append(report.folderDuplicates.sumOf { it.reclaimBytes }.humanBytes()).append(')')
+        append(", merges ").append(count(report.folderMerges.size))
+        append(", clutter ").append(count(report.junk.size)).append(" (").append(report.junkBytes.humanBytes()).append(')')
+        report.junk.filter { it.category == JunkCategory.NEAR_COPIES }.takeIf { it.isNotEmpty() }?.let { near ->
+            append(", near-copies ").append(count(near.size)).append(" (").append(near.sumOf { it.bytes }.humanBytes()).append(')')
+        }
+        append(", to organize ").append(count(report.organize.size))
+        append(", to optimize ").append(count(report.optimize.size))
+        if (phases.isNotEmpty()) {
+            append("; phases ")
+            append(phases.joinToString(", ") { (phase, millis) -> "${phase.name.lowercase()} ${seconds(millis)}" })
+        }
+        if (report.reusedFolders > 0) append("; ").append(count(report.reusedFolders)).append(" unchanged code folders not listed again")
+    }
+
+    fun applied(title: String, kind: String, s: ExecutionSummary, millis: Long): String =
+        "run \"$title\" ($kind) done in ${seconds(millis)}: moved ${count(s.moved)} (${s.bytesMoved.humanBytes()}), " +
+            "deduplicated ${count(s.deduped)}, quarantined ${count(s.quarantined)} (${s.bytesQuarantined.humanBytes()}), " +
+            "cleared ${count(s.cleared)}, removed ${count(s.removedDirs)} empty folders, freed ${s.bytesFreed.humanBytes()}; " +
+            (if (s.packed > 0) "packed ${count(s.packed)} into zips (${s.bytesPacked.humanBytes()}), " else "") +
+            "skipped ${count(s.skipped)}, failed ${count(s.failed)}" + reasons(s.reasons)
+
+    /** "; why: source is gone 1,685, protected (pinned folder) 3": the most common reasons first, at most five. */
+    fun reasons(reasons: Map<String, Int>): String {
+        if (reasons.isEmpty()) return ""
+        val top = reasons.entries.sortedByDescending { it.value }.take(5)
+        val rest = reasons.size - top.size
+        return "; why: " + top.joinToString(", ") { "${it.key.replaceFirstChar(Char::lowercase)} ${count(it.value)}" } +
+            if (rest > 0) " and $rest more" else ""
+    }
+
+    /**
+     * Where Termux's space goes (home, packages, proot distributions) and what the audit can clean, by group. Folder
+     * sizes only: the report itself, with paths, stays on the phone.
+     */
+    fun termux(report: TermuxReport, millis: Long): String = buildString {
+        append("Termux audit done in ").append(seconds(millis)).append(": Termux uses ").append(report.totalBytes.humanBytes())
+        val home = report.usage.firstOrNull { it.path == report.home }?.bytes
+        val prefix = report.usage.firstOrNull { it.path == report.prefix }?.bytes
+        val distros = report.rootfs.sumOf { it.bytes }
+        val distrosInPrefix = report.rootfs.filter { it.path.startsWith(report.prefix + "/") }.sumOf { it.bytes }
+        val parts = buildList {
+            home?.let { add("home ${it.humanBytes()}") }
+            prefix?.let { add("packages ${(it - distrosInPrefix).coerceAtLeast(0).humanBytes()}") }
+            if (report.rootfs.isNotEmpty()) add("${report.rootfs.size} proot ${if (report.rootfs.size == 1) "distro" else "distros"} ${distros.humanBytes()}")
+        }
+        if (parts.isNotEmpty()) append(" (").append(parts.joinToString(", ")).append(')')
+        append("; ").append(count(report.items.size)).append(" cleanable items, ").append(report.reclaimableBytes.humanBytes())
+        val groups = report.items.groupBy { it.group }.toSortedMap()
+        if (groups.isNotEmpty()) {
+            append(" (").append(groups.entries.joinToString(", ") { (g, items) -> "${g.name.lowercase()} ${items.sumOf { it.bytes }.humanBytes()}" }).append(')')
+        }
+        append(", ").append(count(report.unsafe.size)).append(" unsafe paths skipped")
+        // What the keep rule protects (Layla's relays, Boot scripts, running programs), by reason only: no paths.
+        if (report.kept.isNotEmpty()) {
+            append("; kept ").append(count(report.keptTopmost.size)).append(" (")
+            append(report.keptTopmost.groupingBy { keptKind(it.why) }.eachCount().entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" })
+            append(')')
+            if (report.held.isNotEmpty()) append(", ").append(count(report.held.size)).append(" clean-ups held back (").append(report.held.sumOf { it.bytes }.humanBytes()).append(')')
+        }
+        // The parts that took longest, so a slow audit says where its time went.
+        if (report.timings.isNotEmpty()) {
+            append("; parts ").append(report.timings.entries.sortedByDescending { it.value }.joinToString(", ") { (k, v) -> "$k ${seconds(v)}" })
+        }
+        if (report.warnings.isNotEmpty()) append("; warnings: ").append(report.warnings.take(3).joinToString(" | "))
+    }
+
+    /** Why something in Termux is kept, as a kind: the reasons themselves can name scripts and folders. */
+    private fun keptKind(why: String): String = when {
+        why.startsWith("named like") -> "Layla relays"
+        why.startsWith("started by Termux:Boot") -> "Termux:Boot"
+        why.startsWith("a termux-services") -> "services"
+        why.startsWith("a Termux:Widget") -> "Widget shortcuts"
+        why.startsWith("a Termux:Tasker") -> "Tasker"
+        why.startsWith("a cron") -> "cron"
+        why.startsWith("started with every") -> "shell start-up"
+        why.startsWith("running now") -> "running now"
+        why.startsWith("you chose") -> "your list"
+        "runs with it" in why -> "what they run with"
+        else -> "other"
+    }
+
+    fun rolledBack(title: String, s: RollbackSummary, millis: Long): String =
+        "undo \"$title\" done in ${seconds(millis)}: restored ${count(s.restored)}, skipped ${count(s.skipped)}, failed ${count(s.failed)}"
+}

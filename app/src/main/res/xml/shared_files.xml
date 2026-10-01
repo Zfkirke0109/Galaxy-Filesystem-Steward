@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files this app can hand to a share sheet: only its logcat exports (SafetyPolicy.LOGCAT_DIR). -->
+<paths>
+    <external-path
+        name="logcat"
+        path="Documents/Galaxy Steward LogCat/" />
+</paths>

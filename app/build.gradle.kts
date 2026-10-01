@@ -4,6 +4,27 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+/** A build setting from the environment (GitHub Actions) or from a Gradle property (~/.gradle/gradle.properties). */
+fun buildSetting(env: String, property: String): String? =
+    (providers.environmentVariable(env).orNull ?: providers.gradleProperty(property).orNull)?.takeIf { it.isNotBlank() }
+
+// Release signing key. It never lives in this public repository: CI decodes it from secrets into a temporary file
+// (see docs/SIGNING.md). Without it, release builds fall back to the debug key, which differs on every machine, so
+// such an APK cannot be installed over one signed with the release key.
+val releaseKeystore = buildSetting("GALAXY_STEWARD_KEYSTORE", "galaxySteward.keystore")
+val releaseStorePassword = buildSetting("GALAXY_STEWARD_KEYSTORE_PASSWORD", "galaxySteward.keystorePassword")
+val releaseKeyAlias = buildSetting("GALAXY_STEWARD_KEY_ALIAS", "galaxySteward.keyAlias") ?: "galaxy-steward"
+val releaseKeyPassword = buildSetting("GALAXY_STEWARD_KEY_PASSWORD", "galaxySteward.keyPassword") ?: releaseStorePassword
+if (releaseKeystore != null && releaseStorePassword == null) {
+    throw GradleException("GALAXY_STEWARD_KEYSTORE is set but GALAXY_STEWARD_KEYSTORE_PASSWORD is not")
+}
+
+// CI passes its run number: every build gets a higher version code, so it installs as an update over the last one,
+// and Shizuku restarts the privileged helper with the new code.
+val buildNumber = buildSetting("GALAXY_STEWARD_VERSION_CODE", "galaxySteward.versionCode")?.let {
+    it.toIntOrNull()?.takeIf { n -> n > 0 } ?: throw GradleException("GALAXY_STEWARD_VERSION_CODE must be a positive number, not '$it'")
+}
+
 android {
     namespace = "com.galaxy.steward"
     compileSdk = 36
@@ -12,8 +33,19 @@ android {
         applicationId = "com.galaxy.steward"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = buildNumber ?: 1
+        versionName = if (buildNumber != null) "1.2.$buildNumber" else "1.2.0-dev"
+    }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -21,9 +53,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Signed with the debug key so CI can publish an installable APK without secrets.
-            // Replace with your own signingConfig for distribution.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 

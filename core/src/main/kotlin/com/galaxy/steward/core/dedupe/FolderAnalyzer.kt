@@ -9,6 +9,7 @@ import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
+import com.galaxy.steward.core.organize.BuiltInRules
 import com.galaxy.steward.core.plan.DeleteDuplicateOp
 import com.galaxy.steward.core.plan.FolderCopy
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
@@ -34,6 +35,8 @@ class FolderAnalyzer(
     private val cache: HashCache,
     private val fileDuplicates: FileDuplicateResult,
     private val listener: HashListener? = null,
+    /** For homes named after the device (firmware): where same-name folders gather. */
+    private val deviceLabel: String = "",
 ) {
     private val knownHashes = HashMap<FileNode, String>(fileDuplicates.fullHashes)
 
@@ -42,7 +45,135 @@ class FolderAnalyzer(
         val covered = HashSet<DirNode>()
         exact.forEach { group -> group.copies.forEach { copy -> tree.findAbsolute(copy.path)?.let { covered.add(it) } } }
         val merges = overlaps(covered)
-        return FolderAnalysis(exact, merges)
+        merges.forEach { m -> listOf(m.source, m.target).forEach { p -> tree.findAbsolute(p)?.let { covered.add(it) } } }
+        return FolderAnalysis(exact, merges + nameMerges(tree, covered))
+    }
+
+    // ---------------------------------------------------------------- folders of one name in two places
+
+    /**
+     * Folders with the same name (case, spaces and punctuation aside) in different places of your own files, like
+     * Documents/LogcatX and Documents/Reports/Diagnostics/LogcatX: what is in one goes into the other, keeping its
+     * layout, identical files go once, and different files with one name both stay. Only particular names (not
+     * "images" or "backup"), folders of your own files that aren't projects, code or pinned, and up to 2,000 files.
+     *
+     * A copy beside its original ("Camera (1)" next to "Camera", "Scripts - Copy" next to "Scripts") merges back into
+     * it whatever the name, in your files or the media library: the copy marker says what it is. A copy's name also
+     * counts as the original's elsewhere ("LogcatX (1)" joins "LogcatX"). The merge goes into the copy that is already
+     * where the organizer files such things (a home like Reports/Diagnostics), else the original name, else the fuller.
+     */
+    private suspend fun nameMerges(tree: StorageTree, covered: Set<DirNode>): List<FolderMerge> {
+        val byName = HashMap<String, MutableList<DirNode>>()
+        val pairs = ArrayList<Pair<DirNode, DirNode>>()
+        fun free(d: DirNode) = d.totalFiles in 1..MAX_NAME_MERGE_FILES && !d.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) &&
+            !d.insideFlagged(NodeFlags.PROJECT_ROOT or NodeFlags.GIT_DIR or NodeFlags.CODE_TREE) &&
+            covered.none { it === d || it.isAncestorOf(d) || d.isAncestorOf(it) }
+        tree.root.walkDirs { d ->
+            // A copy next to its original, of any name.
+            for (copy in d.dirs) {
+                if (copy.hidden || copy.depth < 2 || (copy.zone != Zone.USER_MANAGED && copy.zone != Zone.MEDIA_LIBRARY)) continue
+                val base = SafetyPolicy.withoutCopyMarker(copy.name, isDirectory = true) ?: continue
+                val original = d.dirs.firstOrNull { it !== copy && it.name.equals(base, ignoreCase = true) && it.zone == copy.zone } ?: continue
+                if (free(copy) && free(original)) pairs += original to copy
+            }
+            if (d.depth < 2 || d.hidden || d.zone != Zone.USER_MANAGED || !free(d)) return@walkDirs
+            val key = nameKey(d.name)
+            if (key.length < 4 || key in GENERIC_NAMES || key.all { it.isDigit() }) return@walkDirs
+            byName.getOrPut(key) { ArrayList() } += d
+        }
+        val out = ArrayList<FolderMerge>()
+        // A folder takes part in one merge per scan, as source or target, and neither inside nor around another one's:
+        // no two merges move the same files.
+        val used = ArrayList<DirNode>()
+        fun clashes(d: DirNode) = used.any { it === d || it.isAncestorOf(d) || d.isAncestorOf(it) }
+        for ((original, copy) in pairs) {
+            currentCoroutineContext().ensureActive()
+            if (clashes(copy) || clashes(original)) continue
+            planTreeMerge(original, copy)?.let {
+                out += it
+                used += copy
+                used += original
+            }
+        }
+        for ((_, dirs) in byName) {
+            val open = dirs.filter { !clashes(it) }
+            if (open.size < 2) continue
+            val ranked = open.sortedWith(nameMergeTarget)
+            val target = ranked.first()
+            var merged = false
+            for (source in ranked.drop(1)) {
+                currentCoroutineContext().ensureActive()
+                if (target.isAncestorOf(source) || source.isAncestorOf(target) || clashes(source)) continue
+                planTreeMerge(target, source)?.let {
+                    out += it
+                    used += source
+                    merged = true
+                }
+            }
+            if (merged) used += target
+        }
+        return out.sortedByDescending { it.sourceBytes }.take(25)
+    }
+
+    /** "LogcatX (1)" and "logcat-x" are one name: copy marker, case, spaces and punctuation aside. */
+    private fun nameKey(name: String): String =
+        (SafetyPolicy.withoutCopyMarker(name, isDirectory = true) ?: name).lowercase().filter { it.isLetterOrDigit() }
+
+    /** Where same-name folders gather: in a home of the organizer's, then the name without a copy marker, then the fuller. */
+    private val nameMergeTarget: Comparator<DirNode> =
+        compareByDescending<DirNode> { d -> d.parent?.let { BuiltInRules.isExactHome(it.relPath, deviceLabel, settings.customRules) } ?: false }
+            .thenBy { if (SafetyPolicy.withoutCopyMarker(it.name, isDirectory = true) != null) 1 else 0 }
+            .thenByDescending { it.totalFiles }
+            .then(KeeperRanking.dirComparator)
+
+    /** Every file of [source] into the same place under [target]; an identical one already there makes it a duplicate. */
+    private fun planTreeMerge(target: DirNode, source: DirNode): FolderMerge? {
+        val there = HashMap<String, FileNode>()
+        fun index(d: DirNode, prefix: String) {
+            d.files.forEach { there[prefix + it.name] = it }
+            d.dirs.forEach { index(it, prefix + it.name + "/") }
+        }
+        index(target, "")
+        val ops = ArrayList<Operation>()
+        var commonFiles = 0
+        var commonBytes = 0L
+        var uniqueFiles = 0
+        var uniqueBytes = 0L
+        fun walk(d: DirNode, prefix: String) {
+            for (f in d.files) {
+                if (SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) continue
+                val rel = prefix + f.name
+                val match = there[rel]?.takeIf { it.size == f.size }
+                val sha = if (match != null) fullHash(f) else null
+                if (match != null && sha != null && fullHash(match) == sha) {
+                    ops.add(DeleteDuplicateOp(f.path, match.path, f.size, sha))
+                    commonFiles++
+                    commonBytes += f.size
+                } else {
+                    // A different file of the same name gets a free name beside it when it is moved.
+                    ops.add(MoveFileOp(f.path, target.path + "/" + rel, f.size, f.mtime, sha))
+                    uniqueFiles++
+                    uniqueBytes += f.size
+                }
+            }
+            d.dirs.forEach { walk(it, prefix + it.name + "/") }
+        }
+        walk(source, "")
+        if (commonFiles + uniqueFiles == 0) return null
+        subdirsDeepestFirst(source).forEach { ops.add(RemoveEmptyDirOp(source.path + "/" + it)) }
+        ops.add(RemoveEmptyDirOp(source.path))
+        return FolderMerge(
+            id = "namemerge:${source.path.hashCode()}:${target.path.hashCode()}",
+            target = target.path,
+            source = source.path,
+            sourceBytes = source.totalBytes,
+            commonFiles = commonFiles,
+            commonBytes = commonBytes,
+            uniqueFiles = uniqueFiles,
+            uniqueBytes = uniqueBytes,
+            operations = ops,
+            sameName = true,
+        )
     }
 
     // ---------------------------------------------------------------- exact duplicate trees
@@ -236,6 +367,20 @@ class FolderAnalyzer(
             uniqueFiles = uniqueFiles,
             uniqueBytes = uniqueBytes,
             operations = ops,
+        )
+    }
+
+    private companion object {
+        const val MAX_NAME_MERGE_FILES = 2_000
+
+        /** Names too common to mean two folders hold the same things. */
+        val GENERIC_NAMES = setOf(
+            "data", "files", "assets", "images", "image", "photos", "videos", "audio", "music", "docs", "documents", "source",
+            "sources", "build", "output", "outputs", "input", "inputs", "backup", "backups", "archive", "archives", "export",
+            "exports", "import", "imports", "temp", "cache", "logs", "misc", "other", "others", "test", "tests", "sample",
+            "samples", "download", "downloads", "screenshots", "media", "resources", "config", "configs", "settings", "release",
+            "releases", "debug", "latest", "current", "previous", "final", "drafts", "draft", "notes", "reports", "report",
+            "results", "result", "projects", "project", "scripts", "tools", "models", "fonts", "icons", "thumbs", "thumbnails",
         )
     }
 }

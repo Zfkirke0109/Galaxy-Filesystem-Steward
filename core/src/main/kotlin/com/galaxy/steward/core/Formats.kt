@@ -23,3 +23,16 @@ const val KIB = 1024L
 const val MIB = 1024L * 1024L
 const val GIB = 1024L * 1024L * 1024L
 const val DAY_MS = 24L * 60L * 60L * 1000L
+
+/** How long ago [then] was, for "Used 4 months ago": days, then weeks, months and years. */
+fun ageText(then: Long, now: Long): String {
+    val days = (now - then).coerceAtLeast(0) / DAY_MS
+    return when {
+        days < 1 -> "in the last day"
+        days < 2 -> "yesterday"
+        days < 14 -> "$days days ago"
+        days < 61 -> "${days / 7} weeks ago"
+        days < 730 -> "${days / 30} months ago"
+        else -> "${days / 365} years ago"
+    }
+}

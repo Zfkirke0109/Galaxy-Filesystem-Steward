@@ -49,6 +49,8 @@ class AppDataGuard(rootPath: String, private val ownPackage: String?) {
 /**
  * Cleans app folders. Caches, logs and temp files are deleted for good (apps regenerate them) and journaled as
  * [JournalAction.PURGED]; outdated OBBs and leftovers of removed apps go to the quarantine and stay undoable.
+ * Files and folders picked in the browser are quarantined ([AppJunkKind.PICKED]) or deleted for good
+ * ([AppJunkKind.PICKED_DELETE]); an app's own top folder is never removed.
  */
 class AppDataExecutor(
     rootPath: String,
@@ -138,7 +140,12 @@ class AppDataExecutor(
         return when (item.kind) {
             AppJunkKind.LEFTOVERS -> quarantineLeftover(item, path)
             AppJunkKind.OBSOLETE_OBB -> quarantineFile(target, path)
-            else -> if (target.isDirectory) clearInside(path, item.cutoff) else deleteFile(target, path)
+            AppJunkKind.PICKED, AppJunkKind.PICKED_DELETE -> removePicked(item, target, path)
+            else -> when {
+                !target.isDirectory -> deleteFile(target, path)
+                attrs(path)?.isDirectory == false -> skip("No longer a folder")
+                else -> clearInside(path, item.cutoff).let { null }
+            }
         }
     }
 
@@ -173,12 +180,30 @@ class AppDataExecutor(
     }
 
     /**
-     * Deletes regular files older than [cutoff] below [dir] without following links, then removes subfolders that
-     * became empty. [dir] itself stays: apps expect their cache and log folders to exist.
+     * A file or folder you picked in the browser. Folders go as a whole; a file must still be the one you saw.
+     * Deleting skips links, key-like names and anything changed after the listing ([AppJunkItem.cutoff]).
      */
-    private fun clearInside(dir: Path, cutoff: Long): String? {
-        val top = attrs(dir) ?: return null
-        if (!top.isDirectory) return skip("No longer a folder")
+    private fun removePicked(item: AppJunkItem, target: AppTarget, path: Path): String? {
+        val location = guard.locate(target.path) ?: return skip("Not an app folder")
+        if (location.rest.isEmpty()) return skip("An app's own folder stays; pick what's inside it")
+        val a = attrs(path) ?: return null
+        if (a.isDirectory != target.isDirectory) return skip("Changed since you picked it")
+        if (item.kind == AppJunkKind.PICKED) {
+            return if (target.isDirectory) quarantineDir(path, target.size, a) else quarantineFile(target, path)
+        }
+        if (!target.isDirectory) return deleteFile(target, path)
+        val kept = clearInside(path, item.cutoff, keepTop = false)
+        return if (kept > 0) skip("$kept recent, linked or key-like item(s) kept") else null
+    }
+
+    /**
+     * Deletes regular files older than [cutoff] below [dir] without following links, then removes subfolders that
+     * became empty. [dir] itself stays unless [keepTop] is false: apps expect their cache and log folders to exist.
+     * Returns how many entries were left in place.
+     */
+    private fun clearInside(dir: Path, cutoff: Long, keepTop: Boolean = true): Int {
+        val top = attrs(dir) ?: return 0
+        if (!top.isDirectory) return 1
         var files = 0
         var bytes = 0L
         var kept = 0
@@ -214,6 +239,7 @@ class AppDataExecutor(
                 }
             }
         }
+        if (!keepTop) dirs.add(dir)
         for (d in dirs.sortedByDescending { it.nameCount }) {
             try {
                 val empty = Files.newDirectoryStream(d).use { !it.iterator().hasNext() }
@@ -221,11 +247,11 @@ class AppDataExecutor(
             } catch (_: IOException) {
             }
         }
-        if (files > 0) {
+        if (files > 0 || !keepTop) {
             purged(dir.toString(), files, bytes)
             changed += dir.toString()
         }
-        return null
+        return kept
     }
 
     // ------------------------------------------------------------------ quarantine (undoable)
@@ -261,6 +287,11 @@ class AppDataExecutor(
         if (loc.rest.isNotEmpty()) return skip("Not an app folder")
         val a = attrs(dir) ?: return null
         if (!a.isDirectory) return skip("No longer a folder")
+        return quarantineDir(dir, item.bytes, a)
+    }
+
+    /** Moves a whole folder to the quarantine in one rename, or file by file when the rename crosses a mount. */
+    private fun quarantineDir(dir: Path, bytes: Long, a: BasicFileAttributes): String? {
         val q = quarantineTarget(dir) ?: return skip("Quarantine unavailable")
         val renamed = try {
             Files.move(dir, q)
@@ -273,9 +304,9 @@ class AppDataExecutor(
                 failed++
                 return "Post-quarantine verification failed"
             }
-            sink.entry(JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), item.bytes, a.lastModifiedTime().toMillis(), null))
+            sink.entry(JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), bytes, a.lastModifiedTime().toMillis(), null))
             quarantined++
-            bytesQuarantined += item.bytes
+            bytesQuarantined += bytes
             changed += dir.toString()
             return null
         }

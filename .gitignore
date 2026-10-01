@@ -11,6 +11,10 @@ captures/
 local.properties
 *.keystore
 *.jks
+*.p12
+# Release signing key material (docs/SIGNING.md): never commit it, this repository is public.
+.galaxy-steward/
+release.password
 
 # IDE
 .idea/

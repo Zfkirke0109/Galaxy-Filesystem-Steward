@@ -90,7 +90,7 @@ fun OrganizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                                     vm.setSelected(items.map { it.id }, !all)
                                 },
                             )
-                            items.take(200).forEach { move -> MoveRow(move, move.id in state.selected, vm.rootPath) { vm.toggle(move.id) } }
+                            items.take(200).forEach { move -> MoveRow(move, move.id in state.selected, vm.rootPath, state.learned[move.id]?.note) { vm.toggle(move.id) } }
                             if (items.size > 200) {
                                 Text("…and ${items.size - 200} more", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 56.dp, bottom = 12.dp))
                             }
@@ -124,17 +124,22 @@ fun OrganizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
 }
 
 @Composable
-private fun MoveRow(move: OrganizeMove, checked: Boolean, root: String, onToggle: () -> Unit) {
+private fun MoveRow(move: OrganizeMove, checked: Boolean, root: String, learned: String?, onToggle: () -> Unit) {
     val kind = if (move.isDirectory) null else FileKind.of(move.title)
+    // A learned home explains itself in a sentence: that goes under the name, with a short pill.
+    val learnedHome = move.reason.substringAfter("Learned: ", "").takeIf { it.isNotEmpty() }
     SelectRow(
         checked = checked,
         onCheckedChange = { onToggle() },
         title = move.title + if (move.isDirectory) "/" else "",
         subtitle = "from " + move.source.substringBeforeLast('/').relativeTo(root) +
-            (if (move.isDirectory) " · ${move.fileCount} files" else "") + " · ${move.bytes.humanBytes()}",
+            (if (move.isDirectory) " · ${move.fileCount} files" else "") + " · ${move.bytes.humanBytes()}" +
+            (learnedHome?.let { "\nLearned from your folders: it $it" } ?: "") +
+            (learned?.let { "\n$it" } ?: ""),
         leading = {
             if (kind == null) IconBadge(folderIcon, MaterialTheme.colorScheme.primary, size = 32) else IconBadge(kindIcon(kind), kindColor(kind), size = 32)
         },
-        trailing = { Pill(move.reason) },
+        trailing = { Pill(if (learnedHome != null) "Learned" else move.reason) },
+        subtitleLines = 4,
     )
 }

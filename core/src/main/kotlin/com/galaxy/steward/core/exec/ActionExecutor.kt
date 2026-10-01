@@ -3,21 +3,28 @@ package com.galaxy.steward.core.exec
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.hash.FileIdentity
 import com.galaxy.steward.core.hash.Hashing
+import com.galaxy.steward.core.junk.ExtractedArchives
 import com.galaxy.steward.core.plan.DeleteDuplicateOp
+import com.galaxy.steward.core.plan.ExtractedCopy
 import com.galaxy.steward.core.plan.MoveDirOp
 import com.galaxy.steward.core.plan.MoveFileOp
 import com.galaxy.steward.core.plan.Operation
+import com.galaxy.steward.core.plan.PackDirOp
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.QuarantineOp
 import com.galaxy.steward.core.plan.RemoveEmptyDirOp
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import java.io.BufferedOutputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.BasicFileAttributes
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 data class ExecutorOptions(
     /** Quarantine verified duplicates instead of deleting them. */
@@ -45,8 +52,13 @@ data class ExecutionSummary(
     val changedPaths: List<String>,
     /** Regenerable files (caches, logs, temp) deleted for good. */
     val cleared: Int = 0,
+    /** Why files were skipped or failed, with how many each: "Source is gone" to 12. Counts files, also inside merges. */
+    val reasons: Map<String, Int> = emptyMap(),
+    /** Folders packed into zips, and the bytes those zips take. */
+    val packed: Int = 0,
+    val bytesPacked: Long = 0,
 ) {
-    val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs > 0
+    val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs + packed > 0
 
     /** Something in this run can be reverted from History. */
     val undoable: Boolean get() = changedAnything
@@ -84,7 +96,10 @@ class ActionExecutor(
     private var bytesFreed = 0L
     private var bytesQuarantined = 0L
     private var bytesMoved = 0L
+    private var packed = 0
+    private var bytesPacked = 0L
     private val messages = ArrayList<String>()
+    private val reasons = LinkedHashMap<String, Int>()
     private val changed = LinkedHashSet<String>()
     private val touchedParents = LinkedHashSet<Path>()
 
@@ -114,9 +129,9 @@ class ActionExecutor(
                         val outcome = try {
                             run(op)
                         } catch (e: IOException) {
-                            Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}")
+                            Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
                         } catch (e: SecurityException) {
-                            Outcome(Status.FAILED, "Permission denied")
+                            fail("Permission denied")
                         }
                         when (outcome.status) {
                             Status.DONE, Status.NOOP -> Unit
@@ -150,6 +165,9 @@ class ActionExecutor(
         return ExecutionSummary(
             runId, completed, partial, moved, deduped, quarantined, removedDirs, skipped, failed,
             bytesFreed, bytesQuarantined, bytesMoved, messages.toList(), changed.toList(),
+            reasons = reasons.toMap(),
+            packed = packed,
+            bytesPacked = bytesPacked,
         )
     }
 
@@ -161,6 +179,7 @@ class ActionExecutor(
         is DeleteDuplicateOp -> op.path
         is QuarantineOp -> op.path
         is RemoveEmptyDirOp -> op.path
+        is PackDirOp -> op.path
     }
 
     private fun run(op: Operation): Outcome = when (op) {
@@ -169,10 +188,16 @@ class ActionExecutor(
         is DeleteDuplicateOp -> deleteDuplicate(op)
         is QuarantineOp -> quarantineOp(op)
         is RemoveEmptyDirOp -> removeEmptyDir(op.path)
+        is PackDirOp -> packDir(op)
     }
 
-    private fun skip(message: String) = Outcome(Status.SKIPPED, message)
-    private fun fail(message: String) = Outcome(Status.FAILED, message)
+    private fun skip(message: String) = Outcome(Status.SKIPPED, message).also { tally(message) }
+    private fun fail(message: String) = Outcome(Status.FAILED, message).also { tally(message) }
+
+    /** Counted by reason, so a run that skips thousands of files says why in one line of the log. */
+    private fun tally(message: String) {
+        reasons[message] = (reasons[message] ?: 0) + 1
+    }
 
     private fun record(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) {
         journal.entry(JournalEntry(action, a, b, size, mtime, sha))
@@ -305,8 +330,8 @@ class ActionExecutor(
         }
         for (dir in dirs.sortedByDescending { it.nameCount }) removeEmptyDir(dir.toString())
         return when {
-            problems > 0 -> skip("$problems file(s) could not be merged")
-            leftBehind > 0 -> skip("$leftBehind protected item(s) left in place")
+            problems > 0 -> Outcome(Status.SKIPPED, "$problems file(s) could not be merged")
+            leftBehind > 0 -> Outcome(Status.SKIPPED, "$leftBehind protected item(s) left in place").also { tally("Protected items left in place") }
             else -> Outcome(Status.DONE)
         }
     }
@@ -373,6 +398,9 @@ class ActionExecutor(
             if (id.size != op.size || id.mtime != op.mtime) return skip("Changed since the scan")
             mtime = id.mtime
         }
+        if (op.extracted != null && !ExtractedArchives.verify(op.path, op.extracted)) {
+            return skip("The unpacked copy no longer matches the zip")
+        }
         val q = quarantineTarget(op.path) ?: return fail("Quarantine unavailable")
         Files.move(p, q)
         if (guard.exists(p) || !guard.exists(q)) return fail("Post-quarantine verification failed")
@@ -384,6 +412,91 @@ class ActionExecutor(
         return Outcome(Status.DONE)
     }
 
+    // ------------------------------------------------------------------ packing
+
+    private fun packDir(op: PackDirOp): Outcome {
+        guard.protectionReason(op.path)?.let { return skip("Protected ($it)") }
+        guard.protectionReason(op.zip)?.let { return skip("Protected destination ($it)") }
+        val dir = Paths.get(op.path)
+        val zip = Paths.get(op.zip)
+        if (!guard.isRealDirectory(dir)) return skip("Folder is gone")
+        if (!guard.resolvesBeneath(dir)) return skip("Unsafe source path")
+        if (guard.exists(zip)) return skip("A file with the zip's name is already there")
+        // Only plain files and folders, none changed since the scan, and no keys: those stay where their tools look.
+        val files = ArrayList<Pair<Path, BasicFileAttributes>>()
+        val dirs = ArrayList<Path>()
+        var bytes = 0L
+        Files.walk(dir).use { stream ->
+            for (p in stream) {
+                val attrs = Files.readAttributes(p, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                when {
+                    attrs.isSymbolicLink || attrs.isOther -> return skip("Holds links or special files")
+                    attrs.isDirectory -> dirs.add(p)
+                    SafetyPolicy.isCredentialName(p.fileName.toString()) -> return skip("Holds a key or credential")
+                    attrs.lastModifiedTime().toMillis() > op.newest -> return skip("Changed since the scan")
+                    else -> {
+                        files += p to attrs
+                        bytes += attrs.size()
+                    }
+                }
+            }
+        }
+        val name = dir.fileName.toString()
+        val partial = dir.resolveSibling(".$name.steward-partial.zip")
+        Files.deleteIfExists(partial)
+        try {
+            ZipOutputStream(BufferedOutputStream(Files.newOutputStream(partial), 1 shl 16)).use { out ->
+                out.setLevel(Deflater.BEST_COMPRESSION)
+                // Empty folders too, so unpacking gives back exactly the same tree.
+                for (d in dirs) {
+                    if (d == dir || Files.newDirectoryStream(d).use { it.iterator().hasNext() }) continue
+                    out.putNextEntry(ZipEntry("$name/" + dir.relativize(d).toString() + "/"))
+                    out.closeEntry()
+                }
+                val buffer = ByteArray(1 shl 16)
+                for ((p, attrs) in files) {
+                    val entry = ZipEntry("$name/" + dir.relativize(p).toString())
+                    entry.time = attrs.lastModifiedTime().toMillis()
+                    out.putNextEntry(entry)
+                    Files.newInputStream(p).use { input ->
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                    out.closeEntry()
+                }
+            }
+            val written = ExtractedArchives.entries(partial.toString())
+            if (written == null || written.size != files.size || !ExtractedArchives.verify(partial.toString(), ExtractedCopy(op.path, "$name/"))) {
+                Files.deleteIfExists(partial)
+                return fail("The zip didn't match the folder; nothing changed")
+            }
+            if (guard.exists(zip)) {
+                Files.deleteIfExists(partial)
+                return skip("A file with the zip's name appeared")
+            }
+            Files.move(partial, zip)
+        } catch (e: IOException) {
+            Files.deleteIfExists(partial)
+            throw e
+        }
+        val zipSize = Files.size(zip)
+        record(JournalAction.PACKED, op.zip, op.path, zipSize, Files.getLastModifiedTime(zip).toMillis(), Hashing.sha256(op.zip))
+        packed++
+        bytesPacked += zipSize
+        changed += op.zip
+        val moved = quarantineOp(QuarantineOp(op.path, isDirectory = true, size = bytes, mtime = -1))
+        if (moved.status != Status.DONE) {
+            // The folder stays, so its zip would only be a second copy: remove it (undo finds nothing to remove).
+            Files.deleteIfExists(zip)
+            packed--
+            bytesPacked -= zipSize
+        }
+        return if (moved.status == Status.DONE) Outcome(Status.DONE) else moved
+    }
+
     // ------------------------------------------------------------------ directories
 
     private fun removeEmptyDir(path: String): Outcome {
@@ -392,7 +505,7 @@ class ActionExecutor(
         if (!guard.exists(p)) return Outcome(Status.NOOP)
         if (!guard.isRealDirectory(p)) return skip("Not a folder")
         val rel = guard.relative(path)
-        if (!rel.contains('/') && rel in SafetyPolicy.STANDARD_TOP_DIRS) return skip("Standard Android folder")
+        if (!rel.contains('/') && SafetyPolicy.isKeptTopDir(rel)) return skip("Standard Android folder")
         val empty = Files.newDirectoryStream(p).use { !it.iterator().hasNext() }
         if (!empty) return skip("Folder is not empty")
         val mtime = try {

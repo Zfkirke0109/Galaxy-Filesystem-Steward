@@ -59,6 +59,8 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
                     JournalAction.DEDUPED -> recreateDuplicate(e)
                     JournalAction.RMDIR -> recreateDir(e.a)
                     JournalAction.MKDIR -> removeCreatedDir(e.a)
+                    JournalAction.PACKED -> removeCreatedZip(e)
+                    JournalAction.RELOCATED -> "Moved into Termux: moving it back goes through Termux"
                     // Caches, logs and temp files were deleted for good; there is nothing to bring back.
                     JournalAction.PURGED -> ""
                     else -> "Unknown journal action"
@@ -128,6 +130,16 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         val p = Paths.get(path)
         if (guard.isRealDirectory(p)) return ""
         if (!guard.ensureDirectories(p) { }) return "Cannot recreate folder"
+        return null
+    }
+
+    /** The zip a pack run made, once its folder is back: only while it is exactly the zip that run wrote. */
+    private fun removeCreatedZip(e: JournalEntry): String? {
+        if (!guard.wellFormed(e.a) || !guard.wellFormed(e.b)) return "Unsafe path"
+        val id = FileIdentity.of(e.a) ?: return ""
+        if (!guard.isRealDirectory(Paths.get(e.b))) return "The folder isn't back, so its zip stays"
+        if (id.size != e.size || (e.sha256 != null && Hashing.sha256(e.a) != e.sha256)) return "The zip changed since it was made, so it stays"
+        Files.delete(Paths.get(e.a))
         return null
     }
 

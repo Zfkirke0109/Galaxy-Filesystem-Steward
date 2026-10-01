@@ -142,9 +142,11 @@ class HashCache(private val file: File?) {
     /** Writes entries seen in this session, dropping stale ones for files that no longer exist. */
     fun save() {
         val f = file ?: return
+        var tmp: File? = null
         try {
             f.parentFile?.mkdirs()
-            val tmp = File(f.parentFile, f.name + ".tmp")
+            // A temp file of its own, so two scans saving at the same moment can't write into each other's copy.
+            tmp = File.createTempFile(f.name, ".tmp", f.absoluteFile.parentFile)
             tmp.bufferedWriter().use { out ->
                 for ((path, e) in map) {
                     if (path !in touched && !File(path).exists()) continue
@@ -158,6 +160,8 @@ class HashCache(private val file: File?) {
             }
         } catch (_: IOException) {
             // A cache is an optimisation only; failing to persist it is harmless.
+        } finally {
+            tmp?.takeIf { it.exists() }?.delete()
         }
     }
 }

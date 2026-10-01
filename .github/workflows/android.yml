@@ -2,14 +2,28 @@ name: Android build
 
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
   pull_request:
   workflow_dispatch:
+
+# One run per pull request (a newer push cancels the older run). Runs on main queue instead, so each gets its release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      signed: ${{ steps.key.outputs.signed }}
+      version: ${{ steps.apk.outputs.version }}
+      cert_sha256: ${{ steps.apk.outputs.cert_sha256 }}
+      apk_sha256: ${{ steps.apk.outputs.apk_sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,14 +40,66 @@ jobs:
       - name: End-to-end app test (Robolectric)
         run: ./gradlew :app:testDebugUnitTest --console=plain
 
-      - name: Lint and build APKs
-        run: ./gradlew :app:lintDebug :app:assembleDebug :app:assembleRelease --console=plain
+      - name: Lint
+        run: ./gradlew :app:lintDebug --console=plain
 
-      - name: Upload APKs
+      # The key only exists as encrypted secrets. It is decoded into the runner's temp folder for the build and deleted
+      # afterwards; it is never committed or uploaded (this repository is public). See docs/SIGNING.md.
+      - name: Prepare the release signing key
+        id: key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.GALAXY_STEWARD_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.GALAXY_STEWARD_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.GALAXY_STEWARD_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No release signing key::The GALAXY_STEWARD_KEYSTORE_BASE64 secret isn't available, so this APK is signed with a throwaway debug key. Run scripts/setup-signing.sh once (docs/SIGNING.md)."
+            exit 0
+          fi
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error title=Incomplete signing secrets::GALAXY_STEWARD_KEYSTORE_BASE64 is set but GALAXY_STEWARD_KEYSTORE_PASSWORD is not."
+            exit 1
+          fi
+          keystore="$RUNNER_TEMP/release.jks"
+          umask 077
+          if ! printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"; then
+            echo "::error title=Unreadable signing key::GALAXY_STEWARD_KEYSTORE_BASE64 is not valid base64."
+            exit 1
+          fi
+          if ! keytool -list -keystore "$keystore" -storepass:env KEYSTORE_PASSWORD -alias "${KEY_ALIAS:-galaxy-steward}" > /dev/null 2>&1; then
+            echo "::error title=Unreadable signing key::The keystore can't be opened with GALAXY_STEWARD_KEYSTORE_PASSWORD, or has no key named '${KEY_ALIAS:-galaxy-steward}'."
+            exit 1
+          fi
+          echo "GALAXY_STEWARD_KEYSTORE=$keystore" >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the release APK
+        env:
+          # Every build gets a higher version code, so it installs as an update over the previous one. Only this step
+          # sees it, so the test and lint builds above stay identical between runs and reuse the Gradle build cache.
+          GALAXY_STEWARD_VERSION_CODE: ${{ github.run_number }}
+          GALAXY_STEWARD_KEYSTORE_PASSWORD: ${{ secrets.GALAXY_STEWARD_KEYSTORE_PASSWORD }}
+          GALAXY_STEWARD_KEY_ALIAS: ${{ secrets.GALAXY_STEWARD_KEY_ALIAS }}
+          GALAXY_STEWARD_KEY_PASSWORD: ${{ secrets.GALAXY_STEWARD_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --console=plain
+
+      - name: Delete the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Verify the signature
+        id: apk
+        env:
+          RELEASE_SIGNED: ${{ steps.key.outputs.signed }}
+          EXPECTED_CERT_SHA256: ${{ vars.GALAXY_STEWARD_CERT_SHA256 }}
+        run: scripts/ci/verify-apk.sh app/build/outputs/apk/release/app-release.apk dist
+
+      - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
-          name: galaxy-steward-apks
-          path: app/build/outputs/apk/**/*.apk
+          name: galaxy-steward-${{ steps.apk.outputs.version }}
+          path: dist/
           if-no-files-found: error
 
       - name: Upload test and lint reports
@@ -47,3 +113,48 @@ jobs:
             app/build/reports/lint-results-debug.html
             app/build/outputs/roborazzi/
           if-no-files-found: ignore
+
+  # Each release-signed build of main becomes a GitHub release, so
+  # https://github.com/<owner>/<repo>/releases/latest/download/galaxy-steward.apk is always the newest build, and
+  # Obtainium or GitHub Store can install and update the app from this repository.
+  release:
+    needs: build
+    if: >-
+      needs.build.outputs.signed == 'true' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: galaxy-steward-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CERT_SHA256: ${{ needs.build.outputs.cert_sha256 }}
+          APK_SHA256: ${{ needs.build.outputs.apk_sha256 }}
+        run: |
+          # A stable file name keeps the releases/latest/download link working.
+          cp "dist/galaxy-steward-$VERSION.apk" dist/galaxy-steward.apk
+          tag="v$VERSION"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            # A re-run of the same build: replace the APK, keep the release.
+            gh release upload "$tag" dist/galaxy-steward.apk --clobber
+            exit 0
+          fi
+          notes="Install \`galaxy-steward.apk\` over any earlier release: it's signed with the same key, so the app keeps its settings, history and permissions.
+
+          | | |
+          |---|---|
+          | Certificate SHA-256 | \`$CERT_SHA256\` |
+          | APK SHA-256 | \`$APK_SHA256\` |
+          | Built from | $GITHUB_SHA |
+          "
+          gh release create "$tag" dist/galaxy-steward.apk --target "$GITHUB_SHA" --title "Galaxy Steward $VERSION" \
+            --notes "$notes" --generate-notes --latest

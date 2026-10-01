@@ -23,6 +23,8 @@ import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.ui.platform.testTag
+import androidx.compose.material.icons.rounded.Flag
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Speed
@@ -63,6 +65,7 @@ import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.StatCard
 import com.galaxy.steward.ui.components.UsageBar
 import com.galaxy.steward.ui.components.kindColor
+import com.galaxy.steward.ui.components.rememberScanStarter
 import java.text.DateFormat
 import java.util.Date
 
@@ -121,6 +124,27 @@ fun HomeScreen(vm: StewardViewModel, state: UiState, navigate: (String) -> Unit)
                 }
             }
             item { AutopilotCard(vm, state) { confirmAutopilot = true } }
+            item {
+                Card(
+                    onClick = { navigate(Routes.GOAL) },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).testTag("open:goal"),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                    shape = RoundedCornerShape(24.dp),
+                ) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Flag, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Free up space", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Pick how much; Koa takes the safest first, from shared storage and Termux",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
             item {
                 Card(
                     onClick = { navigate(Routes.EXPLORE) },
@@ -264,6 +288,7 @@ fun KindLegend(bytesByKind: Map<FileKind, Long>) {
 
 @Composable
 private fun ScanCard(vm: StewardViewModel, state: UiState) {
+    val startScan = rememberScanStarter(vm)
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -296,7 +321,7 @@ private fun ScanCard(vm: StewardViewModel, state: UiState) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Button(onClick = vm::startScan, modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = startScan, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("Start smart scan")
@@ -314,7 +339,7 @@ private fun ScanCard(vm: StewardViewModel, state: UiState) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        FilledTonalButton(onClick = vm::startScan) {
+                        FilledTonalButton(onClick = startScan) {
                             Icon(Icons.Rounded.Refresh, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
                             Text("Rescan")

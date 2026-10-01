@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.core.exec.JournalInfo
 import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.UiState
 import com.galaxy.steward.ui.components.ConfirmDialog
@@ -155,6 +156,7 @@ private fun RunCard(info: JournalInfo, quarantined: Long, onUndo: () -> Unit, on
             val facts = buildList {
                 if (info.stat("freed") > 0) add("freed ${info.stat("freed").humanBytes()}")
                 if (info.stat("apps") > 0) add("${info.stat("apps")} app caches cleared")
+                if (info.stat("reset") > 0) add("${info.stat("reset").plural("app")} cleared of all data")
                 if (info.stat("cleared") > 0) add("${info.stat("cleared")} ${if (info.kind == "termux") "locations" else "files"} cleared")
                 if (info.stat("deduped") > 0) add("${info.stat("deduped")} deduped")
                 if (info.stat("moved") > 0) add("${info.stat("moved")} moved")

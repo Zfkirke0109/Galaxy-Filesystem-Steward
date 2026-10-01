@@ -71,12 +71,32 @@ class DuplicateFinder(
     private fun candidates(tree: StorageTree): List<FileNode> {
         val out = ArrayList<FileNode>()
         walkEligible(tree.root, insideHidden = false) { dir ->
+            val small = smallCopies(dir)
             for (f in dir.files) {
-                if (f.size < settings.minDuplicateBytes || f.size <= 0) continue
+                if (f.size <= 0 || (f.size < settings.minDuplicateBytes && f !in small)) continue
                 if (!settings.includeHiddenInDuplicates && f.hidden) continue
                 if (SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) continue
                 out.add(f)
             }
+        }
+        return out
+    }
+
+    /**
+     * Small files are left out to keep a scan quick, except a copy beside its original at the same size ("notes (1).txt"
+     * next to "notes.txt"): so few that hashing them costs nothing, and they are the copies people make by accident.
+     */
+    private fun smallCopies(dir: DirNode): Set<FileNode> {
+        if (dir.files.size < 2) return emptySet()
+        var byName: Map<String, FileNode>? = null
+        val out = HashSet<FileNode>()
+        for (f in dir.files) {
+            if (f.size >= settings.minDuplicateBytes) continue
+            val base = SafetyPolicy.withoutCopyMarker(f.name) ?: continue
+            val names = byName ?: dir.files.associateBy { it.name.lowercase() }.also { byName = it }
+            val original = names[base.lowercase()]?.takeIf { it !== f && it.size == f.size } ?: continue
+            out += f
+            out += original
         }
         return out
     }

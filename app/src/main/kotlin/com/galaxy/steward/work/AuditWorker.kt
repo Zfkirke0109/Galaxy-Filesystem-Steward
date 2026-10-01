@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -18,27 +19,89 @@ import androidx.work.WorkerParameters
 import com.galaxy.steward.R
 import com.galaxy.steward.StewardApp
 import com.galaxy.steward.core.MIB
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.Steward
+import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.exec.ActionExecutor
+import com.galaxy.steward.core.exec.ExecutionSummary
+import com.galaxy.steward.core.exec.ExecutorOptions
+import com.galaxy.steward.core.goal.GoalPlanner
+import com.galaxy.steward.core.goal.RiskTier
+import com.galaxy.steward.core.learn.PreferenceModel
+import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.ui.MainActivity
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 /**
  * Weekly, read-only survey (the Termux steward's `audit` mode) run while charging. It never changes files;
  * it only empties quarantines past their retention period and posts a summary notification.
+ *
+ * It gives way to you: it skips a week when you scanned within the last day or something is running in the app,
+ * and stops its scan as soon as you start a scan or a clean-up (both would read the same storage and hash cache).
  */
 class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as StewardApp
         if (!StorageAccess.hasAccess(app)) return Result.success()
+        if (app.session.busy()) {
+            StewardLog.i("weekly audit skipped: a scan or clean-up is running")
+            return Result.success()
+        }
         val settings = app.settings.settings.value
         val root = StorageAccess.rootPath
         QuarantineManager(PathGuard(root, settings.protectedFolders), app.journals).purgeExpired(settings.quarantineRetentionDays)
+        val sinceLastScan = System.currentTimeMillis() - app.settings.lastScanAt
+        if (sinceLastScan in 0 until RECENT_SCAN_MS) {
+            StewardLog.i("weekly audit skipped: storage was scanned ${sinceLastScan / 60_000} min ago")
+            return Result.success()
+        }
 
-        val report = Steward(root, settings, app.environment, app.hashCacheFile).scan(StorageAccess.space())
+        val started = SystemClock.uptimeMillis()
+        val report = coroutineScope {
+            val scan = async(Dispatchers.IO) { Steward(root, settings, app.environment, app.hashCacheFile, app.memory).scan(StorageAccess.space()) }
+            val yieldToYou = launch {
+                app.session.state.first { it.scanning || it.applying != null }
+                scan.cancel()
+            }
+            try {
+                scan.await()
+            } catch (e: CancellationException) {
+                if (!isActive) throw e // the worker itself was stopped
+                null
+            } finally {
+                yieldToYou.cancel()
+            }
+        }
+        if (report == null) {
+            StewardLog.i("weekly audit stopped after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: you started a scan or clean-up")
+            return Result.success()
+        }
+        app.settings.lastScanAt = System.currentTimeMillis()
+        StewardLog.i("weekly audit: ${RunLog.scan(report)}")
+        val upkeep = if (settings.weeklyUpkeep && !app.session.busy()) upkeep(app, report, settings) else null
+        upkeep?.takeIf { it.changedAnything }?.let { s ->
+            notify(
+                app,
+                "Weekly upkeep: ${(s.bytesQuarantined + s.bytesFreed).humanBytes()} cleared",
+                "${(s.quarantined + s.removedDirs).plural("item")} to the quarantine for ${settings.quarantineRetentionDays} days",
+                "Temp files, old logs and empty folders the rules tick. Undo it in History.",
+            )
+            return Result.success()
+        }
         val reclaimable = report.duplicateBytes + report.junkBytes
         val toFile = report.organize.size
         if (reclaimable < 50 * MIB && toFile < 20) return Result.success()
@@ -52,7 +115,29 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         return Result.success()
     }
 
-    private fun notify(context: Context, title: String, text: String) {
+    /**
+     * Weekly upkeep: the clutter that loses nothing and the rules tick ([RiskTier.NOTHING_LOST]), less what your past
+     * choices say you keep, into the quarantine. Null when there is nothing to do.
+     */
+    private suspend fun upkeep(app: StewardApp, report: ScanReport, settings: StewardSettings): ExecutionSummary? {
+        val root = StorageAccess.rootPath
+        val now = System.currentTimeMillis()
+        val model = if (settings.learnFromChoices) withContext(Dispatchers.IO) { PreferenceModel.train(app.decisions.load()) } else null
+        val items = report.junk.filter { item ->
+            item.defaultSelected && GoalPlanner.tierOf(item) == RiskTier.NOTHING_LOST && model?.choiceFor(item, root, now)?.select != false
+        }
+        if (items.isEmpty()) return null
+        val started = SystemClock.uptimeMillis()
+        val summary = withContext(Dispatchers.IO) {
+            ActionExecutor(root, app.journals, ExecutorOptions(settings.quarantineDuplicates, settings.protectedFolders))
+                .execute("Weekly upkeep", "upkeep", items)
+        }
+        StewardLog.i(RunLog.applied("Weekly upkeep", "upkeep", summary, SystemClock.uptimeMillis() - started))
+        withContext(Dispatchers.IO) { StorageAccess.rescan(app, summary.changedPaths) }
+        return summary
+    }
+
+    private fun notify(context: Context, title: String, text: String, footer: String = "Nothing was changed - open the app to review.") {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -67,7 +152,7 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             .setSmallIcon(R.drawable.ic_stat_steward)
             .setContentTitle(title)
             .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText("$text\n\nNothing was changed - open the app to review."))
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$text\n\n$footer"))
             .setContentIntent(intent)
             .setAutoCancel(true)
             .build()
@@ -77,6 +162,7 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
     companion object {
         private const val WORK_NAME = "weekly-audit"
         private const val NOTIFICATION_ID = 7
+        private const val RECENT_SCAN_MS = 24 * 60 * 60_000L
 
         fun schedule(context: Context, enabled: Boolean) {
             val wm = WorkManager.getInstance(context)
@@ -85,6 +171,8 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
                 return
             }
             val request = PeriodicWorkRequestBuilder<AuditWorker>(7, TimeUnit.DAYS)
+                // Otherwise the first survey starts the moment it's switched on (while charging), right after a scan.
+                .setInitialDelay(1, TimeUnit.DAYS)
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiresCharging(true)

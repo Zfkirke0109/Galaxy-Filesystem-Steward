@@ -71,6 +71,30 @@ class TermuxScriptTest {
         write(File(home, "proj/build/out.o"), 400)
         write(File(home, "proj/node_modules/pkg/index.js"), 500)
         File(home, "proj/.gitignore").writeText("build/\nnode_modules/\n")
+        // Caches this version added: downloaded distro images, npx, Yarn, Cargo Git, old Gradle daemon logs, trash, and
+        // Python bytecode anywhere in the home (but never inside a distro or shared storage).
+        write(File(prefix, "var/lib/proot-distro/dlcache/debian-aarch64.tar.xz"), 800)
+        write(File(prefix, "var/log/apt/history.log"), 60, old)
+        write(File(home, ".npm/_npx/abc/node_modules/x/index.js"), 70)
+        write(File(home, ".cache/yarn/v6/pkg.tgz"), 80)
+        write(File(home, ".cargo/git/checkouts/dep/src/lib.rs"), 90)
+        write(File(home, ".gradle/daemon/8.9/daemon-1.out.log"), 110, old)
+        write(File(home, ".gradle/daemon/8.9/daemon-2.out.log"), 120)
+        write(File(home, ".local/share/Trash/files/old.txt"), 130)
+        write(File(home, "scripts/__pycache__/tool.cpython-312.pyc"), 140)
+        write(File(home, "scripts/tool.py"), 20)
+        write(File(debian, "usr/lib/python3/__pycache__/os.cpython-312.pyc"), 150)
+        write(File(debian, "root/.npm/_npx/def/index.js"), 160)
+        // Claude Code keeps every version it updated from; the link says which one is in use.
+        write(File(home, ".local/share/claude/versions/2.1.270"), 100, old - 2 * DAY_MS)
+        write(File(home, ".local/share/claude/versions/2.1.278"), 110, old - DAY_MS)
+        write(File(home, ".local/share/claude/versions/2.1.280"), 120)
+        File(home, ".local/bin").mkdirs()
+        Files.createSymbolicLink(File(home, ".local/bin/claude").toPath(), File(home, ".local/share/claude/versions/2.1.278").toPath())
+        write(File(home, ".storage-autopilot-archives/termux-backups/backup.tar.gz"), 170)
+        // A Node package whose name ends in -fs is not a Linux distribution (seen on a real phone).
+        write(File(home, "node_modules/graceful-fs/tmp/old.js"), 180, old)
+        write(File(home, "node_modules/graceful-fs/package.json"), 10)
         git(File(home, "proj"), "init", "-q")
         git(File(home, "proj"), "add", ".gitignore", "src")
         git(File(home, "proj"), "commit", "-qm", "init")
@@ -109,7 +133,7 @@ class TermuxScriptTest {
         assertEquals("other-cache=${home.path}/.cache/huggingface", byTarget.getValue("other-cache").single().spec)
         assertFalse(byTarget.getValue("other-cache").single().defaultSelected)
         assertEquals(setOf("build=${home.path}/proj/build", "build=${home.path}/proj/node_modules"), byTarget.getValue("build").map { it.spec }.toSet())
-        assertEquals(2, report.items.count { it.targetId == "proot-cache" })
+        assertEquals(3, report.items.count { it.targetId == "proot-cache" }) // apt archives, pip and npx
         assertTrue(report.items.single { it.targetId == "proot-tmp" }.title.startsWith("Distro temp files: debian/"))
         assertEquals(listOf(debian.path), report.rootfs.map { it.path })
         assertTrue(report.unsafe.any { it.endsWith("/.cache/uv") }) // symlinked cache is refused, not followed
@@ -117,11 +141,26 @@ class TermuxScriptTest {
         assertTrue(report.items.none { it.path.contains("/src") })
         assertTrue(report.totalBytes > 0)
         assertTrue(report.items.any { it.group == TermuxGroup.DEV })
+
+        assertEquals(800L, byTarget.getValue("proot-dlcache").single().bytes)
+        assertEquals(60L, byTarget.getValue("termux-var-log").single().bytes)
+        assertEquals(70L, byTarget.getValue("npx-cache").single().bytes)
+        assertEquals(80L, byTarget.getValue("yarn-cache").single().bytes)
+        assertEquals(90L, byTarget.getValue("cargo-git-checkouts").single().bytes)
+        assertEquals(110L, byTarget.getValue("gradle-daemon-logs").single().bytes) // the week-old log only
+        assertEquals(130L, byTarget.getValue("trash").single().bytes)
+        assertEquals(140L, byTarget.getValue("pycache").single().bytes) // not the distro's bytecode
+        assertTrue(byTarget.getValue("proot-cache").any { it.path.endsWith("/root/.npm/_npx") })
+        assertTrue(byTarget.getValue("other-cache").none { it.path.endsWith("/yarn") }) // counted once, as its own target
+        assertEquals(100L, byTarget.getValue("claude-versions").single().bytes) // not the one in use, not the newest
+        assertFalse(byTarget.getValue("koa-archives").single().defaultSelected)
+        assertTrue(report.items.none { it.path.contains("graceful-fs") })
     }
 
     @Test
     fun cleanRemovesOnlyValidatedTargets() {
-        val specs = audit().items.map { it.spec } + listOf(
+        // ~/node_modules is offered for review since 1.2.8; here it stands for the folder once mistaken for a distro.
+        val specs = audit().items.map { it.spec }.filterNot { it == "home-node-modules" } + listOf(
             "uv-cache", // symlinked to a folder outside Termux
             "other-cache=${outside.path}", // forged path outside ~/.cache
             "build=${home.path}/proj/src", // tracked sources
@@ -140,6 +179,17 @@ class TermuxScriptTest {
         assertTrue(File(home, "proj/src/main.c").exists())
         assertFalse(File(debian, "var/cache/apt/archives/curl.deb").exists())
         assertTrue(File(outside, "precious.txt").exists())
+        assertFalse(File(prefix, "var/lib/proot-distro/dlcache/debian-aarch64.tar.xz").exists())
+        assertFalse(File(home, ".gradle/daemon/8.9/daemon-1.out.log").exists())
+        assertTrue(File(home, ".gradle/daemon/8.9/daemon-2.out.log").exists()) // a current log stays
+        assertFalse(File(home, "scripts/__pycache__").exists())
+        assertTrue(File(home, "scripts/tool.py").exists())
+        assertTrue(File(debian, "usr/lib/python3/__pycache__/os.cpython-312.pyc").exists())
+        assertFalse(File(home, ".local/share/Trash/files/old.txt").exists())
+        assertFalse(File(home, ".local/share/claude/versions/2.1.270").exists())
+        assertTrue(File(home, ".local/share/claude/versions/2.1.278").exists())
+        assertTrue(File(home, ".local/share/claude/versions/2.1.280").exists())
+        assertTrue(File(home, "node_modules/graceful-fs/tmp/old.js").exists())
 
         val status = summary.results.associate { (it.targetId + "=" + it.path.substringAfterLast('/')) to it.status }
         assertEquals("SKIP_UNSAFE", status["uv-cache=uv"])
@@ -148,6 +198,23 @@ class TermuxScriptTest {
         assertEquals("SKIP_UNSAFE", status["proot-cache=etc"])
         assertEquals("SKIP_UNKNOWN", status["no-such-target="])
         assertTrue(summary.freed >= 3000 + 100 + 5000 + 7000 + 2000 + 400 + 500)
+    }
+
+    @Test
+    fun largeFilesAndFoldersComeFromOneWalk() {
+        // Real (non-sparse) data: the audit sizes everything of 50 MiB or more in a single du pass.
+        val big = File(home, "models/llama.gguf")
+        big.parentFile.mkdirs()
+        big.outputStream().use { out ->
+            val chunk = ByteArray(1 shl 20) { (it % 7).toByte() }
+            repeat(51) { out.write(chunk) }
+        }
+        val report = audit()
+        assertEquals(listOf(big.path), report.largeFiles.map { it.path })
+        assertEquals(51L * 1024 * 1024, report.largeFiles.single().size)
+        assertTrue(report.largeFiles.single().mtime > 0)
+        assertTrue(report.usage.any { it.path == File(home, "models").path && it.bytes >= 51L * 1024 * 1024 })
+        assertTrue(report.totalBytes >= 51L * 1024 * 1024)
     }
 
     @Test

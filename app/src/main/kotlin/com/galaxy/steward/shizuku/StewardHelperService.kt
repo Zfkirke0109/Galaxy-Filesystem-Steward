@@ -4,9 +4,13 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import androidx.annotation.Keep
+import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.core.appdata.AppDataHelper
 import com.galaxy.steward.core.appdata.AppDataWire
 import com.galaxy.steward.core.appdata.AppPolicy
+import com.galaxy.steward.core.device.PrivateData
+import com.galaxy.steward.core.device.ShellSpace
+import com.galaxy.steward.diagnostics.LogcatDump
 import kotlinx.coroutines.runBlocking
 import java.io.BufferedWriter
 import java.io.OutputStreamWriter
@@ -16,8 +20,10 @@ import kotlin.system.exitProcess
 /**
  * The privileged half of the steward. Shizuku starts it in a separate process running as Android's shell user
  * (uid 2000), from this APK. It only exposes the fixed operations in [IStewardHelper]: the app-data scanner and
- * executor from `core` (with all their run-time checks), a cache-only clear for one validated package name, and
- * granting the app usage access. There is no generic command runner.
+ * executor from `core` (with all their run-time checks), a read-only folder listing for the app folder browser, a
+ * cache-only clear or a full data clear for one validated package name, granting the app usage access, a fixed
+ * dump of the device log, the shell-only places (/data/local/tmp, bug reports), Android's own storage breakdown and
+ * clean-ups, and run-as for debuggable apps. There is no generic command runner.
  */
 @Keep
 class StewardHelperService : IStewardHelper.Stub {
@@ -35,6 +41,11 @@ class StewardHelperService : IStewardHelper.Stub {
     override fun scanAppData(request: ParcelFileDescriptor): ParcelFileDescriptor {
         val text = readAll(request)
         return stream { out -> AppDataHelper.Helper.scan(text, out) }
+    }
+
+    override fun listAppFolder(request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> AppDataHelper.Helper.list(text, out) }
     }
 
     override fun applyAppData(request: ParcelFileDescriptor): ParcelFileDescriptor {
@@ -56,13 +67,105 @@ class StewardHelperService : IStewardHelper.Stub {
         }
         // On Samsung Android 16 this call clears the cache but its completion callback can hang (observed by the
         // Termux steward), so success is judged by the app from live storage stats, never from the exit code.
-        val code = exec(listOf("/system/bin/cmd", "package", "clear", "--user", user, "--cache-only", packageName), timeoutMs.coerceIn(5_000, 60_000))
+        val code = exec(listOf("/system/bin/cmd", "package", "clear", "--user", user, "--cache-only", packageName), timeoutMs.coerceIn(3_000, 60_000))
         return "exit=$code"
+    }
+
+    override fun clearAppData(packageName: String, userId: Int, timeoutMs: Long): String {
+        if (!AppPolicy.isPackageName(packageName) || userId < 0) return "error=invalid package"
+        AppPolicy.clearDataBlock(packageName, BuildConfig.APPLICATION_ID)?.let { return "error=$it" }
+        val user = userId.toString()
+        // The name rules can't see every preinstalled app; ask the package manager, and refuse when it can't say.
+        val (listed, system) = capture(listOf("/system/bin/cmd", "package", "list", "packages", "-s", "--user", user, packageName), 15_000)
+        if (listed != 0) return "error=could not check the package"
+        if (system.lineSequence().any { it.trim() == "package:$packageName" }) return "error=System app"
+        return "exit=${exec(listOf("/system/bin/pm", "clear", "--user", user, packageName), timeoutMs.coerceIn(5_000, 120_000))}"
     }
 
     override fun grantUsageAccess(packageName: String): Boolean {
         if (!AppPolicy.isPackageName(packageName)) return false
         return exec(listOf("/system/bin/appops", "set", packageName, "GET_USAGE_STATS", "allow"), 10_000) == 0
+    }
+
+    override fun dumpLogcat(): ParcelFileDescriptor {
+        val (read, write) = ParcelFileDescriptor.createPipe()
+        Thread {
+            ParcelFileDescriptor.AutoCloseOutputStream(write).use { out ->
+                out.write("--------- Galaxy Steward helper: uid ${Process.myUid()}, pid ${Process.myPid()}\n".toByteArray())
+                var logcat: java.lang.Process? = null
+                try {
+                    logcat = ProcessBuilder(LogcatDump.COMMAND).redirectErrorStream(true).start()
+                    logcat.inputStream.use { it.copyTo(out, 64 * 1024) }
+                    logcat.waitFor()
+                } catch (e: Exception) {
+                    // The app stopped reading, or logcat could not start: say why if the pipe is still open.
+                    runCatching { out.write("--------- logcat failed: ${e.message ?: e.javaClass.simpleName}\n".toByteArray()) }
+                } finally {
+                    logcat?.destroy()
+                }
+            }
+        }.apply { name = "steward-logcat" }.start()
+        return read
+    }
+
+    override fun shellSpace(request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> ShellSpace.handle(text, out) }
+    }
+
+    override fun diskStats(): ParcelFileDescriptor = stream { out ->
+        val (code, text) = capture(listOf("/system/bin/dumpsys", "diskstats"), 30_000)
+        if (code != 0 && text.isBlank()) out("dumpsys diskstats failed: exit $code") else text.lineSequence().forEach(out)
+    }
+
+    override fun systemClean(what: String, timeoutMs: Long): String {
+        val command = when (what) {
+            "trim-caches" -> listOf("/system/bin/pm", "trim-caches", "4096G")
+            "art-cleanup" -> listOf("/system/bin/pm", "art", "cleanup")
+            else -> return "error=unknown clean-up"
+        }
+        val (code, text) = capture(command, timeoutMs.coerceIn(10_000, 600_000))
+        return "exit=$code\n" + text.trim().takeLast(2_000)
+    }
+
+    override fun privateData(packageName: String, request: ParcelFileDescriptor): ParcelFileDescriptor {
+        val text = readAll(request)
+        return stream { out -> privateDataOp(packageName, text, out) }
+    }
+
+    /** list: `run-as <pkg> du` of its data folder. remove: stops the app, then `run-as <pkg> rm -rf` each checked path. */
+    private fun privateDataOp(pkg: String, request: String, out: (String) -> Unit) {
+        val lines = request.lines().filter { it.isNotEmpty() }
+        if (!AppPolicy.isPackageName(pkg) || AppPolicy.isProtected(pkg, BuildConfig.APPLICATION_ID) || pkg == AppPolicy.SHIZUKU) {
+            out("E\tprotected or not a package")
+        } else {
+            when (lines.firstOrNull()) {
+                "list" -> {
+                    val (code, text) = capture(listOf("/system/bin/run-as", pkg, "du", "-a", "-k", "-d", "3", "."), 180_000)
+                    if (code != 0 && PrivateData.parseDu(pkg, text.lineSequence()).isEmpty()) {
+                        out("E\t" + (text.lineSequence().firstOrNull { it.isNotBlank() }?.take(200) ?: "run-as failed: exit $code").replace('\t', ' '))
+                    } else {
+                        PrivateData.parseDu(pkg, text.lineSequence()).forEach { e -> out("S\t${e.bytes}\t${e.rel}") }
+                    }
+                }
+                "remove" -> {
+                    if (AppPolicy.mayForceStop(pkg)) exec(listOf("/system/bin/am", "force-stop", "--user", "0", pkg), 10_000)
+                    for (rel in lines.drop(1)) {
+                        if (!PrivateData.validRel(rel)) {
+                            out("D\tSKIP_UNSAFE\t0\t$rel\tnot a path inside the app's data")
+                            continue
+                        }
+                        val before = capture(listOf("/system/bin/run-as", pkg, "du", "-s", "-k", "--", rel), 120_000).second
+                            .trim().substringBefore('\t').substringBefore(' ').toLongOrNull()?.times(1024) ?: 0L
+                        exec(listOf("/system/bin/run-as", pkg, "rm", "-rf", "--", rel), 300_000)
+                        val still = exec(listOf("/system/bin/run-as", pkg, "ls", "-d", "--", rel), 10_000) == 0
+                        out(if (still) "D\tPARTIAL\t0\t$rel\tsome files could not be removed" else "D\tREMOVED\t$before\t$rel\t")
+                    }
+                }
+                else -> out("E\tunknown request")
+            }
+        }
+        out(ShellSpace.END)
     }
 
     /** Runs a fixed command without a shell. Returns the exit code, 124 on timeout (like `timeout`), -1 on error. */
@@ -77,6 +180,28 @@ class StewardHelperService : IStewardHelper.Stub {
         }
     } catch (_: Exception) {
         -1
+    }
+
+    /** Like [exec], and also returns what the command printed (at most 1 MiB). */
+    private fun capture(command: List<String>, timeoutMs: Long): Pair<Int, String> = try {
+        val p = ProcessBuilder(command).redirectErrorStream(true).start()
+        val output = StringBuilder()
+        val reader = Thread {
+            runCatching {
+                p.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line -> synchronized(output) { if (output.length < 1 shl 20) output.appendLine(line) } }
+                }
+            }
+        }.apply { start() }
+        if (p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            reader.join(2_000)
+            p.exitValue() to synchronized(output) { output.toString() }
+        } else {
+            p.destroy()
+            124 to ""
+        }
+    } catch (_: Exception) {
+        -1 to ""
     }
 
     private fun readAll(fd: ParcelFileDescriptor): String =

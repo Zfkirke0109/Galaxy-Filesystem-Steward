@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.FolderSpecial
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.QueryStats
@@ -41,9 +42,9 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.apps.AppStorage
+import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
-import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.shizuku.ShizukuStatus
 import com.galaxy.steward.termux.TermuxBridge
 import com.galaxy.steward.termux.TermuxStatus
@@ -153,7 +154,8 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     title = "Installed apps",
                     text = when {
                         !apps.usageAccess -> "Grant usage access to see what every app stores, split into app data and cache."
-                        apps.statsLoading && apps.apps.isEmpty() -> "Measuring apps…"
+                        apps.statsLoading && !apps.everLoaded ->
+                            "Measuring apps…" + if (apps.statsTotal > 0) " ${apps.statsDone} of ${apps.statsTotal}" else ""
                         apps.statsError != null -> apps.statsError!!
                         else -> "${apps.apps.size.plural("app")} use ${total.humanBytes()}: ${data.humanBytes()} app data, ${cache.humanBytes()} cache"
                     },
@@ -190,6 +192,47 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     if (report == null) vm.apps.scanFolders()
                     navigate(Routes.APP_FOLDERS)
                 }
+            }
+
+            item {
+                val report = apps.folders
+                OverviewCard(
+                    icon = Icons.Rounded.FolderOpen,
+                    title = "Browse app folders",
+                    text = "Open Android/data, obb and media folder by folder, like a file manager, and remove the files and " +
+                        "folders you choose - into the quarantine, or for good." +
+                        if (report != null && AppArea.DATA !in report.areas) " Connect Shizuku for Android/data and obb." else "",
+                    fraction = null,
+                    busy = false,
+                    action = "Browse",
+                ) {
+                    if (apps.folders == null && !apps.foldersScanning) vm.apps.scanFolders()
+                    navigate(Routes.APP_BROWSER)
+                }
+            }
+
+            item {
+                OverviewCard(
+                    icon = Icons.Rounded.FolderOpen,
+                    title = "What an app left behind",
+                    text = "Pick an app you removed (or one still installed), or type a name: its folders and backups in shared " +
+                        "storage, its installers, Android/data, Termux files and what adb pushed, in one list to remove in one run.",
+                    fraction = null,
+                    busy = false,
+                    action = "Find",
+                ) { navigate(Routes.APP_LEFTOVERS) }
+            }
+
+            item {
+                OverviewCard(
+                    icon = Icons.Rounded.Key,
+                    title = "Beyond app folders",
+                    text = "Through Shizuku: what Android itself counts (System, Other), its own cache and compiled-code clean-ups, what adb " +
+                        "left in /data/local/tmp, bug reports, Layla's and UserLAnd's private data, and your debuggable builds' data.",
+                    fraction = null,
+                    busy = false,
+                    action = if (shizuku == ShizukuStatus.READY) "Open" else null,
+                ) { navigate(Routes.DEEP_SPACE) }
             }
 
             item { SectionHeader("Termux") }

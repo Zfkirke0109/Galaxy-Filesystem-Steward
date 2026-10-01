@@ -99,6 +99,62 @@ object AppDataWire {
         return ApplyRequest(root, runId, title, own, if (known) installed else null, items.items())
     }
 
+    // ------------------------------------------------------------------ folder listings (the browser)
+
+    data class ListRequest(val rootPath: String, val ownPackage: String?, val path: String)
+
+    fun encodeListRequest(r: ListRequest): String =
+        "root\t${r.rootPath}\nown\t${r.ownPackage ?: "-"}\npath\t${r.path}\n"
+
+    fun decodeListRequest(text: String): ListRequest {
+        var root = ""
+        var own: String? = null
+        var path = ""
+        text.lineSequence().forEach { line ->
+            val p = line.split('\t')
+            when (p[0]) {
+                "root" -> root = p.getOrElse(1) { "" }
+                "own" -> own = p.getOrNull(1)?.takeIf { it != "-" }
+                "path" -> path = p.getOrElse(1) { "" }
+            }
+        }
+        require(root.startsWith("/") && path.startsWith("$root/")) { "Malformed request" }
+        return ListRequest(root, own, path)
+    }
+
+    fun encodeListing(l: AppFolderListing): Sequence<String> = sequence {
+        yield("B\t${l.path}\t${l.area.dir}\t${l.packageName}\t${if (l.protected) 1 else 0}\t${l.listedAt}\t${l.hidden}")
+        l.entries.forEach { e ->
+            yield("F\t${e.name}\t${if (e.isDirectory) "d" else "f"}\t${e.bytes}\t${e.files}\t${e.mtime}\t${if (e.partial) 1 else 0}\t${e.locked?.let(::clean) ?: "-"}")
+        }
+    }
+
+    /** Parses a streamed listing; unknown lines (errors, the end marker) are handed to [other]. */
+    fun decodeListing(lines: Sequence<String>, other: (List<String>) -> Unit = {}): AppFolderListing? {
+        var head: List<String>? = null
+        val entries = ArrayList<AppFolderEntry>()
+        lines.forEach { line ->
+            val p = line.split('\t')
+            when {
+                p[0] == "B" && p.size >= 7 -> head = p
+                p[0] == "F" && p.size >= 8 && head != null -> entries += AppFolderEntry(
+                    name = p[1],
+                    path = head!![1] + "/" + p[1],
+                    isDirectory = p[2] == "d",
+                    bytes = p[3].toLong(),
+                    files = p[4].toInt(),
+                    mtime = p[5].toLong(),
+                    locked = p[7].takeIf { it != "-" },
+                    partial = p[6] == "1",
+                )
+                else -> other(p)
+            }
+        }
+        val h = head ?: return null
+        val area = AppArea.ofDir(h[2]) ?: return null
+        return AppFolderListing(h[1], area, h[3], h[4] == "1", h[5].toLong(), entries, h[6].toInt())
+    }
+
     // ------------------------------------------------------------------ items and reports
 
     fun encodeItem(item: AppJunkItem): String = buildString {
