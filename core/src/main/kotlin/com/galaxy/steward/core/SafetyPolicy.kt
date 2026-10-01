@@ -141,6 +141,17 @@ object SafetyPolicy {
     /** "IMG_1234 (1).jpg", "report - Copy.pdf", "Copy of notes.txt" - copies a human or app made by accident. */
     fun hasCopyMarker(name: String): Boolean = COPY_MARKER.containsMatchIn(stemOf(name))
 
+    /**
+     * The name a copy was made from: "report (1).pdf" gives "report.pdf", "Camera - Copy" gives "Camera", "Copy of notes.txt"
+     * gives "notes.txt". Null when [name] has no copy marker. A folder's whole name counts ("v1.2 (1)"), a file's stem.
+     */
+    fun withoutCopyMarker(name: String, isDirectory: Boolean = false): String? {
+        val stem = if (isDirectory) name else stemOf(name)
+        val m = COPY_MARKER.find(stem) ?: return null
+        val base = stem.removeRange(m.range).trim()
+        return if (base.isEmpty()) null else base + name.substring(stem.length)
+    }
+
     /** Zone of a top-level folder directly under the storage root. */
     fun topLevelZone(name: String): Zone = when {
         name == "Android" -> Zone.APP_OWNED

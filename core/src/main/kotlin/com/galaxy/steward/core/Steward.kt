@@ -4,9 +4,9 @@ import com.galaxy.steward.core.dedupe.DirSketch
 import com.galaxy.steward.core.dedupe.DuplicateFinder
 import com.galaxy.steward.core.dedupe.FolderAnalyzer
 import com.galaxy.steward.core.dedupe.FolderSketch
-import com.galaxy.steward.core.dedupe.NearCopy
 import com.galaxy.steward.core.dedupe.HashListener
 import com.galaxy.steward.core.dedupe.HashStage
+import com.galaxy.steward.core.dedupe.NearCopy
 import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.hash.HashCache
 import com.galaxy.steward.core.junk.JunkPlanner
@@ -87,7 +87,8 @@ class Steward(
         val bytesSeen = tree.root.totalBytes
 
         onProgress(ScanProgress(ScanPhase.JUNK, filesSeen = filesSeen, bytesSeen = bytesSeen))
-        val junk = JunkPlanner(settings, environment).plan(tree)
+        val junkPlanner = JunkPlanner(settings, environment)
+        val junk = junkPlanner.plan(tree)
 
         val cache = HashCache(hashCacheFile)
         val hashListener = HashListener { stage, done, total, _, _ ->
@@ -101,7 +102,7 @@ class Steward(
         val folderListener = HashListener { _, done, total, _, _ ->
             onProgress(ScanProgress(ScanPhase.FOLDERS, done, total, "", filesSeen, bytesSeen))
         }
-        val folders = FolderAnalyzer(settings, cache, duplicates, folderListener).analyze(tree)
+        val folders = FolderAnalyzer(settings, cache, duplicates, folderListener, environment.deviceLabel).analyze(tree)
         cache.save()
         // Copies inside a folder that is itself a removable duplicate are covered by that folder group;
         // listing them again would double-count the reclaimable space.
@@ -156,7 +157,7 @@ class Steward(
             junk = hygiene.junk(junk + nearJunk),
             organize = moves,
             optimize = hygiene.optimize(optimize.items),
-            insights = listOfNotNull(growth) + optimize.insights + nearInsights + organize.insights.take(50),
+            insights = listOfNotNull(growth) + junkPlanner.notes + optimize.insights + nearInsights + organize.insights.take(50),
             sketches = sketches,
             reusedFolders = scanner.reusedFolders,
         )

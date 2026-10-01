@@ -107,11 +107,16 @@ fun DeepSpaceScreen(vm: StewardViewModel, openPrivate: () -> Unit, onBack: () ->
                                     Text(bytes.humanBytes(), style = MaterialTheme.typography.bodyMedium)
                                 }
                             }
-                            if ((disk.parts["Other"] ?: 0) > 0) {
+                            // What "Other" is made of, from Android's live count and the app folder scan (the first line
+                            // repeats what is shown above).
+                            val phone = remember(state.disk, state.shared, apps.folders, ui.report) { vm.phoneSpace() }
+                            phone.lines().drop(1).forEach { line ->
+                                Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (state.shared == null && (disk.parts["Other"] ?: 0) > 0) {
                                 Text(
-                                    "\"Other\" is what none of Android's categories explain: files in shared storage outside media and Downloads, " +
-                                        "Termux's and other apps' files Android doesn't sort, and whatever a scan here finds. " +
-                                        "Android refreshes these numbers about once a day.",
+                                    "\"Other\" is shared storage that isn't photos, videos or audio: your files, and every app's Android/data and obb. " +
+                                        "Grant usage access on the Apps tab to see how much is which. Android refreshes these numbers about once a day.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -146,7 +151,7 @@ fun DeepSpaceScreen(vm: StewardViewModel, openPrivate: () -> Unit, onBack: () ->
             items(known, key = { "known:" + it.packageName }) { row ->
                 val hint = KnownApps.hint(row.packageName)!!
                 val outside = apps.folders?.usage?.filter { it.packageName == row.packageName }?.sumOf { it.bytes } ?: 0L
-                val relays = termux.report?.kept?.count { it.why.contains("Layla", ignoreCase = true) || it.path.contains("layla", ignoreCase = true) } ?: 0
+                val relays = termux.report?.keptTopmost?.count { it.why.contains("Layla", ignoreCase = true) || it.path.contains("layla", ignoreCase = true) } ?: 0
                 val debug = state.debugApps.firstOrNull { it.packageName == row.packageName }
                 ReviewCard {
                     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

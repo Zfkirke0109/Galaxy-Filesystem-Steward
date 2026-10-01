@@ -69,6 +69,7 @@ class StewardApp : Application() {
         journals = JournalStore(File(filesDir, "journals"))
         val shizuku = ShizukuBridge(this)
         apps = AppsController(this, journals, shizuku, appScope)
+        environment.appFiles = { apps.state.value.folders?.largeFiles.orEmpty() }
         deepSpace = DeepSpaceController(this, shizuku, appScope)
         termux = TermuxController(this, journals, appScope) { decisions.takeIf { settings.settings.value.learnFromChoices } }
         logcat = LogcatExporter(this, shizuku, appScope)

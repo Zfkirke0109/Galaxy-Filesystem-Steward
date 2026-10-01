@@ -43,4 +43,41 @@ class OtherProfilesTest {
         assertTrue(inside.keep(secure[0]))
         assertFalse(inside.keep(mine[1]))
     }
+
+    /** Android 17 prints the uid without a colon; 8,230 Secure Folder lines got through on the 10-01 phone. */
+    @Test
+    fun android17UidColumnAndTheSystemsMentionsOfThemAreLeftOut() {
+        val f = OtherProfiles(0)
+        val secure = listOf(
+            "10-01 06:39:48.005 15010274   904   926 D WM-SystemJobScheduler: Cancelling work ID 2de6e9d5",
+            "10-01 06:22:41.704 15010133  9880 10024 E ActivityThread: Failed to find provider info for com.sec.android.log.diagmonagent",
+            "10-01 06:39:49.558  1000  3288  4837 D PackageManager: setEnabledSetting : userId = 150 packageName = com.facebook.appmanager",
+            "10-01 06:22:17.354  1000  3288  3288 E ActivityManager: Unable to find com.google.android.youtube/u150",
+            "10-01 06:22:38.942  1000  3288  3928 I am_uid_running: 15010309",
+            "10-01 06:22:48.985  1000  3288  3288 I power_partial_wake_state: [DIS,73858637,1803,NotificationManagerService:post:com.google.android.as:android(enabled),1000,3288,WorkSource{15010267 com.google.android.as}]",
+            "10-01 06:22:27.643  1000  3288  6691 E AppOpService: Blocked setUidMode call for runtime permission app op: uid = 15001000, code = CAMERA",
+            "10-01 06:22:15.848  1000  3288  3839 I snet_event_log: [35028827,-1,account:Account {name=someone@example.com, type=com.google} provider:subscribedfeeds user:150]",
+            "10-01 06:39:30.292  root  6373  6373 I libprocessgroup: Created cgroup /sys/fs/cgroup/apps/uid_15010273/pid_6373",
+            "10-01 06:22:46.080  1017  1339  1371 I keystore2: In create_operation. AppUid(15010133), None, TEE",
+            "10-01 06:39:57.469  1000  3288  4000 D InetDiagMessage: Destroyed live tcp sockets for uids={15020268} in 1ms",
+        )
+        val mine = listOf(
+            "10-01 06:38:53.494 10833  4367  4367 I GalaxySteward: run \"App folder clean-up\" started",
+            "10-01 06:22:08.890  root  1165  1165 D io_stats: !@ Write_top(KB): kworker/u16:8(220) 964 f2fs_ckpt-254:7(1394) 296 others(2147483647) 164",
+            "10-01 06:39:38.607 10834  6156  7020 D CCodecConfig:   c2::u32 algo.secure-mode.value = 0",
+            "10-01 06:39:30.574  root  2324 28243 D installd: Purging /data/data/com.instagram.android/cache/ExoPlayerCacheDir/videocache/15/3994652587736840217_258092426.null.1464146325562975a.-1.1128c2d5ace188a6",
+            "10-01 06:22:53.849  1000  3288  3288 I power_partial_wake_state: [REL,15063583,632,NotificationManagerService:post:com.tribalfs.gmh:android,1000,3288,WorkSource{10480 com.tribalfs.gmh}]",
+            "10-01 06:40:33.164  root  1165  1165 D io_stats: !@ Read_top(KB): artd(8182) 180380 id.app.launcher(5404) 15620",
+            "10-01 06:40:32.834 10833  4367  4367 I wm_on_paused_called: [75715565,com.galaxy.steward.ui.MainActivity,performPause,1]",
+        )
+        secure.forEach { assertFalse(it, f.keep(it)) }
+        mine.forEach { assertTrue(it, f.keep(it)) }
+        assertEquals(secure.size, f.dropped)
+
+        // A work profile isn't known up front: once one of its lines names it, its bare uids are recognised too.
+        val g = OtherProfiles(0)
+        assertTrue(g.keep("10-01 06:22:38.942  1000  3288  3928 I am_uid_running: 1110309"))
+        assertFalse(g.keep("10-01 06:22:16.958  1000  3288  3288 I MultiUserInstallPolicy: Set package state for userId: 11"))
+        assertFalse(g.keep("10-01 06:22:38.942  1000  3288  3928 I am_uid_running: 1110309"))
+    }
 }

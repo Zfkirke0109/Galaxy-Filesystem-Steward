@@ -1,5 +1,6 @@
 package com.galaxy.steward.core
 
+import com.galaxy.steward.core.appdata.AppLargeFile
 import com.galaxy.steward.core.organize.KeywordRule
 
 /** User-tunable knobs. Defaults follow the Termux steward's balanced profile. */
@@ -65,6 +66,9 @@ interface DeviceEnvironment {
 
     /** Every installed app, package name to label, for telling an app's own folder from yours. Empty when unknown. */
     fun installedApps(): Map<String, String> = emptyMap()
+
+    /** Big files apps keep in Android/data, obb and media, from the last app folder scan: to spot your own copies of them. */
+    fun appLargeFiles(): List<AppLargeFile> = emptyList()
 }
 
 data class ApkInfo(val packageName: String, val versionCode: Long, val versionName: String?)

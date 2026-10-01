@@ -8,6 +8,7 @@ import androidx.core.content.FileProvider
 import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.StewardApp
 import com.galaxy.steward.core.SafetyPolicy
+import com.galaxy.steward.core.device.PhoneSpace
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.report.StorageReportText
@@ -38,12 +39,12 @@ class StorageReportExporter(private val context: Context, private val scope: Cor
     private val _state = MutableStateFlow(StorageReportState())
     val state: StateFlow<StorageReportState> = _state.asStateFlow()
 
-    fun export(scan: ScanReport?, termux: TermuxReport?) {
+    fun export(scan: ScanReport?, termux: TermuxReport?, phone: PhoneSpace? = null) {
         if (_state.value.running) return
         _state.value = StorageReportState(running = true)
         scope.launch {
             val file = try {
-                withContext(Dispatchers.IO) { write(scan, termux) }
+                withContext(Dispatchers.IO) { write(scan, termux, phone) }
             } catch (e: CancellationException) {
                 _state.value = StorageReportState()
                 throw e
@@ -60,7 +61,7 @@ class StorageReportExporter(private val context: Context, private val scope: Cor
 
     fun shareIntent(file: File): Intent = shareTextFile(context, file, "Share storage report")
 
-    private fun write(scan: ScanReport?, termux: TermuxReport?): File {
+    private fun write(scan: ScanReport?, termux: TermuxReport?, phone: PhoneSpace?): File {
         val folder = File(StorageAccess.rootPath, SafetyPolicy.LOGCAT_DIR)
         if (!folder.isDirectory && !folder.mkdirs()) throw IOException("can't create ${SafetyPolicy.LOGCAT_DIR}")
         val now = ZonedDateTime.now()
@@ -80,7 +81,7 @@ class StorageReportExporter(private val context: Context, private val scope: Cor
             },
             "Contents: folder names and sizes; no file contents. Share it only with people you trust.",
         )
-        file.writeText(StorageReportText.render(scan, termux, header))
+        file.writeText(StorageReportText.render(scan, termux, header, phone = phone))
         return file
     }
 

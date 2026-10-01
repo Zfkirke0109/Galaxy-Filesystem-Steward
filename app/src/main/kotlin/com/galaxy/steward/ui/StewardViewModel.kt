@@ -14,6 +14,7 @@ import com.galaxy.steward.core.Steward
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.appdata.AppJunkItem
 import com.galaxy.steward.core.appdata.AppJunkKind
+import com.galaxy.steward.core.device.PhoneSpace
 import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.ExecutorOptions
@@ -59,7 +60,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-data class ApplyProgress(val title: String, val done: Int, val total: Int, val current: String)
+/** [stoppable] is false for work Android does on its own once asked (trim-caches, art cleanup): Stop can't end it. */
+data class ApplyProgress(val title: String, val done: Int, val total: Int, val current: String, val stoppable: Boolean = true)
 
 sealed interface Outcome {
     data class Applied(val title: String, val summary: ExecutionSummary) : Outcome
@@ -420,16 +422,16 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
      * Runs [block] as the single active run: progress dialog, foreground service, outcome dialog and a history
      * refresh. [block] reports progress through the callback it is given.
      */
-    private fun launchRun(title: String, block: suspend (progress: (Int, Int, String) -> Unit) -> Outcome) {
+    private fun launchRun(title: String, stoppable: Boolean = true, block: suspend (progress: (Int, Int, String) -> Unit) -> Outcome) {
         if (_state.value.applying != null || _state.value.scanning) return
         session.applyJob = scope.launch {
-            _state.update { it.copy(applying = ApplyProgress(title, 0, 1, ""), outcome = null) }
+            _state.update { it.copy(applying = ApplyProgress(title, 0, 1, "", stoppable), outcome = null) }
             val started = SystemClock.uptimeMillis()
             StewardLog.i("run \"$title\" started")
             try {
                 keepAlive(title) {
                     val outcome = block { done, total, current ->
-                        _state.update { it.copy(applying = ApplyProgress(title, done, total, current)) }
+                        _state.update { it.copy(applying = ApplyProgress(title, done, total, current, stoppable)) }
                         KeepAlive.update(app, title, current, done, total)
                     }
                     StewardLog.i(outcomeLine(title, outcome, SystemClock.uptimeMillis() - started))
@@ -637,7 +639,12 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             if (items.isNotEmpty()) {
                 val summary = apps.applyFolders(title, items, progress)
                 lines += "Android/data, obb and media: ${summary.quarantined.plural("folder")} (${summary.bytesQuarantined.humanBytes()}) into the quarantine"
-                gone += wanted
+                details += summary.messages
+                // Only what went leaves the list: a folder that failed or was skipped stays, to be tried again.
+                gone += items.filter { it.id in summary.completedItemIds }.map { "$rootPath/Android/${it.area.dir}/${it.packageName}" }
+            }
+            if (items.size < wanted.size) {
+                lines += "${(wanted.size - items.size).plural("app folder")} changed since the app folder scan: scan app folders again to remove it"
             }
         }
         byPlace[FootprintPlace.TERMUX]?.let { inTermux ->
@@ -692,8 +699,21 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Android's own clean-up through Shizuku: "trim-caches" or "art-cleanup". Freed space is measured, not assumed. */
-    fun systemClean(what: String) = launchRun(if (what == "trim-caches") "Trimming app caches" else "Cleaning up compiled code") { progress ->
-        progress(0, 1, "Android is working on it")
+    // Once asked, Android finishes on its own: on the 10-01 phone Stop after 40 s only lost the result, 8 s before it came.
+    /** Everything known about where the phone's storage goes, for the deep space screen and the storage report. */
+    fun phoneSpace(): PhoneSpace {
+        val deep = deepSpace.state.value
+        val folders = apps.state.value
+        return PhoneSpace(
+            disk = deep.disk,
+            shared = deep.shared,
+            appFolders = folders.folders?.let { PhoneSpace.appFolders(it.usage, folders.labels) }.orEmpty(),
+            scanned = _state.value.report?.tree?.root?.totalBytes,
+        )
+    }
+
+    fun systemClean(what: String) = launchRun(if (what == "trim-caches") "Trimming app caches" else "Cleaning up compiled code", stoppable = false) { progress ->
+        progress(0, 1, "Android is working on it; this can take a few minutes")
         val (freed, answer) = deepSpace.systemClean(what)
         val ok = answer.startsWith("exit=0")
         Outcome.Report(

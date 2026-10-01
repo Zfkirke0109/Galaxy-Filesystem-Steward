@@ -1,12 +1,16 @@
 package com.galaxy.steward.apps
 
+import android.app.usage.StorageStatsManager
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.os.Environment
+import android.os.Process
 import android.os.StatFs
+import android.os.storage.StorageManager
 import com.galaxy.steward.core.device.DiskStats
 import com.galaxy.steward.core.device.PrivateData
 import com.galaxy.steward.core.device.PrivateEntry
+import com.galaxy.steward.core.device.SharedCount
 import com.galaxy.steward.core.device.ShellEntry
 import com.galaxy.steward.core.device.ShellRemoval
 import com.galaxy.steward.core.device.ShellSpace
@@ -31,6 +35,8 @@ data class DeepSpaceState(
     val loading: Boolean = false,
     val error: String? = null,
     val disk: DiskStats? = null,
+    /** Android's live count of shared storage (needs usage access), against [disk]'s once-a-day one. */
+    val shared: SharedCount? = null,
     val shell: List<ShellEntry> = emptyList(),
     val shellUnreadable: List<String> = emptyList(),
     val shellSelected: Set<String> = emptySet(),
@@ -58,7 +64,8 @@ class DeepSpaceController(private val context: Context, private val shizuku: Shi
             _state.update { it.copy(loading = true, error = null) }
             // The package manager lists every app: never on the main thread.
             val debug = withContext(Dispatchers.IO) { debugApps() }
-            _state.update { it.copy(debugApps = debug) }
+            val shared = withContext(Dispatchers.IO) { sharedCount() }
+            _state.update { it.copy(debugApps = debug, shared = shared) }
             try {
                 val helper = shizuku.helper()
                 val disk = withContext(Dispatchers.IO) { helper.diskStats() }
@@ -68,6 +75,7 @@ class DeepSpaceController(private val context: Context, private val shizuku: Shi
                 val (entries, unreadable) = shizuku.readLines(fd) { ShellSpace.readList(it) }
                 StewardLog.i(
                     "deep space: ${disk?.let { "Android counts ${it.used.humanBytes()} used, other ${(it.parts["Other"] ?: 0).humanBytes()}" } ?: "no diskstats"}; " +
+                        (shared?.let { "shared now ${it.total.humanBytes()} (other ${it.other.humanBytes()}, app folders ${it.apps.humanBytes()}); " } ?: "") +
                         "shell places ${entries.size} (${entries.sumOf { it.bytes }.humanBytes()}), unreadable ${unreadable.size}; debuggable apps ${_state.value.debugApps.size}",
                 )
                 _state.update { s ->
@@ -87,6 +95,20 @@ class DeepSpaceController(private val context: Context, private val shizuku: Shi
                 _state.update { it.copy(loading = false, error = e.message ?: e.javaClass.simpleName) }
             }
         }
+    }
+
+    /**
+     * Shared storage as Android counts it right now: what diskstats calls "Other" (90 GiB on the 10-01 phone, once a
+     * day) is mostly app folders, and this says how much. Null without usage access.
+     */
+    private fun sharedCount(): SharedCount? = try {
+        val s = context.getSystemService(StorageStatsManager::class.java).queryExternalStatsForUser(StorageManager.UUID_DEFAULT, Process.myUserHandle())
+        SharedCount(s.totalBytes, s.imageBytes, s.videoBytes, s.audioBytes, s.appBytes)
+    } catch (_: IOException) {
+        null
+    } catch (_: RuntimeException) {
+        // No usage access (a SecurityException), or no such volume.
+        null
     }
 
     private fun debugApps(): List<DebugApp> = try {

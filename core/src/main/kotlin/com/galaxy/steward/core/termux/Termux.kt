@@ -337,6 +337,14 @@ data class TermuxReport(
     val held: List<TermuxItem> = emptyList(),
 ) {
     /**
+     * [kept] less what sits inside another kept path (~/bin and ~/bin/start-layla-bridge read as one): what to show.
+     * What you chose to keep always shows, so you can let it go again.
+     */
+    val keptTopmost: List<TermuxKept> by lazy {
+        kept.filter { k -> k.why == CHOSEN || kept.none { o -> o !== k && k.path.startsWith(o.path + "/") } }
+    }
+
+    /**
      * Why [path] has to stay, or null: it is kept, inside something kept, or holds something kept (removing it would
      * take that too). The script checks the same again before anything goes.
      */

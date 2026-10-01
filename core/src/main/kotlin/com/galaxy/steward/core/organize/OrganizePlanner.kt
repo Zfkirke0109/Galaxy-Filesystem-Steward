@@ -5,7 +5,6 @@ import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.learn.YourMoves
-import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.FileNode
@@ -18,6 +17,7 @@ import com.galaxy.steward.core.plan.MoveFileOp
 import com.galaxy.steward.core.plan.Operation
 import com.galaxy.steward.core.plan.OrganizeMove
 import com.galaxy.steward.core.plan.Severity
+import com.galaxy.steward.core.plural
 import java.time.Instant
 import java.time.ZoneId
 
@@ -74,6 +74,7 @@ class OrganizePlanner(
             planHomeChildren(documents)
         }
         planTopLevel(tree.root)
+        planRootFiles(tree.root)
         if (settings.learnFromFolders && yours.files > 0) {
             insights.add(
                 0,
@@ -288,6 +289,40 @@ class OrganizePlanner(
                     "${owned.size} top-level ${if (owned.size == 1) "folder belongs" else "folders belong"} to installed apps",
                     "They stay where the apps expect them: ${owned.sorted().joinToString(", ")}.",
                 ),
+            )
+        }
+    }
+
+    /**
+     * Files loose at the very top of shared storage (four on the 10-01 phone): filed like Download's, with what you
+     * taught it first, but only suggested, and only files of a known kind nothing wrote in the last [IN_USE_DAYS] days:
+     * apps leave their own state files up there too.
+     */
+    private fun planRootFiles(root: DirNode) {
+        for (f in root.files) {
+            if (f.hidden || SafetyPolicy.isMarkerFile(f.name) || SafetyPolicy.isInProgressDownload(f.name) || SafetyPolicy.isCredentialName(f.name)) continue
+            if (f.mtime > now - IN_USE_DAYS * DAY_MS) continue
+            var (destDir, reason, named) = ruleDestination(f) ?: continue
+            if (reason == "Unrecognised type") continue
+            learned(f, "")?.let { home ->
+                val media = f.kind == FileKind.IMAGE || f.kind == FileKind.VIDEO || f.kind == FileKind.AUDIO
+                if ((!named || home.folder.startsWith("$destDir/")) && media == (home.folder.substringBefore('/') in SafetyPolicy.MEDIA_TOP_DIRS)) {
+                    destDir = home.folder
+                    reason = learnedReason(home)
+                    learnedMoves++
+                }
+            }
+            val destination = "$rootPath/$destDir/${f.name}"
+            addMove(
+                source = f.path,
+                destination = destination,
+                isDirectory = false,
+                bytes = f.size,
+                fileCount = 1,
+                reason = "Loose at the top: $reason",
+                group = destination.substringBeforeLast('/'),
+                selected = false,
+                op = MoveFileOp(f.path, destination, f.size, f.mtime),
             )
         }
     }

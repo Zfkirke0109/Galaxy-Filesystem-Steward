@@ -113,12 +113,15 @@ class AppFootprintController(
     fun find(query: String) {
         val q = query.trim()
         if (q.isEmpty()) return
-        val installed = environment.installedApps()
-        val app = installed.entries.firstOrNull { (pkg, label) -> pkg.equals(q, true) || label.equals(q, true) }?.let { (pkg, label) ->
-            FootprintApp(pkg, label, true, "installed")
-        } ?: _state.value.suggestions.firstOrNull { it.packageName.equals(q, true) || it.label.equals(q, true) }
-            ?: FootprintApp(null, q, false, "a word you looked for")
-        open(app)
+        scope.launch {
+            // Every app's label: a second or two the first time, so never on the main thread.
+            val installed = withContext(Dispatchers.IO) { environment.installedApps() }
+            val app = installed.entries.firstOrNull { (pkg, label) -> pkg.equals(q, true) || label.equals(q, true) }?.let { (pkg, label) ->
+                FootprintApp(pkg, label, true, "installed")
+            } ?: _state.value.suggestions.firstOrNull { it.packageName.equals(q, true) || it.label.equals(q, true) }
+                ?: FootprintApp(null, q, false, "a word you looked for")
+            open(app)
+        }
     }
 
     fun open(app: FootprintApp) {
@@ -129,8 +132,11 @@ class AppFootprintController(
             val hits = withContext(Dispatchers.Default) { gather(app, tokens) }
             _state.update { s ->
                 if (s.target != app) return@update s
-                // What a removed app left is picked; for an app still installed, or a word, you pick.
-                val picked = if (app.installed || app.packageName == null) emptySet() else hits.filter { it.lock == null }.mapTo(HashSet()) { s.key(it) }
+                // What a removed app left is picked when it is surely its: by package, or by its own name ("telegram", not
+                // "messenger"). For an app still installed, or a word, you pick.
+                val brand = AppFootprint.brand(tokens)
+                val picked = if (app.installed || app.packageName == null) emptySet()
+                else hits.filter { it.lock == null && (it.sure || AppFootprint.matches(it.name, brand)) }.mapTo(HashSet()) { s.key(it) }
                 s.copy(hits = hits, searching = false, selected = picked)
             }
         }
@@ -156,7 +162,7 @@ class AppFootprintController(
                 val known = out.mapTo(HashSet()) { it.path }
                 installers(tree).filter { (path, p) -> p == pkg && path !in known && known.none { path.startsWith("$it/") } }.forEach { (path, _) ->
                     val f = java.io.File(path)
-                    out += FootprintHit(FootprintPlace.SHARED, path, f.length(), 1, false, f.lastModified())
+                    out += FootprintHit(FootprintPlace.SHARED, path, f.length(), 1, false, f.lastModified(), sure = true)
                 }
             }
         }
@@ -172,6 +178,7 @@ class AppFootprintController(
             }
             out += FootprintHit(
                 FootprintPlace.APP_FOLDERS, "${StorageAccess.rootPath}/Android/${u.area.dir}/${u.packageName}", u.bytes, u.files, true, 0, lock, u.packageName,
+                sure = u.packageName == app.packageName,
             )
         }
         termux.state.value.report?.let { out += AppFootprint.inTermux(it, tokens) }

@@ -4,8 +4,10 @@ import com.galaxy.steward.core.MIB
 import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.ageText
+import com.galaxy.steward.core.device.PhoneSpace
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
+import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.plan.ScanReport
@@ -46,9 +48,11 @@ object StorageReportText {
         minBytes: Long = 50 * MIB,
         minFiles: Int = 1_000,
         perFolder: Int = 25,
+        phone: PhoneSpace? = null,
     ): String = buildString {
         header.forEach(::appendLine)
         appendLine()
+        if (phone != null) phone(phone)
         if (scan == null) {
             appendLine("Shared storage: not scanned yet. Run a scan, then export again.")
         } else {
@@ -102,6 +106,22 @@ object StorageReportText {
         appendLine()
     }
 
+    /** All of the phone first: what Android counts, and how much of its "Other" is app folders rather than your files. */
+    private fun StringBuilder.phone(phone: PhoneSpace) {
+        val lines = phone.lines(apps = 0)
+        if (lines.isEmpty() && phone.appFolders.isEmpty()) return
+        appendLine("WHOLE PHONE")
+        lines.forEach { appendLine("  $it") }
+        if (phone.appFolders.isNotEmpty()) {
+            appendLine("  Largest app folders (Android/data, obb and media, from the last app folder scan):")
+            phone.appFolders.take(15).forEach { f ->
+                val areas = f.byArea.entries.filter { it.value > 0 }.sortedByDescending { it.value }.joinToString { "${it.key.dir} ${it.value.humanBytes()}" }
+                appendLine("    ${f.name}${if (f.installed) "" else " [removed]"}  ${f.bytes.humanBytes()}  ($areas)")
+            }
+        }
+        appendLine()
+    }
+
     private fun StringBuilder.suggestions(scan: ScanReport) {
         appendLine("WHAT THE LAST SCAN SUGGESTS")
         appendLine(RunLog.scan(scan))
@@ -116,6 +136,33 @@ object StorageReportText {
                 .forEach { (dest, moves) -> appendLine("    → $dest: ${count(moves.size)} (${moves.sumOf { it.bytes }.humanBytes()})") }
         }
         scan.optimize.groupBy { it.kind }.forEach { (kind, items) -> appendLine("  ${kind.title}: ${count(items.size)}") }
+        val root = scan.tree.rootPath + "/"
+        if (scan.folderMerges.isNotEmpty()) {
+            appendLine("  Folder merges (never ticked for you):")
+            scan.folderMerges.take(15).forEach { m ->
+                appendLine(
+                    "    ${m.source.removePrefix(root)} → ${m.target.removePrefix(root)}: ${count(m.commonFiles + m.uniqueFiles)} files, " +
+                        "${m.sourceBytes.humanBytes()}; ${count(m.commonFiles)} already there${if (m.sameName) " (same name)" else ""}",
+                )
+            }
+        }
+        if (scan.duplicates.isNotEmpty() || scan.folderDuplicates.isNotEmpty()) {
+            appendLine(
+                "  Duplicates: ${count(scan.duplicates.size)} files with copies (${scan.duplicates.sumOf { it.reclaimBytes }.humanBytes()}), " +
+                    "${count(scan.folderDuplicates.size)} folders with copies (${scan.folderDuplicates.sumOf { it.reclaimBytes }.humanBytes()})",
+            )
+            (scan.folderDuplicates.map { it.copies.first().path to it.reclaimBytes } + scan.duplicates.map { it.copies[it.keeperIndex].path to it.reclaimBytes })
+                .sortedByDescending { it.second }.take(10)
+                .forEach { (path, bytes) -> appendLine("    ${path.removePrefix(root)}: ${bytes.humanBytes()} in copies") }
+        }
+        val big = ArrayList<FileNode>()
+        scan.tree.root.walkFiles { if (it.size >= 100 * MIB && it.zone != Zone.STEWARD) big += it }
+        if (big.isNotEmpty()) {
+            appendLine("  Largest files:")
+            big.sortedByDescending { it.size }.take(15).forEach { f ->
+                appendLine("    ${f.relPath}  ${f.size.humanBytes()}, changed ${ageText(f.mtime, scan.finishedAt)}")
+            }
+        }
         if (scan.insights.isNotEmpty()) {
             appendLine()
             appendLine("LEFT ALONE, AND WHY")
@@ -135,7 +182,8 @@ object StorageReportText {
         appendLine(RunLog.termux(report, 0).substringAfter(": "))
         if (report.usage.isNotEmpty()) {
             appendLine("  Where the space goes:")
-            report.usage.drop(1).forEach { appendLine("    ${short(it.path)}  ${it.bytes.humanBytes()}") }
+            // The first line is all of Termux; the rest, largest first (the app's cache came first, at 4 KiB).
+            report.usage.drop(1).sortedByDescending { it.bytes }.forEach { appendLine("    ${short(it.path)}  ${it.bytes.humanBytes()}") }
         }
         if (report.rootfs.isNotEmpty()) {
             appendLine("  proot distributions:")
@@ -149,7 +197,7 @@ object StorageReportText {
         }
         if (report.kept.isNotEmpty()) {
             appendLine("  Kept whatever is picked (Layla's relays, what Termux starts, what runs, your list):")
-            report.kept.take(20).forEach { appendLine("    ${short(it.path)}  ${it.bytes.humanBytes()}  ${it.why}") }
+            report.keptTopmost.take(20).forEach { appendLine("    ${short(it.path)}  ${it.bytes.humanBytes()}  ${it.why}") }
             report.held.forEach { appendLine("    held back: ${it.title}  ${it.bytes.humanBytes()}") }
         }
         if (report.largeFiles.isNotEmpty()) {

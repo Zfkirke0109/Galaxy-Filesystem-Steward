@@ -323,7 +323,7 @@ private fun StorageReportRow(vm: StewardViewModel, state: UiState) {
                 )
             }
             FilledTonalButton(
-                onClick = { vm.storageReport.export(state.report, termux.report) },
+                onClick = { vm.storageReport.export(state.report, termux.report, vm.phoneSpace()) },
                 enabled = !report.running && state.report != null,
             ) { Text(if (report.running) "Saving…" else "Save") }
         }

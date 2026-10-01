@@ -460,18 +460,19 @@ fun TermuxForeign(vm: StewardViewModel) {
 fun TermuxKeptCard(vm: StewardViewModel) {
     val state by vm.termux.state.collectAsStateWithLifecycle()
     val report = state.report ?: return
-    if (report.kept.isEmpty()) return
+    val kept = report.keptTopmost
+    if (kept.isEmpty()) return
     var all by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Kept for you", style = MaterialTheme.typography.titleMedium)
         Text(
-            "${report.kept.size.plural("thing")} in Termux stay${if (report.kept.size == 1) "s" else ""} whatever you pick, with what they run with: " +
+            "${kept.size.plural("thing")} in Termux stay${if (kept.size == 1) "s" else ""} whatever you pick, with what they run with: " +
                 "the relays Layla's Sidekick mini apps talk to, what Termux starts by itself, what runs right now, and what you chose to keep." +
                 (if (report.held.isNotEmpty()) " ${report.held.size.plural("clean-up")} (${report.held.sumOf { it.bytes }.humanBytes()}) would touch them, so they aren't offered." else ""),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        val shown = if (all) report.kept else report.kept.take(6)
+        val shown = if (all) kept else kept.take(6)
         shown.forEach { k ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
@@ -494,8 +495,8 @@ fun TermuxKeptCard(vm: StewardViewModel) {
                 }
             }
         }
-        if (report.kept.size > shown.size || all) {
-            TextButton(onClick = { all = !all }) { Text(if (all) "Show fewer" else "Show all ${report.kept.size}") }
+        if (kept.size > shown.size || all) {
+            TextButton(onClick = { all = !all }) { Text(if (all) "Show fewer" else "Show all ${kept.size}") }
         }
     }
 }

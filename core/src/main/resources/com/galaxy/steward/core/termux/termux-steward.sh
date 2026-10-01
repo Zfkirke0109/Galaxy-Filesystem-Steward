@@ -1350,15 +1350,19 @@ audit() {
     emit U "$(( ${k:-0} * 1024 ))" "$p"
   done
 
-  for id in $FIXED_IDS; do
-    info="$(target_info "$id")" || continue
-    IFS='|' read -r p root mode <<< "$info"
-    [ -e "$p" ] || [ -L "$p" ] || continue
-    if ! dir_beneath "$p" "$root"; then emit X "$id" "$p" "symlinked or outside the Termux folders"; continue; fi
-    m="$(measure "$mode" "$p")"
-    bytes="${m%%$'\t'*}"; files="${m#*$'\t'}"
-    [ "${files:-0}" -gt 0 ] && emit T "$id" "$bytes" "$files" "$p"
-  done
+  # Four at a time (44 s one after another on the 10-01 phone: the pycache and Gradle checks walk the whole home), in a
+  # subshell whose jobs are only these, not the extras started above.
+  (
+    for id in $FIXED_IDS; do
+      info="$(target_info "$id")" || continue
+      IFS='|' read -r p root mode <<< "$info"
+      [ -e "$p" ] || [ -L "$p" ] || continue
+      if ! dir_beneath "$p" "$root"; then emit X "$id" "$p" "symlinked or outside the Termux folders"; continue; fi
+      while [ "$(jobs -rp | wc -l)" -ge 4 ]; do wait -n 2>/dev/null || break; done
+      fixed_one "$id" "$mode" "$p" &
+    done
+    wait
+  )
   lap targets.fixed
 
   # Other caches in ~/.cache (review only).
@@ -1488,6 +1492,14 @@ audit() {
   # The extras started above.
   wait
   finish ok
+}
+
+# T for one fixed target, measured the way its clean would remove it.
+fixed_one() {
+  local m
+  m="$(measure "$2" "$3")"
+  [ "${m#*$'\t'}" -gt 0 ] && emit T "$1" "${m%%$'\t'*}" "${m#*$'\t'}" "$3"
+  return 0
 }
 
 # ---------------------------------------------------------------- clean

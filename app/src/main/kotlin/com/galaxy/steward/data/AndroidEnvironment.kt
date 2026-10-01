@@ -6,12 +6,18 @@ import android.os.Build
 import androidx.core.content.pm.PackageInfoCompat
 import com.galaxy.steward.core.ApkInfo
 import com.galaxy.steward.core.DeviceEnvironment
+import com.galaxy.steward.core.appdata.AppLargeFile
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /** Device facts for the engine: a folder-safe model label and package-manager lookups. */
 class AndroidEnvironment(context: Context) : DeviceEnvironment {
     private val pm: PackageManager = context.packageManager
+
+    /** The app folder scan's big files, once the apps controller exists (set by [com.galaxy.steward.StewardApp]). */
+    var appFiles: () -> List<AppLargeFile> = { emptyList() }
+
+    override fun appLargeFiles(): List<AppLargeFile> = appFiles()
 
     override val deviceLabel: String = run {
         val maker = Build.MANUFACTURER.orEmpty().replaceFirstChar { it.uppercase() }
@@ -47,6 +53,8 @@ class AndroidEnvironment(context: Context) : DeviceEnvironment {
 
     override fun apkInfo(path: String): ApkInfo? {
         val file = File(path)
+        // A tree from before a clean-up still lists installers that are gone: Android logs a stack trace for each.
+        if (!file.isFile) return null
         val stamp = "${file.length()}:${file.lastModified()}"
         apkCache[path]?.takeIf { it.first == stamp }?.let { return it.second }
         val info = parseApk(path)

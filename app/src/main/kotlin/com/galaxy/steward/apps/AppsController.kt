@@ -15,6 +15,7 @@ import com.galaxy.steward.core.appdata.AppFolderListing
 import com.galaxy.steward.core.appdata.AppJunkItem
 import com.galaxy.steward.core.appdata.AppPolicy
 import com.galaxy.steward.core.appdata.AppScanOptions
+import com.galaxy.steward.core.device.PhoneSpace
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.JournalAction
 import com.galaxy.steward.core.exec.JournalEntry
@@ -393,7 +394,10 @@ class AppsController(
                 StewardLog.i(
                     "app folder scan done in ${RunLog.seconds(SystemClock.uptimeMillis() - started)} " +
                         "(${if (shizuku.ready) "through Shizuku" else "in the app"}, ${areas.joinToString { it.name.lowercase() }}): " +
-                        "${report.items.size} findings, ${report.items.sumOf { it.bytes }.humanBytes()}, ${report.unreadable.size} folders unreadable",
+                        "${report.items.size} findings, ${report.items.sumOf { it.bytes }.humanBytes()}, ${report.unreadable.size} folders unreadable; " +
+                        // How big the app folders are in all, and whose: most of what Android calls "Other".
+                        report.usage.groupBy { it.area }.entries.joinToString { (area, l) -> "${area.dir} ${l.sumOf { it.bytes }.humanBytes()}" } +
+                        "; largest " + PhoneSpace.appFolders(report.usage, emptyMap()).take(3).joinToString { "${it.packageName} ${it.bytes.humanBytes()}" },
                 )
                 val labels = withContext(Dispatchers.IO) {
                     (report.usage.map { it.packageName } + report.items.map { it.packageName }).distinct()

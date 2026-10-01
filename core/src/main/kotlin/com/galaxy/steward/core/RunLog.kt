@@ -78,8 +78,8 @@ object RunLog {
         append(", ").append(count(report.unsafe.size)).append(" unsafe paths skipped")
         // What the keep rule protects (Layla's relays, Boot scripts, running programs), by reason only: no paths.
         if (report.kept.isNotEmpty()) {
-            append("; kept ").append(count(report.kept.size)).append(" (")
-            append(report.kept.groupingBy { keptKind(it.why) }.eachCount().entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" })
+            append("; kept ").append(count(report.keptTopmost.size)).append(" (")
+            append(report.keptTopmost.groupingBy { keptKind(it.why) }.eachCount().entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" })
             append(')')
             if (report.held.isNotEmpty()) append(", ").append(count(report.held.size)).append(" clean-ups held back (").append(report.held.sumOf { it.bytes }.humanBytes()).append(')')
         }

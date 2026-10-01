@@ -122,13 +122,14 @@ fun ApplyProgressDialog(progress: ApplyProgress, onCancel: () -> Unit) {
                     Text(progress.current, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                 }
                 Text(
-                    "Stopping is safe: completed steps stay journaled and can be undone.",
+                    if (progress.stoppable) "Stopping is safe: completed steps stay journaled and can be undone."
+                    else "Android does this on its own and can't be stopped. You can leave the app; the result waits here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onCancel) { Text("Stop") } },
+        confirmButton = { if (progress.stoppable) TextButton(onClick = onCancel) { Text("Stop") } },
     )
 }
 

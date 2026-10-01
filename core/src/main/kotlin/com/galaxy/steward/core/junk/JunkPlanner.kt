@@ -5,14 +5,17 @@ import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.plan.ExtractedCopy
+import com.galaxy.steward.core.plan.Insight
 import com.galaxy.steward.core.plan.JunkCategory
 import com.galaxy.steward.core.plan.JunkItem
+import com.galaxy.steward.core.plan.Severity
 
 /**
  * Finds reclaimable clutter. Everything except empty-folder removal goes through the quarantine, so a
@@ -28,9 +31,18 @@ class JunkPlanner(
     private val installers = ArrayList<Pair<FileNode, ApkInfo>>()
     private var archiveBudget = ARCHIVE_BUDGET
 
+    /** Big files apps keep, by lower-case name and size: a file of yours matching one is a copy of it. */
+    private val appCopies: Map<Pair<String, Long>, String> by lazy {
+        environment.appLargeFiles().associate { (it.path.substringAfterLast('/').lowercase() to it.size) to it.packageName }
+    }
+
+    /** Clutter left alone, and why: shown under "Left alone, and why", so nothing big goes unexplained. */
+    val notes = ArrayList<Insight>()
+
     fun plan(tree: StorageTree): List<JunkItem> {
         items.clear()
         installers.clear()
+        notes.clear()
         archiveBudget = ARCHIVE_BUDGET
         walk(tree.root, insideHidden = false)
         planOlderInstallers()
@@ -59,6 +71,9 @@ class JunkPlanner(
     /**
      * Run folders a tool writes each time (`Ultimate-Cleanup/runs/20260903-122520-14326`, seen on a phone at 1 GiB for
      * three runs): three or more siblings named by date and time. The newest, and any from the last two weeks, stay.
+     * A run often holds copies of what the tool worked on, scripts and projects among them: those are copies, so the run
+     * is still offered (for review, into the quarantine). Keys, links and unreadable files keep it where it is, and
+     * that is said, with the size, so 1 GiB of old runs never sits there unexplained again.
      */
     private fun oldRuns(parent: DirNode): Set<DirNode> {
         if (parent.zone == Zone.MEDIA_LIBRARY || parent.insideFlagged(NodeFlags.CODE_TREE or NodeFlags.PROJECT_ROOT)) return emptySet()
@@ -67,11 +82,28 @@ class JunkPlanner(
         val newestOf = runs.associateWith { d -> var n = d.mtime; d.walkFiles { if (it.mtime > n) n = it.mtime }; n }
         val keep = newestOf.maxByOrNull { it.value }!!.key
         val cutoff = now - RUN_KEEP_DAYS * DAY_MS
-        val old = runs.filter { it !== keep && newestOf.getValue(it) < cutoff && !it.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) }
-        for (run in old) {
-            add(JunkCategory.OLD_RUNS, run.path, true, run.totalBytes, newestOf.getValue(run), "${run.totalFiles} files; ${keep.name} is newer and stays")
+        val old = runs.filter { it !== keep && newestOf.getValue(it) < cutoff }
+        val (held, free) = old.partition { it.zone == Zone.USER_PROTECTED || it.subtreeHas(RUN_BLOCKERS) }
+        for (run in free) {
+            val copies = if (run.subtreeHas(NodeFlags.PROJECT_ROOT or NodeFlags.GIT_DIR or NodeFlags.CODE_TREE)) ", copies of code among them" else ""
+            add(JunkCategory.OLD_RUNS, run.path, true, run.totalBytes, newestOf.getValue(run), "${run.totalFiles} files$copies; ${keep.name} is newer and stays")
         }
-        return old.toSet()
+        if (held.isNotEmpty()) {
+            val why = when {
+                held.any { it.zone == Zone.USER_PROTECTED } -> "are in a folder you pinned"
+                held.any { it.subtreeHas(NodeFlags.HAS_CREDENTIAL) } -> "hold keys or credentials, which never move"
+                held.any { it.subtreeHas(NodeFlags.HAS_SYMLINK) } -> "hold links, which can't be moved safely"
+                else -> "hold files that can't be read or moved safely"
+            }
+            notes += Insight(
+                Severity.INFO,
+                "Old runs left in place: ${parent.relPath}",
+                "${held.size} older run ${if (held.size == 1) "folder" else "folders"} (${held.sumOf { it.totalBytes }.humanBytes()}) $why. " +
+                    "Look through them yourself: ${held.sortedByDescending { it.totalBytes }.take(3).joinToString { it.name }}.",
+                parent.path,
+            )
+        }
+        return free.toSet()
     }
 
     private fun classifyFile(f: FileNode, dir: DirNode, inLogDir: Boolean, insideHidden: Boolean) {
@@ -91,6 +123,12 @@ class JunkPlanner(
                 add(JunkCategory.HEAP_DUMPS, f.path, false, f.size, f.mtime, "Heap dump, $ageDays days old")
             // Anywhere you can reach, not only your own folders: MT Manager keeps the APKs it extracts in MT2/apks.
             f.extension == "apk" && f.size > 0 -> installedApk(f)
+            f.size >= APP_COPY_MIN_BYTES && dir.zone == Zone.USER_MANAGED && !f.hidden && f.mtime < recentCutoff &&
+                !dir.insideFlagged(NodeFlags.PROJECT_ROOT or NodeFlags.CODE_TREE) && (f.name.lowercase() to f.size) in appCopies -> {
+                val pkg = appCopies.getValue(f.name.lowercase() to f.size)
+                val label = environment.installedApps()[pkg] ?: pkg
+                add(JunkCategory.APP_KEEPS_A_COPY, f.path, false, f.size, f.mtime, "$label keeps a file of the same name and size in its folder")
+            }
             dir.zone == Zone.USER_MANAGED && ExtractedArchives.isSupported(name) && !f.hidden && !insideHidden && f.size > 0 &&
                 f.mtime < recentCutoff -> extractedArchive(f)
         }
@@ -192,11 +230,18 @@ class JunkPlanner(
     }
 
     companion object {
+        /** Files smaller than this aren't compared with what apps keep: the app folder scan lists only big ones. */
+        const val APP_COPY_MIN_BYTES = 50L * 1024 * 1024
+
         /** Heap dumps older than this are clutter: the leak they show was either fixed or shows up again. */
         const val HEAP_DUMP_DAYS = 3
 
         /** Run folders written in the last two weeks stay, whatever their order. */
         const val RUN_KEEP_DAYS = 14
+
+        /** What keeps an old run folder in place; copies of code and projects in it don't. */
+        private const val RUN_BLOCKERS =
+            NodeFlags.HAS_SYMLINK or NodeFlags.HAS_SPECIAL or NodeFlags.HAS_CREDENTIAL or NodeFlags.UNREADABLE or NodeFlags.HAS_UNSAFE_NAME
 
         /** Bytes of tar archives read per scan to see whether they were unpacked. */
         const val ARCHIVE_BUDGET = 1024L * 1024 * 1024

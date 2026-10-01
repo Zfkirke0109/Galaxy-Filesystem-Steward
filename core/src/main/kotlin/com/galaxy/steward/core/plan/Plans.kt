@@ -228,6 +228,13 @@ enum class JunkCategory(val title: String, val description: String, val defaultS
     RECYCLE_BINS("Other apps' recycle bins", "Files you already deleted in MT Manager and similar file managers, still kept in their recycle bins.", true),
     ZERO_BYTE_FILES("Empty files", "Zero-byte files. Occasionally used as markers, so review first.", false),
     ORPHANED_APP_FOLDERS("Leftover app folders", "Top-level folders named after apps that are no longer installed.", false),
+    APP_KEEPS_A_COPY(
+        "Also kept by an app",
+        "Big files of yours with the same name and size as one an app keeps in its own folder (Android/data, obb, media), " +
+            "like an AI model you copied into Layla. The app's copy stays; yours goes to the quarantine. Keep yours if other " +
+            "apps open it from where it is.",
+        false,
+    ),
 }
 
 data class JunkItem(

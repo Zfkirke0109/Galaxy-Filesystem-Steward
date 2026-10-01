@@ -360,16 +360,55 @@ class LayoutCleanupTest {
                 fs.random("Documents/Ultimate-Cleanup/runs/$run/report.log", 2000 + i, 10 + i, mtime = now - (30 - i) * DAY_MS)
             }
             fs.random("Documents/Ultimate-Cleanup/runs/20260923-080000-444/report.log", 2000, 20, mtime = now - DAY_MS)
+            // A run that saved a project it cleaned up is still a run: the project in it is a copy (the 10-01 phone's
+            // three runs, 1 GiB, were never offered). One that saved a signing key stays, and says why.
+            fs.random("Documents/Ultimate-Cleanup/runs/20260902-101500-222/saved/app/build.gradle", 300, 40, mtime = now - 29 * DAY_MS)
+            fs.random("Documents/Ultimate-Cleanup/runs/20260904-101500-555/report.log", 2000, 41, mtime = now - 26 * DAY_MS)
+            fs.random("Documents/Ultimate-Cleanup/runs/20260904-101500-555/keys/release.jks", 2000, 42, mtime = now - 26 * DAY_MS)
             // Dated folders of photos are not runs.
             listOf("2024-01-01 10.00", "2024-02-01 10.00", "2024-03-01 10.00").forEachIndexed { i, d ->
                 fs.random("Pictures/Trips/$d/IMG_$i.jpg", 900, 30 + i)
             }
             fs.ageDirectories()
-            val junk = scan(fs).junk
+            val report = scan(fs)
+            val junk = report.junk
             assertEquals(listOf("2026-09-01_heap.hprof"), junk.filter { it.category == JunkCategory.HEAP_DUMPS }.map { it.title })
             val runs = junk.filter { it.category == JunkCategory.OLD_RUNS }
             assertEquals(listOf("20260901-101500-111", "20260902-101500-222", "20260903-101500-333"), runs.map { it.title }.sorted())
             assertTrue(runs.all { !it.defaultSelected && it.note.contains("20260923-080000-444 is newer") })
+            assertTrue(runs.single { it.title == "20260902-101500-222" }.note.contains("copies of code"))
+            val held = report.insights.single { it.title == "Old runs left in place: Documents/Ultimate-Cleanup/runs" }
+            assertTrue(held.detail, held.detail.contains("keys") && held.detail.contains("20260904-101500-555"))
+        }
+    }
+
+    @Test
+    fun bigFilesAnAppAlsoKeepsAreOfferedForReview() = runTest {
+        TestFs().use { fs ->
+            fun sparse(rel: String, size: Long) = File(fs.root, rel).also { f ->
+                f.parentFile.mkdirs()
+                java.io.RandomAccessFile(f, "rw").use { it.setLength(size) }
+                f.setLastModified(System.currentTimeMillis() - 30 * DAY_MS)
+            }
+            val model = 60L * MIB
+            sparse("Documents/AI-Models/Llama-3.2-3B-Q4_K_M.gguf", model)
+            // Another size, or inside a project: stays.
+            sparse("Documents/AI-Models/phi-3-mini.gguf", 70L * MIB)
+            fs.text("Documents/Code/llm/build.gradle", "plugins {}")
+            sparse("Documents/Code/llm/Llama-3.2-3B-Q4_K_M.gguf", model)
+            fs.ageDirectories()
+            val env = object : DeviceEnvironment {
+                override val deviceLabel = "Test-Phone"
+                override fun installedApps() = mapOf("com.layla" to "Layla")
+                override fun appLargeFiles() = listOf(
+                    com.galaxy.steward.core.appdata.AppLargeFile("com.layla", "/storage/emulated/0/Android/data/com.layla/files/models/llama-3.2-3b-q4_k_m.gguf", model, 0),
+                    com.galaxy.steward.core.appdata.AppLargeFile("com.layla", "/storage/emulated/0/Android/data/com.layla/files/models/phi-3-mini.gguf", 71L * MIB, 0),
+                )
+            }
+            val junk = Steward(fs.rootPath, testSettings.copy(minDuplicateBytes = 1L shl 40), env, null).scan().junk
+            val copies = junk.filter { it.category == JunkCategory.APP_KEEPS_A_COPY }
+            assertEquals(listOf(fs.path("Documents/AI-Models/Llama-3.2-3B-Q4_K_M.gguf")), copies.map { it.path })
+            assertTrue(copies.single().note.startsWith("Layla keeps") && !copies.single().defaultSelected)
         }
     }
 

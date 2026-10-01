@@ -20,7 +20,8 @@ enum class FootprintPlace(val title: String, val how: String) {
 
 /**
  * One folder or file named after the app. [lock] says why it can't be picked (a project, a pinned folder, keys, kept
- * in Termux, a package's files); [packageName] is set for an app's own Android/data|obb|media folder.
+ * in Termux, a package's files); [packageName] is set for an app's own Android/data|obb|media folder. [sure]: known to
+ * be the app's by its package (its own folder, an installer with its package inside), not only by a name.
  */
 data class FootprintHit(
     val place: FootprintPlace,
@@ -31,6 +32,7 @@ data class FootprintHit(
     val mtime: Long,
     val lock: String? = null,
     val packageName: String? = null,
+    val sure: Boolean = false,
 ) {
     val name: String get() = path.substringAfterLast('/')
 }
@@ -72,6 +74,13 @@ object AppFootprint {
         }
         return out
     }
+
+    /**
+     * The word most particular to the app, the first of [tokens]: its package's own name ("com.wowee.client" gives
+     * "wowee", "org.telegram.messenger" gives "telegram", not "messenger"). What only matches its other words may be
+     * someone else's, so only this word's matches are picked for you.
+     */
+    fun brand(tokens: Set<String>): Set<String> = tokens.take(1).toSet()
 
     fun matches(name: String, tokens: Set<String>): Boolean {
         if (tokens.isEmpty()) return false

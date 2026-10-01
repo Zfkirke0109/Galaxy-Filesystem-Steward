@@ -199,6 +199,12 @@ object BuiltInRules {
         return homes.any { it == p || it.startsWith("$p/") }
     }
 
+    /** True only for a folder the organizer files into itself (`Documents/Reports/Diagnostics`), not for its parents. */
+    fun isExactHome(relPath: String, deviceLabel: String, extra: List<KeywordRule> = emptyList()): Boolean {
+        val p = relPath.trim('/')
+        return p.isNotEmpty() && (p in FIXED_HOMES || p in categoryFolders.values || (extra + rules).any { it.resolvedDestination(deviceLabel) == p })
+    }
+
     /** Extension-based homes used when no keyword rule matched. */
     fun extensionDestination(ext: String): Pair<String, String>? = when (ext) {
         in FileKind.APK_EXT -> "Documents/Software/APKs" to "App installer"
