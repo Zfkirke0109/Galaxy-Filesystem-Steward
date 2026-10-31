@@ -24,19 +24,23 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import com.galaxy.steward.core.exec.PreflightResult
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.ui.ApplyProgress
 import com.galaxy.steward.ui.Outcome
+import kotlinx.coroutines.CancellationException
 
 /** Confirmation "token" for any change: the Termux steward required typing one, the app requires this tap. */
 @Composable
@@ -47,7 +51,25 @@ fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     footnote: String = "Every change is verified and journaled. You can undo this run from History.",
+    /** A dry run of what is about to be applied ([com.galaxy.steward.core.exec.Preflight]), shown as it comes. */
+    check: (suspend () -> PreflightResult)? = null,
 ) {
+    var checked by remember { mutableStateOf<PreflightResult?>(null) }
+    var checking by remember { mutableStateOf(check != null) }
+    if (check != null) {
+        LaunchedEffect(Unit) {
+            // Closing the dialog cancels the check; anything else going wrong only means there is no early answer,
+            // since a run makes the same checks again right before each step.
+            checked = try {
+                check()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            checking = false
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Rounded.Shield, contentDescription = null) },
@@ -55,6 +77,18 @@ fun ConfirmDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 lines.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                if (check != null) {
+                    val r = checked
+                    val text = when {
+                        checking -> "Checking each step against your storage now…"
+                        r == null -> "Couldn't check beforehand; each step is still checked right before it runs"
+                        r.skipped == 0 -> "Checked just now: ${if (r.total == 1) "the step is" else "all ${r.total} steps are"} as scanned"
+                        else -> "Checked just now: ${r.skipped} of ${r.total.plural("step")} will be skipped (" +
+                            r.stale.entries.joinToString("; ") { (why, n) -> "$why: $n" } + ")"
+                    }
+                    val warn = r != null && r.skipped > 0
+                    Text("• $text", style = MaterialTheme.typography.bodyMedium, color = if (warn) MaterialTheme.colorScheme.error else Color.Unspecified)
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(footnote, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }

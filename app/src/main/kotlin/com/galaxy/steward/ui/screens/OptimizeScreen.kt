@@ -129,6 +129,7 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 vm.apply("Layout optimization", "optimize", list)
             },
             onDismiss = { confirm = null },
+            check = { vm.preflight(list) },
         )
     }
 }

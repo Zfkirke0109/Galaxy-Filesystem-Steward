@@ -121,6 +121,7 @@ fun JunkScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 vm.apply("Clutter cleanup", "junk", items)
             },
             onDismiss = { confirm = null },
+            check = { vm.preflight(items) },
         )
     }
 }

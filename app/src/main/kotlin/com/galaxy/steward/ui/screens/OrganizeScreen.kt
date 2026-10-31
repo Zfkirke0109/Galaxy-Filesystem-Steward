@@ -119,6 +119,7 @@ fun OrganizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 vm.apply("Smart organize", "organize", items)
             },
             onDismiss = { confirm = null },
+            check = { vm.preflight(items) },
         )
     }
 }

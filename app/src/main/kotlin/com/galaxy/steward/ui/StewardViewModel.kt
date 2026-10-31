@@ -20,6 +20,8 @@ import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.ExecutorOptions
 import com.galaxy.steward.core.exec.JournalInfo
 import com.galaxy.steward.core.exec.PathGuard
+import com.galaxy.steward.core.exec.Preflight
+import com.galaxy.steward.core.exec.PreflightResult
 import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
@@ -315,6 +317,11 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     // ------------------------------------------------------------------ applying
 
+    /** The dry run of [items] for a confirm dialog: what changed since the scan, checked without changing anything. */
+    suspend fun preflight(items: List<PlanItem>): PreflightResult = withContext(Dispatchers.IO) {
+        Preflight.check(rootPath, items, settings.value.protectedFolders)
+    }
+
     fun apply(title: String, kind: String, items: List<PlanItem>) {
         if (items.isEmpty() || _state.value.applying != null || _state.value.scanning) return
         val offeredFrom = _state.value.report
@@ -500,16 +507,21 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
      * clutter, then packing), then the Termux ones through Termux. With [freeNow], what went to the quarantine is
      * emptied right away instead of after the retention days.
      */
-    fun reachGoal(plan: GoalPlan, freeNow: Boolean) = launchRun("Free up space", stoppable = plan.picks.none { it.termux != null }) { progress ->
-        val title = "Free up space"
+    /** What [reachGoal] applies in shared storage, in the order it runs them: duplicates first, then clutter. */
+    fun goalItems(plan: GoalPlan): List<PlanItem> {
         val keepers = _state.value.keepers
-        val shared = plan.picks.mapNotNull { it.plan }.map { effective(it, keepers) }.sortedBy {
+        return plan.picks.mapNotNull { it.plan }.map { effective(it, keepers) }.sortedBy {
             when (it) {
                 is DuplicateGroup, is FolderDuplicateGroup -> 0
                 is JunkItem -> 1
                 else -> 2
             }
         }
+    }
+
+    fun reachGoal(plan: GoalPlan, freeNow: Boolean) = launchRun("Free up space", stoppable = plan.picks.none { it.termux != null }) { progress ->
+        val title = "Free up space"
+        val shared = goalItems(plan)
         val inTermux = plan.picks.mapNotNull { it.termux }
         val lines = ArrayList<String>()
         val details = ArrayList<String>()

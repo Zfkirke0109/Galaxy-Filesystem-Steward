@@ -175,6 +175,7 @@ fun DuplicatesScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 vm.apply("Duplicate cleanup", "dedupe", items)
             },
             onDismiss = { confirm = null },
+            check = { vm.preflight(items) },
         )
     }
 }

@@ -193,6 +193,7 @@ fun HomeScreen(vm: StewardViewModel, state: UiState, navigate: (String) -> Unit)
                 vm.apply("Autopilot", "autopilot", items)
             },
             onDismiss = { confirmAutopilot = false },
+            check = { vm.preflight(items) },
         )
     }
 }
