@@ -84,8 +84,9 @@ throwaway debug key. The run shows a warning, and no release is published.
 **Switching from a build made before signing was set up:** each of those builds was signed with a different
 throwaway key, so uninstall it once before installing the first release. The uninstall removes what the app keeps
 privately: settings, History with its Undo records, and the hash cache. So **undo any run you still want undone
-before you uninstall.** Quarantined files stay in `/storage/emulated/0/.StorageSteward/Quarantine`. After that, every
-release installs over the previous one.
+before you uninstall.** Quarantined files stay in `/storage/emulated/0/.StorageSteward/Quarantine`; from 1.2.13 on,
+History offers **Put back** for quarantine runs the new install has no journal of, and never empties them on its own.
+After that, every release installs over the previous one.
 
 ## Building locally with the key
 
