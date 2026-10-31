@@ -6,6 +6,7 @@ import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 
@@ -29,27 +30,123 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         }
     }
 
-    fun sizeOf(runId: String): Long = treeSize(dirFor(runId))
+    fun sizeOf(runId: String): Long = runDir(runId)?.let(::treeSize) ?: 0L
 
     fun totalSize(): Long = treeSize(guard.quarantineRoot)
 
     fun runsWithContent(): List<String> = try {
-        Files.newDirectoryStream(guard.quarantineRoot).use { stream ->
-            stream.filter { guard.isRealDirectory(it) }.map { it.fileName.toString() }
+        // A quarantine that leads anywhere else (a link put in its place) is not the quarantine: nothing in it is listed,
+        // so nothing outside is ever emptied.
+        if (!guard.resolvesBeneath(guard.quarantineRoot)) {
+            emptyList()
+        } else {
+            Files.newDirectoryStream(guard.quarantineRoot).use { stream ->
+                stream.filter { guard.isRealDirectory(it) }.map { it.fileName.toString() }
+            }
         }
     } catch (_: IOException) {
         emptyList()
     }
 
+    /** [runId]'s folder in the quarantine, when it really is one, beneath the root through no link. */
+    private fun runDir(runId: String): Path? {
+        val dir = dirFor(runId)
+        if (!dir.startsWith(guard.quarantineRoot) || dir == guard.quarantineRoot || !guard.isRealDirectory(dir)) return null
+        return dir.takeIf { guard.resolvesBeneath(it) }
+    }
+
+    /** Where [journal] (one run's, as read) put things in that run's quarantine. */
+    private fun recorded(runId: String, journal: List<JournalEntry>): List<Path> {
+        val dir = dirFor(runId)
+        return JournalAction.settle(journal) { true }
+            .filter { it.action == JournalAction.QUARANTINED || it.action == JournalAction.DEDUPED_QUARANTINED }
+            .mapNotNull { e -> runCatching { Paths.get(e.b) }.getOrNull() }
+            .filter { it.startsWith(dir) && it != dir }
+    }
+
+    /**
+     * What [runId]'s quarantine holds that its [journal] doesn't record (a move whose line was lost when Android stopped
+     * the app or the power went): the topmost such files and folders.
+     */
+    fun unrecorded(runId: String, journal: List<JournalEntry>): List<Path> {
+        val dir = runDir(runId) ?: return emptyList()
+        val known = recorded(runId, journal).toHashSet()
+        if (known.contains(dir)) return emptyList()
+        val out = ArrayList<Path>()
+        val stack = ArrayDeque(listOf(dir))
+        while (stack.isNotEmpty()) {
+            val folder = stack.removeLast()
+            val children = try {
+                Files.newDirectoryStream(folder).use { it.toList() }
+            } catch (_: IOException) {
+                continue
+            }
+            for (c in children) {
+                when {
+                    c in known -> Unit
+                    // A folder on the way to something recorded: look inside.
+                    guard.isRealDirectory(c) && known.any { it.startsWith(c) } -> stack.addLast(c)
+                    // Folders the executor made on the way, left empty: nothing to keep.
+                    guard.isRealDirectory(c) && treeSize(c) == 0L && !holdsAnyFile(c) -> Unit
+                    else -> out.add(c)
+                }
+            }
+        }
+        return out
+    }
+
+    private fun holdsAnyFile(dir: Path): Boolean = try {
+        Files.walk(dir).use { s -> s.anyMatch { !Files.isDirectory(it, java.nio.file.LinkOption.NOFOLLOW_LINKS) } }
+    } catch (_: IOException) {
+        true
+    } catch (_: java.io.UncheckedIOException) {
+        true
+    }
+
+    /**
+     * Runs of this install that Android stopped mid-way and whose quarantine holds something their journal doesn't record.
+     * Like [orphans], History offers to put that back; it is never emptied on its own.
+     */
+    fun interruptedWithUnrecorded(): List<String> {
+        val store = journals ?: return emptyList()
+        return runsWithContent().filter { id ->
+            val info = store.info(id) ?: return@filter false
+            info.finishedAt == null && unrecorded(id, store.readEntries(id) ?: return@filter false).isNotEmpty()
+        }
+    }
+
+    /** Bytes of what [unrecorded] finds in [runId]'s quarantine. */
+    fun unrecordedBytes(runId: String): Long {
+        val store = journals ?: return 0
+        return unrecorded(runId, store.readEntries(id = runId) ?: return 0).sumOf { if (guard.isRealDirectory(it)) treeSize(it) else Files.size(it) }
+    }
+
     /**
      * Permanently deletes one run's quarantine and, once nothing of it is left, marks its journal as purged. Returns
      * the bytes actually freed: a file that can't be deleted stays, with its run's Undo, and isn't counted.
+     *
+     * With [recordedOnly] (emptying by age, which nobody watches), only what the run's journal records goes: anything
+     * else there (a move whose journal line was lost, say to a power cut) is never deleted unasked.
      */
-    fun purge(runId: String, now: Long = System.currentTimeMillis()): Long {
-        val dir = dirFor(runId)
-        if (!dir.startsWith(guard.quarantineRoot) || dir == guard.quarantineRoot || !guard.isRealDirectory(dir)) return 0
+    fun purge(runId: String, now: Long = System.currentTimeMillis(), recordedOnly: Boolean = false): Long {
+        val dir = runDir(runId) ?: return 0
         val before = treeSize(dir)
-        deleteTree(dir)
+        if (recordedOnly) {
+            val store = journals ?: return 0
+            for (p in recorded(runId, store.readEntries(runId) ?: return 0)) {
+                if (guard.isRealDirectory(p)) {
+                    deleteTree(p)
+                } else {
+                    try {
+                        Files.deleteIfExists(p)
+                    } catch (_: IOException) {
+                    }
+                }
+            }
+            pruneEmpty(runId)
+        } else {
+            deleteTree(dir)
+        }
         val left = treeSize(dir)
         if (left == 0L && journals != null && journals.fileFor(runId).exists()) journals.appendMeta(runId, "purged", now.toString())
         return before - left
@@ -64,7 +161,7 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         return runsWithContent().sumOf { id ->
             val info = journals?.info(id)
             val finished = info?.finishedAt ?: info?.startedAt ?: 0L
-            if (finished in 1 until cutoff) purge(id, now) else 0L
+            if (finished in 1 until cutoff) purge(id, now, recordedOnly = true) else 0L
         }
     }
 
@@ -86,26 +183,50 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
      * would let any app that can write the quarantine have it write into an app's folder. They stay in the quarantine.
      */
     fun orphanEntries(runId: String): List<JournalEntry> {
-        val dir = dirFor(runId)
-        if (!dir.startsWith(guard.quarantineRoot) || dir == guard.quarantineRoot || !guard.isRealDirectory(dir)) return emptyList()
+        val dir = runDir(runId) ?: return emptyList()
+        return entriesFor(dir, listOf(dir))
+    }
+
+    /** Put-back entries ([orphanEntries]) for what [unrecorded] finds in a run of this install. */
+    fun unrecordedEntries(runId: String): List<JournalEntry> {
+        val dir = runDir(runId) ?: return emptyList()
+        val store = journals ?: return emptyList()
+        val items = unrecorded(runId, store.readEntries(runId) ?: return emptyList())
+        val (folders, files) = items.partition { guard.isRealDirectory(it) }
+        return entriesFor(dir, folders) + files.mapNotNull { q -> entryFor(dir, q) }
+    }
+
+    private fun entryFor(dir: Path, q: Path): JournalEntry? {
+        if (Files.isSymbolicLink(q)) return null
+        val rel = dir.relativize(q)
+        if (rel.getName(0).toString().let { it == "Android" || it == SafetyPolicy.STEWARD_DIR }) return null
+        return JournalEntry(JournalAction.QUARANTINED, guard.root.resolve(rel.toString()).toString(), q.toString(), -1, -1, null)
+    }
+
+    private fun entriesFor(dir: Path, starts: List<Path>): List<JournalEntry> {
         val entries = ArrayList<JournalEntry>()
-        val stack = ArrayDeque(listOf(dir))
+        val stack = ArrayDeque(starts)
         while (stack.isNotEmpty()) {
             val folder = stack.removeLast()
+            if (folder != dir) {
+                // A folder of its own (one [unrecorded] found): it goes back whole unless its folder exists again.
+                val entry = entryFor(dir, folder) ?: continue
+                if (!guard.isRealDirectory(Paths.get(entry.a))) {
+                    entries += entry
+                    continue
+                }
+            }
             val children = try {
                 Files.newDirectoryStream(folder).use { it.toList() }
             } catch (_: IOException) {
                 continue
             }
             for (q in children) {
-                if (Files.isSymbolicLink(q)) continue
-                val rel = dir.relativize(q)
-                if (rel.getName(0).toString().let { it == "Android" || it == SafetyPolicy.STEWARD_DIR }) continue
-                val original = guard.root.resolve(rel.toString())
-                if (guard.isRealDirectory(q) && guard.isRealDirectory(original)) {
+                val entry = entryFor(dir, q) ?: continue
+                if (guard.isRealDirectory(q) && guard.isRealDirectory(Paths.get(entry.a))) {
                     stack.addLast(q)
                 } else {
-                    entries += JournalEntry(JournalAction.QUARANTINED, original.toString(), q.toString(), -1, -1, null)
+                    entries += entry
                 }
             }
         }
@@ -114,8 +235,7 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
 
     /** Removes the folders [runId]'s quarantine is left with once everything in them went back. */
     fun pruneEmpty(runId: String) {
-        val dir = dirFor(runId)
-        if (!dir.startsWith(guard.quarantineRoot) || dir == guard.quarantineRoot || !guard.isRealDirectory(dir)) return
+        val dir = runDir(runId) ?: return
         try {
             Files.walkFileTree(dir, object : SimpleFileVisitor<Path>() {
                 override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult = FileVisitResult.CONTINUE

@@ -1,12 +1,15 @@
 package com.galaxy.steward.core.organize
 
 import com.galaxy.steward.core.model.FileKind
+import java.text.Normalizer
 
 enum class RuleTarget { FILES, FOLDERS, BOTH }
 
 /**
  * A semantic filing rule: whole-word keywords (a trailing `*` matches a word prefix) and/or file extensions,
- * mapped to a destination relative to the storage root. `{device}` expands to the device label.
+ * mapped to a destination relative to the storage root. `{device}` expands to the device label. Keywords match in any
+ * case and with or without accents; in scripts written without spaces (Chinese, Japanese, Thai...) they match anywhere
+ * in a name. A `*` anywhere but at the end is punctuation like any other.
  */
 data class KeywordRule(
     val name: String,
@@ -17,8 +20,14 @@ data class KeywordRule(
 ) {
     private val normalizedKeywords = keywords.mapNotNull { Text.keyword(it) }
 
+    /**
+     * Keywords were given but none has a letter or a digit ("***", "-"). Such a rule matches nothing: taken as having no
+     * keywords, it would file every file of its types.
+     */
+    private val unusable = keywords.isNotEmpty() && normalizedKeywords.isEmpty()
+
     fun matchesFile(name: String): Boolean {
-        if (target == RuleTarget.FOLDERS) return false
+        if (target == RuleTarget.FOLDERS || unusable) return false
         if (extensions.isNotEmpty() && FileKind.extensionOf(name) !in extensions) return false
         if (normalizedKeywords.isEmpty()) return extensions.isNotEmpty()
         return Text.matchesAny(Text.normalize(name), normalizedKeywords)
@@ -31,12 +40,20 @@ data class KeywordRule(
 
     fun resolvedDestination(deviceLabel: String): String = destination.replace("{device}", deviceLabel).trim('/')
 
-    /** Tab-separated persistence format used by the settings store. */
+    /**
+     * Tab-separated persistence format used by the settings store, one rule per line: tabs and line breaks typed into a
+     * field become spaces, or they would split the rule into others (a keyword "bank⏎statement" did).
+     */
     fun encode(): String = listOf(
         name, keywords.joinToString(","), extensions.joinToString(","), destination, target.name,
-    ).joinToString("\t")
+    ).joinToString("\t") { it.replace(SEPARATORS, " ") }
 
     companion object {
+        private val SEPARATORS = Regex("[\t\r\n]")
+
+        /** The [keywords] that can never match anything, having no letter or digit; a rule editor refuses them. */
+        fun unusableKeywords(keywords: List<String>): List<String> = keywords.filter { Text.keyword(it) == null }
+
         fun decode(line: String): KeywordRule? {
             val p = line.split('\t')
             if (p.size < 4 || p[0].isBlank() || p[3].isBlank()) return null
@@ -52,16 +69,39 @@ data class KeywordRule(
 }
 
 object Text {
-    private val nonWord = Regex("[^a-z0-9]+")
+    private val nonWord = Regex("""[^\p{L}\p{N}]+""")
+    private val asciiNonWord = Regex("[^a-z0-9]+")
+    private val marks = Regex("""\p{Mn}+""")
 
-    /** Lower-case words separated by single spaces, padded so " word " matches whole words. */
-    fun normalize(s: String): String = " " + s.lowercase().replace(nonWord, " ").trim() + " "
+    /** Scripts written without spaces between words, where a keyword can't be told apart as a whole word. */
+    private val UNSPACED = setOf(
+        Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA,
+        Character.UnicodeScript.THAI, Character.UnicodeScript.LAO, Character.UnicodeScript.KHMER,
+        Character.UnicodeScript.MYANMAR, Character.UnicodeScript.TIBETAN,
+    )
 
-    /** A keyword pattern: " words " for whole-word matches, " words" (no trailing space) for `words*` prefixes. */
+    /**
+     * Lower-case words separated by single spaces, padded so " word " matches whole words. Letters and digits of every
+     * script are words; accents fold away (Résumé, resume and RESUME are one word). It used to keep only a-z and 0-9, so a
+     * keyword like "налог" or "請求書" was nothing at all, and "résumé" was "r sum".
+     */
+    fun normalize(s: String): String {
+        if (s.all { it.code < 0x80 }) return " " + s.lowercase().replace(asciiNonWord, " ").trim() + " "
+        val folded = Normalizer.normalize(s.lowercase(), Normalizer.Form.NFKD).replace(marks, "")
+        return " " + folded.replace(nonWord, " ").trim() + " "
+    }
+
+    /**
+     * A keyword pattern: " words " for whole-word matches, " words" (no trailing space) for `words*` prefixes, and the
+     * bare words for scripts without spaces, which match anywhere. Null when nothing is left to match: no letter or digit.
+     * The trailing `*` is read before the keyword is normalized, which would otherwise take it for punctuation.
+     */
     fun keyword(raw: String): String? {
-        val prefix = raw.trim().endsWith("*")
-        val core = normalize(raw.trim().removeSuffix("*")).trim()
+        val trimmed = raw.trim()
+        val prefix = trimmed.endsWith("*")
+        val core = normalize(trimmed.trimEnd('*')).trim()
         if (core.isEmpty()) return null
+        if (core.codePoints().anyMatch { Character.UnicodeScript.of(it) in UNSPACED }) return core
         return if (prefix) " $core" else " $core "
     }
 

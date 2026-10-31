@@ -63,4 +63,19 @@ class GoalPlannerTest {
         assertTrue(review.picks.none { it.id == "termux:decompiled" })
         assertEquals((300 + 100 + 900 + 250 + 5000 + 200 + 800) * MIB, big.possible)
     }
+    /** A suggestion inside another one frees nothing more: the goal counts the files once. */
+    @Test
+    fun overlappingSuggestionsCountOnce() = runTest {
+        val report = report(
+            listOf(
+                junk(JunkCategory.OLD_LOGS, "logs", 300),
+                junk(JunkCategory.STALE_DOWNLOADS, "logs/partial", 100),
+                junk(JunkCategory.INSTALLED_APKS, "apks", 500),
+                junk(JunkCategory.OLD_INSTALLERS, "apks/old.apk", 200),
+            ),
+        )
+        val plan = GoalPlanner.plan(10_000 * MIB, report, null)
+        assertEquals(listOf("junk:logs", "junk:apks"), plan.picks.map { it.id })
+        assertEquals(800 * MIB, plan.total)
+    }
 }

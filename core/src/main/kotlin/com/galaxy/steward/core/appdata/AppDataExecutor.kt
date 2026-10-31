@@ -1,6 +1,7 @@
 package com.galaxy.steward.core.appdata
 
 import com.galaxy.steward.core.SafetyPolicy
+import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionListener
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.JournalAction
@@ -274,6 +275,16 @@ class AppDataExecutor(
      * [com.galaxy.steward.core.exec.ActionExecutor]: an item in the quarantine without its journal line couldn't be
      * undone, and would go when the quarantine is emptied.
      */
+    /** Journals [entry] just before its move ([JournalAction.settle]); when that fails nothing has moved yet. */
+    private fun intend(entry: JournalEntry) {
+        try {
+            sink.entry(entry.copy(action = JournalAction.pending(entry.action)))
+        } catch (e: IOException) {
+            journalBroken = true
+            throw JournalBroken(e)
+        }
+    }
+
     private fun journalMove(from: Path, to: Path, entry: JournalEntry) {
         try {
             sink.entry(entry)
@@ -292,16 +303,19 @@ class AppDataExecutor(
         if (!a.isRegularFile) return skip("No longer a regular file")
         if (a.size() != target.size || a.lastModifiedTime().toMillis() != target.mtime) return skip("Changed since the scan")
         val q = quarantineTarget(path) ?: return skip("Quarantine unavailable")
+        val entry = JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null)
+        intend(entry)
         Files.move(path, q)
-        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) || !Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
+        if (!Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
             failed++
             return "Post-quarantine verification failed"
         }
-        journalMove(path, q, JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null))
+        // Journaled even if the app wrote a new one at once: it is in the quarantine, and Undo needs its line.
+        journalMove(path, q, entry)
         quarantined++
         bytesQuarantined += target.size
         changed += target.path
-        return null
+        return if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) skip(ActionExecutor.REAPPEARED) else null
     }
 
     private fun quarantineLeftover(item: AppJunkItem, dir: Path): String? {
@@ -317,22 +331,31 @@ class AppDataExecutor(
     /** Moves a whole folder to the quarantine in one rename, or file by file when the rename crosses a mount. */
     private fun quarantineDir(dir: Path, bytes: Long, a: BasicFileAttributes): String? {
         val q = quarantineTarget(dir) ?: return skip("Quarantine unavailable")
+        val entry = JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), bytes, a.lastModifiedTime().toMillis(), null)
+        intend(entry)
         val renamed = try {
             Files.move(dir, q)
             true
         } catch (_: IOException) {
-            false // Android/data sits behind its own mount on some builds: fall back to moving file by file.
+            // Android/data sits behind its own mount on some builds: fall back to moving file by file, each journaled.
+            try {
+                sink.entry(entry.copy(action = JournalAction.abandoned(entry.action)))
+            } catch (e: IOException) {
+                journalBroken = true
+                throw JournalBroken(e)
+            }
+            false
         }
         if (renamed) {
-            if (Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
                 failed++
                 return "Post-quarantine verification failed"
             }
-            journalMove(dir, q, JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), bytes, a.lastModifiedTime().toMillis(), null))
+            journalMove(dir, q, entry)
             quarantined++
             bytesQuarantined += bytes
             changed += dir.toString()
-            return null
+            return if (Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) skip(ActionExecutor.REAPPEARED) else null
         }
         return quarantineFileByFile(dir)
     }
@@ -363,14 +386,15 @@ class AppDataExecutor(
                             left++
                             continue
                         }
+                        val line = JournalEntry(JournalAction.QUARANTINED, entry.toString(), q.toString(), a.size(), a.lastModifiedTime().toMillis(), null)
+                        intend(line)
                         try {
                             Files.move(entry, q)
                         } catch (_: IOException) {
                             left++
                             continue
                         }
-                        val mtime = a.lastModifiedTime().toMillis()
-                        journalMove(entry, q, JournalEntry(JournalAction.QUARANTINED, entry.toString(), q.toString(), a.size(), mtime, null))
+                        journalMove(entry, q, line)
                         quarantined++
                         bytesQuarantined += a.size()
                     }

@@ -99,4 +99,22 @@ class NameMergeTest {
             assertTrue(moves.all { !it.defaultSelected && it.reason.startsWith("Loose at the top") })
         }
     }
+    /** A ".nomedia" in a copy of the camera folder would hide the whole camera roll once merged into it. */
+    @Test
+    fun hiddenFilesStayInTheCopy() = runTest {
+        TestFs().use { fs ->
+            fs.random("DCIM/Camera/IMG_1.jpg", 3000, 1)
+            fs.random("DCIM/Camera (1)/IMG_1.jpg", 3000, 1)
+            fs.random("DCIM/Camera (1)/IMG_2.jpg", 4000, 2)
+            fs.text("DCIM/Camera (1)/.nomedia", "")
+            fs.ageDirectories()
+            val merge = Steward(fs.rootPath, testSettings, TestEnv, null).scan().folderMerges.single { it.sameName }
+            assertEquals(fs.path("DCIM/Camera"), merge.target)
+            assertTrue(merge.operations.none { it is com.galaxy.steward.core.plan.MoveFileOp && it.src.endsWith("/.nomedia") })
+            val summary = ActionExecutor(fs.rootPath, JournalStore(fs.stateDir)).execute("Merge", "merge", listOf(merge))
+            assertEquals(summary.messages.joinToString(), 0, summary.skipped + summary.failed)
+            assertFalse(File(fs.root, "DCIM/Camera/.nomedia").exists())
+            assertTrue(File(fs.root, "DCIM/Camera/IMG_2.jpg").exists())
+        }
+    }
 }

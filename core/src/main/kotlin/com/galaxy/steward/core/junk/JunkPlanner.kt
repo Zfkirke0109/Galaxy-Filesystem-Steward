@@ -6,6 +6,7 @@ import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.appdata.AppPolicy
+import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileNode
@@ -116,6 +117,10 @@ class JunkPlanner(
         val name = f.name
         when {
             SafetyPolicy.isCredentialName(name) -> return
+            // A zip this app was still writing when it was stopped (PackDirOp): the folder it packs never moved.
+            name.startsWith('.') && name.endsWith(ActionExecutor.PARTIAL_ZIP) && ageDays >= 1 &&
+                dir.dirs.any { ".${it.name}${ActionExecutor.PARTIAL_ZIP}" == name } ->
+                add(JunkCategory.STALE_DOWNLOADS, f.path, false, f.size, f.mtime, "A zip left unfinished by a stopped run; its folder is still there")
             name.startsWith(".trashed-") ->
                 add(JunkCategory.TRASHED_MEDIA, f.path, false, f.size, f.mtime, "In the system trash for $ageDays days")
             dir.relPath.let { it == "Download" || it.startsWith("Download/") } && isAbandonedDownload(name) && ageDays >= settings.staleTempDays ->

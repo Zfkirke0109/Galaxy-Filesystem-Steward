@@ -7,6 +7,7 @@ import android.os.Environment
 import android.os.Process
 import android.os.StatFs
 import android.os.storage.StorageManager
+import com.galaxy.steward.core.appdata.AppPolicy
 import com.galaxy.steward.core.device.DiskStats
 import com.galaxy.steward.core.device.PrivateData
 import com.galaxy.steward.core.device.PrivateEntry
@@ -114,7 +115,9 @@ class DeepSpaceController(private val context: Context, private val shizuku: Shi
     private fun debugApps(): List<DebugApp> = try {
         @Suppress("DEPRECATION")
         context.packageManager.getInstalledApplications(0)
-            .filter { it.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 && it.flags and ApplicationInfo.FLAG_SYSTEM == 0 && it.packageName != context.packageName }
+            .filter { it.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 && it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
+            // Not Termux (a debug build from GitHub is debuggable), logins, keys or anything else Clear all data refuses.
+            .filter { AppPolicy.privateDataBlock(it.packageName, context.packageName) == null }
             .map { DebugApp(it.packageName, context.packageManager.getApplicationLabel(it).toString()) }
             .sortedBy { it.label.lowercase() }
     } catch (_: RuntimeException) {

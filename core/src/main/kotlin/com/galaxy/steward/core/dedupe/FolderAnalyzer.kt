@@ -4,6 +4,7 @@ import com.galaxy.steward.core.MIB
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.hash.HashCache
+import com.galaxy.steward.core.hash.Hashing
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileNode
 import com.galaxy.steward.core.model.NodeFlags
@@ -139,9 +140,16 @@ class FolderAnalyzer(
         var commonBytes = 0L
         var uniqueFiles = 0
         var uniqueBytes = 0L
+        // Folders that keep a file the merge leaves (hidden files, keys, downloads in progress), and so stay.
+        val keeps = HashSet<DirNode>()
         fun walk(d: DirNode, prefix: String) {
             for (f in d.files) {
-                if (SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) continue
+                // Hidden files stay too: a ".nomedia" moved into DCIM/Camera would hide the whole camera roll.
+                if (f.hidden || SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) {
+                    var up: DirNode? = d
+                    while (up != null && keeps.add(up) && up !== source) up = up.parent
+                    continue
+                }
                 val rel = prefix + f.name
                 val match = there[rel]?.takeIf { it.size == f.size }
                 val sha = if (match != null) fullHash(f) else null
@@ -160,8 +168,9 @@ class FolderAnalyzer(
         }
         walk(source, "")
         if (commonFiles + uniqueFiles == 0) return null
-        subdirsDeepestFirst(source).forEach { ops.add(RemoveEmptyDirOp(source.path + "/" + it)) }
-        ops.add(RemoveEmptyDirOp(source.path))
+        val stays = keeps.map { it.path }.toSet()
+        subdirsDeepestFirst(source).map { source.path + "/" + it }.filter { it !in stays }.forEach { ops.add(RemoveEmptyDirOp(it)) }
+        if (source.path !in stays) ops.add(RemoveEmptyDirOp(source.path))
         return FolderMerge(
             id = "namemerge:${source.path.hashCode()}:${target.path.hashCode()}",
             target = target.path,
@@ -185,14 +194,14 @@ class FolderAnalyzer(
         val candidates = signatures.entries
             .filter { (dir, _) -> eligibleFolder(dir) }
             .groupBy({ it.value }, { it.key })
-            .values.filter { it.size > 1 }
-            .sortedBy { members -> members.minOf { it.depth } }
+            .entries.filter { it.value.size > 1 }
+            .sortedBy { (_, members) -> members.minOf { it.depth } }
 
-        val total = candidates.sumOf { it.size }.toLong()
+        val total = candidates.sumOf { it.value.size }.toLong()
         var done = 0L
         val covered = HashSet<DirNode>()
         val out = ArrayList<FolderDuplicateGroup>()
-        for (members in candidates) {
+        for ((signature, members) in candidates) {
             currentCoroutineContext().ensureActive()
             val open = members.filter { m -> covered.none { it === m || it.isAncestorOf(m) } }
             done += members.size
@@ -205,7 +214,9 @@ class FolderAnalyzer(
                 val keeper = ranked.first()
                 out.add(
                     FolderDuplicateGroup(
-                        id = "folder:${hash.take(16)}",
+                        // The same files can make two groups whose layouts differ only by an empty folder: the layout
+                        // keeps their ids apart (one id twice crashed the Duplicates screen's list).
+                        id = "folder:${hash.take(16)}:${signature.take(8)}",
                         treeHash = hash,
                         bytes = keeper.totalBytes,
                         fileCount = keeper.totalFiles,
@@ -236,7 +247,7 @@ class FolderAnalyzer(
         val digest = MessageDigest.getInstance("SHA-256")
         for (f in dir.files) digest.update("F\u0000${f.name}\u0000${f.size}\n".toByteArray())
         for ((child, sig) in childSigs) digest.update("D\u0000${child.name}\u0000$sig\n".toByteArray())
-        val sig = digest.digest().joinToString("") { "%02x".format(it) }
+        val sig = Hashing.hex(digest.digest())
         out[dir] = sig
         return sig
     }
@@ -256,7 +267,7 @@ class FolderAnalyzer(
             val sha = fullHash(f) ?: return null
             digest.update("$rel\u0000${f.size}\u0000$sha\n".toByteArray())
         }
-        return digest.digest().joinToString("") { "%02x".format(it) }
+        return Hashing.hex(digest.digest())
     }
 
     private fun collect(dir: DirNode, prefix: String, out: MutableList<Pair<String, FileNode>>) {
@@ -293,7 +304,8 @@ class FolderAnalyzer(
         val byHash = HashMap<String, MutableList<FileNode>>()
         for ((node, sha) in fileDuplicates.fullHashes) byHash.getOrPut(sha) { ArrayList() }.add(node)
         for (group in fileDuplicates.groups) {
-            val nodes = byHash[group.sha256]?.filter { it.size == group.size } ?: continue
+            // By path, so a group of many copies always offers the same ten folders, whatever order the hashes came in.
+            val nodes = byHash[group.sha256]?.filter { it.size == group.size }?.sortedBy { it.path } ?: continue
             val parents = nodes.map { it.dir }.distinct().filter { mergeable(it, covered) }.take(10)
             for (i in parents.indices) for (j in i + 1 until parents.size) {
                 val a = parents[i]
@@ -304,20 +316,41 @@ class FolderAnalyzer(
             }
         }
         val threshold = maxOf(5 * MIB, settings.minDuplicateFolderBytes)
-        val shortlist = common.entries
+        val candidates = common.entries
             .filter { it.value >= threshold }
             .map { (pair, bytes) ->
                 val ranked = listOf(pair.a, pair.b).sortedWith(KeeperRanking.dirComparator)
                 Triple(ranked[0], ranked[1], bytes)
             }
             .filter { (_, source, bytes) -> bytes * 2 >= source.directBytes }
-            .sortedByDescending { it.third }
-            .take(25)
+            // The biggest overlaps first (they delete the most and move the least), then the better target, then by
+            // path: the same plan from the same folders every time.
+            .sortedWith(
+                compareByDescending<Triple<DirNode, DirNode, Long>> { it.third }
+                    .thenComparator { x, y -> KeeperRanking.dirComparator.compare(x.first, y.first) }
+                    .thenBy { it.second.path },
+            )
 
+        // Merges that can all be applied together, in any order and any subset: a folder is merged away at most once,
+        // never into a folder another merge empties, and neither inside nor around another merge's folders. A target may
+        // take in several sources (three copies of one folder become one). Chains (A into B, B into C) wait for the
+        // next scan, which sees B's new content.
+        val sources = ArrayList<DirNode>()
+        val targets = ArrayList<DirNode>()
+        fun near(a: DirNode, b: DirNode) = a === b || a.isAncestorOf(b) || b.isAncestorOf(a)
         val out = ArrayList<FolderMerge>()
-        for ((target, source, _) in shortlist) {
+        var planned = 0
+        for ((target, source, _) in candidates) {
+            if (planned >= MAX_OVERLAP_MERGES) break
+            if (sources.any { near(it, source) } || targets.any { near(it, source) }) continue
+            if (sources.any { near(it, target) } || targets.any { it !== target && near(it, target) }) continue
             currentCoroutineContext().ensureActive()
-            planMerge(target, source)?.let(out::add)
+            planned++
+            planMerge(target, source)?.let {
+                out += it
+                sources += source
+                targets += target
+            }
         }
         return out.sortedByDescending { it.commonBytes }
     }
@@ -341,9 +374,17 @@ class FolderAnalyzer(
         var commonBytes = 0L
         var uniqueFiles = 0
         var uniqueBytes = 0L
+        var left = 0
         for (f in source.files) {
-            if (f.hidden || SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) continue
-            val sha = fullHash(f) ?: continue
+            if (f.hidden || SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) {
+                left++
+                continue
+            }
+            val sha = fullHash(f)
+            if (sha == null) {
+                left++
+                continue
+            }
             val match = targetByHash[sha]
             if (match != null && match.size == f.size) {
                 ops.add(DeleteDuplicateOp(f.path, match.path, f.size, sha))
@@ -356,7 +397,9 @@ class FolderAnalyzer(
             }
         }
         if (commonFiles == 0 || commonBytes * 2 < source.directBytes) return null
-        ops.add(RemoveEmptyDirOp(source.path))
+        // Only this folder's own files take part. The folder goes once nothing of it is left: with sub-folders or files
+        // that stay (hidden, keys, downloads in progress) the merge is done without it, rather than "skipped".
+        if (left == 0 && source.dirs.isEmpty()) ops.add(RemoveEmptyDirOp(source.path))
         return FolderMerge(
             id = "merge:${source.path.hashCode()}:${target.path.hashCode()}",
             target = target.path,
@@ -372,6 +415,9 @@ class FolderAnalyzer(
 
     private companion object {
         const val MAX_NAME_MERGE_FILES = 2_000
+
+        /** Overlap merges planned per scan; each hashes both folders in full. */
+        const val MAX_OVERLAP_MERGES = 25
 
         /** Names too common to mean two folders hold the same things. */
         val GENERIC_NAMES = setOf(

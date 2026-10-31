@@ -176,6 +176,14 @@ object AppPolicy {
         else -> null
     }
 
+    /**
+     * Why an app's private data may not be removed through run-as ("Your debuggable builds"), or null when it may. The
+     * same apps as for [clearDataBlock]: deleting `files/home` or `files/usr` of a Termux debug build loses its whole
+     * environment, as clearing it would.
+     */
+    fun privateDataBlock(packageName: String, ownPackage: String?): String? =
+        if (!isPackageName(packageName)) "Not a package" else clearDataBlock(packageName, ownPackage)
+
     fun mayForceStop(packageName: String): Boolean = when {
         packageName in STRICT_NO_TOUCH || packageName in NEVER_FORCE_STOP -> false
         packageName == "com.google.android.gms" || packageName.startsWith("com.google.android.gms.") -> false

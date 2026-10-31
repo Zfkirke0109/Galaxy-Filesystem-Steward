@@ -80,6 +80,63 @@ class KeptCopyTest {
         return DuplicateGroup(id, Hashing.sha256(fs.path(keeper)), size.toLong(), copies, keeperIndex = 0, keepReason = "test")
     }
 
+    /**
+     * Two runs from one scan, as from the Duplicates and then the Clutter screen: the duplicate groups used to keep the
+     * copies in the older folder (older files), the near-copy item then quarantined that very folder ("Thesis-2 is newer
+     * and stays"), and the chapters were left only in the quarantine, gone a week later.
+     */
+    @Test
+    fun aSecondRunFromTheSameScanKeepsTheKeptCopies() = runTest {
+        TestFs().use { fs ->
+            val now = System.currentTimeMillis()
+            val chapters = (0 until 24).map { Random(300 + it).nextBytes(2_000 + it) }
+            chapters.forEachIndexed { i, bytes ->
+                fs.file("Download/Thesis/ch$i.pdf", bytes, mtime = now - 120 * DAY_MS)
+                fs.file("Download/Thesis-2/ch$i.pdf", bytes, mtime = now - 30 * DAY_MS)
+            }
+            fs.random("Download/Thesis-2/ch24.pdf", 2_500, 999, mtime = now - 30 * DAY_MS)
+            fs.ageDirectories()
+            val report = Steward(fs.rootPath, testSettings.copy(nearCopyMinBytes = 1), TestEnv, null).scan()
+            val near = report.junk.filter { it.category == JunkCategory.NEAR_COPIES }
+            assertEquals(listOf(fs.path("Download/Thesis")), near.map { it.path })
+            assertEquals(24, report.duplicates.size)
+            report.duplicates.forEach { g -> assertTrue(g.keepReason, g.keeper.path.startsWith(fs.path("Download/Thesis-2/"))) }
+
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            ActionExecutor(fs.rootPath, journals).execute("Duplicates", "dedupe", report.duplicates)
+            ActionExecutor(fs.rootPath, journals).execute("Clutter", "junk", near)
+            chapters.forEachIndexed { i, bytes ->
+                assertTrue("ch$i", File(fs.path("Download/Thesis-2/ch$i.pdf")).readBytes().contentEquals(bytes))
+            }
+        }
+    }
+
+    /** Clutter that holds the copy a duplicate group keeps, with no other copy to keep instead, isn't offered. */
+    @Test
+    fun clutterHoldingTheOnlyKeptCopyIsLeftInPlace() = runTest {
+        TestFs().use { fs ->
+            val now = System.currentTimeMillis()
+            // Two old run folders of a tool, each with the same report: both are offered as old runs.
+            val bytes = Random(5).nextBytes(3_000)
+            for (day in listOf("2026-01-01_10-00", "2026-01-02_10-00", "2026-10-30_10-00")) {
+                val age = if (day.startsWith("2026-10")) 100 else 200
+                (0 until 3).forEach { fs.random("Documents/ToolRuns/$day/part$it.txt", 500 + it, day.hashCode() + it, mtime = now - age * DAY_MS) }
+            }
+            fs.file("Documents/ToolRuns/2026-01-01_10-00/report.pdf", bytes, mtime = now - 200 * DAY_MS)
+            fs.file("Documents/ToolRuns/2026-01-02_10-00/report.pdf", bytes, mtime = now - 199 * DAY_MS)
+            fs.ageDirectories()
+            // A run folder counts from its newest file or its own time, whichever is newer.
+            mapOf("2026-01-01_10-00" to 200, "2026-01-02_10-00" to 199, "2026-10-30_10-00" to 100).forEach { (day, age) ->
+                File(fs.root, "Documents/ToolRuns/$day").setLastModified(now - age * DAY_MS)
+            }
+            val report = Steward(fs.rootPath, testSettings, TestEnv, null).scan()
+            assertTrue(report.insights.any { it.title == "Left in place: 2026-01-01_10-00" })
+            val group = report.duplicates.single { it.keeper.name == "report.pdf" }
+            val quarantined = report.junk.filter { it.category != JunkCategory.EMPTY_FOLDERS }.map { it.path }
+            assertTrue(quarantined.toString(), quarantined.none { group.keeper.path == it || group.keeper.path.startsWith("$it/") })
+        }
+    }
+
     private fun junk(category: JunkCategory, fs: TestFs, rel: String, size: Int, isDirectory: Boolean) =
         JunkItem("junk:$category:$rel", category, fs.path(rel), isDirectory, size.toLong(), File(fs.path(rel)).lastModified(), "test")
 }

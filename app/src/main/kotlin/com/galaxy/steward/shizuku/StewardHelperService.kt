@@ -136,8 +136,9 @@ class StewardHelperService : IStewardHelper.Stub {
     /** list: `run-as <pkg> du` of its data folder. remove: stops the app, then `run-as <pkg> rm -rf` each checked path. */
     private fun privateDataOp(pkg: String, request: String, out: (String) -> Unit) {
         val lines = request.lines().filter { it.isNotEmpty() }
-        if (!AppPolicy.isPackageName(pkg) || AppPolicy.isProtected(pkg, BuildConfig.APPLICATION_ID) || pkg == AppPolicy.SHIZUKU) {
-            out("E\tprotected or not a package")
+        val block = AppPolicy.privateDataBlock(pkg, BuildConfig.APPLICATION_ID)
+        if (block != null) {
+            out("E\tprotected or not a package ($block)")
         } else {
             when (lines.firstOrNull()) {
                 "list" -> {

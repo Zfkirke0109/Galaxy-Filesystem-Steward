@@ -121,6 +121,30 @@ data class DuplicateGroup(
     fun withKeeper(index: Int): DuplicateGroup =
         if (index in copies.indices && copies[index].zone.durable) copy(keeperIndex = index, keepReason = "Chosen by you") else this
 
+    /**
+     * When a folder merge removes this group's keeper, the copy that merge keeps instead ([mergeKeeps]: removed copy to
+     * kept copy), so the group and the merge never each keep a different copy.
+     */
+    fun keepingWhatMergesKeep(mergeKeeps: Map<String, String>): DuplicateGroup {
+        val canonical = mergeKeeps[keeper.path] ?: return this
+        val index = copies.indexOfFirst { it.path == canonical }
+        if (index < 0 || !copies[index].zone.durable) return this
+        val folder = canonical.substringBeforeLast('/').substringAfterLast('/')
+        return copy(keeperIndex = index, keepReason = "Kept: in $folder, where the folder merge keeps it")
+    }
+
+    /**
+     * When [keeper] sits in a folder offered for the quarantine ([quarantinedAt]: an older near-copy, an old run), the
+     * best copy outside such folders, if there is one. Kept in that folder, it would go with it once its duplicates had.
+     */
+    fun keepingOutside(rootPath: String, quarantinedAt: (String) -> Boolean): DuplicateGroup {
+        if (!quarantinedAt(keeper.path)) return this
+        val best = copies.withIndex()
+            .filter { (_, c) -> c.zone.durable && !quarantinedAt(c.path) }
+            .minWithOrNull(compareBy(KeeperRanking.copyComparator(rootPath)) { it.value }) ?: return this
+        return copy(keeperIndex = best.index, keepReason = "Kept: the other copies are in folders offered for clean-up")
+    }
+
     /** This group without the copies matching [drop]; null when fewer than two copies remain. */
     fun excluding(rootPath: String, drop: (String) -> Boolean): DuplicateGroup? {
         if (copies.none { drop(it.path) }) return this
@@ -178,6 +202,13 @@ data class FolderDuplicateGroup(
 
     fun withKeeper(index: Int): FolderDuplicateGroup =
         if (index in copies.indices && copies[index].zone.durable) copy(keeperIndex = index, keepReason = "Chosen by you") else this
+
+    /** Like [DuplicateGroup.keepingOutside]: the best copy outside folders offered for the quarantine, if any. */
+    fun keepingOutside(quarantinedAt: (String) -> Boolean): FolderDuplicateGroup {
+        if (!quarantinedAt(keeper.path)) return this
+        val index = copies.indices.firstOrNull { copies[it].zone.durable && !quarantinedAt(copies[it].path) } ?: return this
+        return copy(keeperIndex = index, keepReason = "Kept: the other copies are in folders offered for clean-up")
+    }
 }
 
 /** Two folders that share most of their content: merge [source] into [target]. */

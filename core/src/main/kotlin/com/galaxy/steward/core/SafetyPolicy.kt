@@ -131,6 +131,9 @@ object SafetyPolicy {
 
     fun isInProgressDownload(name: String): Boolean = FileKind.extensionOf(name) in IN_PROGRESS_EXT
 
+    /** MediaStore's trashed (".trashed-<expiry>-name") and pending (".pending-<expiry>-name") items, which it deletes. */
+    fun isTrashedOrPending(name: String): Boolean = name.startsWith(".trashed-") || name.startsWith(".pending-")
+
     fun isMarkerFile(name: String): Boolean = name.lowercase() in MARKER_NAMES
 
     fun stemOf(name: String): String {

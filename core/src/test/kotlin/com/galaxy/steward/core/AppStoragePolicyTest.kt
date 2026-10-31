@@ -4,6 +4,7 @@ import com.galaxy.steward.core.appdata.AppPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Which apps may have all their data cleared, and how last use is described. */
@@ -59,5 +60,14 @@ class AppStoragePolicyTest {
         assertEquals("4 months ago", ageText(now - 125 * DAY_MS, now))
         assertEquals("23 months ago", ageText(now - 700 * DAY_MS, now))
         assertEquals("2 years ago", ageText(now - 800 * DAY_MS, now))
+    }
+    /** "Your debuggable builds" removes private data through run-as: never for Termux (its GitHub builds are debuggable). */
+    @Test
+    fun privateDataIsNeverRemovedForProtectedApps() {
+        val own = "com.galaxy.steward"
+        listOf("com.termux", "com.termux.api", "com.facebook.katana", "com.amazon.mp3", "com.audible.application", own, AppPolicy.SHIZUKU)
+            .forEach { assertTrue(it, AppPolicy.privateDataBlock(it, own) != null) }
+        assertEquals("Not a package", AppPolicy.privateDataBlock("../etc", own))
+        assertNull(AppPolicy.privateDataBlock("com.example.debugbuild", own))
     }
 }

@@ -61,6 +61,34 @@ object GoalPlanner {
         else -> null
     }
 
+    /** The files and folders in shared storage a pick removes. */
+    private fun pathsOf(item: PlanItem): List<String> = when (item) {
+        is JunkItem -> listOf(item.path)
+        is DuplicateGroup -> item.removals.map { it.path }
+        is FolderDuplicateGroup -> item.removals.map { it.path }
+        is OptimizeItem -> listOf(item.path)
+        else -> emptyList()
+    }
+
+    /** Paths taken so far: [touches] is true for one of them, one inside one, or one around one. */
+    private class PathSet {
+        private val paths = java.util.TreeSet<String>()
+
+        fun add(path: String) {
+            paths += path
+        }
+
+        fun touches(path: String): Boolean {
+            if (path in paths) return true
+            var up = path.substringBeforeLast('/', "")
+            while (up.isNotEmpty()) {
+                if (up in paths) return true
+                up = up.substringBeforeLast('/', "")
+            }
+            return paths.ceiling("$path/")?.startsWith("$path/") == true
+        }
+    }
+
     fun tierOf(item: TermuxItem): RiskTier = when (item.group) {
         TermuxGroup.SAFE, TermuxGroup.PROOT -> RiskTier.NOTHING_LOST
         TermuxGroup.DEV, TermuxGroup.BUILD -> RiskTier.RECOVERABLE
@@ -88,21 +116,30 @@ object GoalPlanner {
         val candidates = all.filter { it.tier <= upTo && it.id !in leaveOut }
         val picks = ArrayList<GoalPick>()
         var total = 0L
+        // Two suggestions can take the same files (a folder that is both an exact copy and packable, near-copies inside
+        // one another): a pick is left out once one taken before it covers its files, so they count once.
+        val taken = PathSet()
+        fun overlaps(p: GoalPick) = p.plan?.let { item -> pathsOf(item).any(taken::touches) } ?: false
+        fun take(p: GoalPick) {
+            picks += p
+            total += p.bytes
+            p.plan?.let { item -> pathsOf(item).forEach(taken::add) }
+        }
         for (tier in RiskTier.entries) {
             val here = candidates.filter { it.tier == tier }.sortedByDescending { it.bytes }.toMutableList()
             // What loses nothing is always worth taking; beyond it, only what the goal still needs.
             if (tier == RiskTier.NOTHING_LOST) {
-                picks += here
-                total += here.sumOf { it.bytes }
+                for (p in here) if (!overlaps(p)) take(p)
                 continue
             }
-            while (total < target && here.isNotEmpty()) {
+            while (total < target) {
+                here.removeAll(::overlaps)
+                if (here.isEmpty()) break
                 val gap = target - total
                 // The smallest one that closes the gap, or else the biggest, and look again.
                 val pick = here.lastOrNull { it.bytes >= gap } ?: here.first()
                 here.remove(pick)
-                picks += pick
-                total += pick.bytes
+                take(pick)
             }
             if (total >= target) break
         }

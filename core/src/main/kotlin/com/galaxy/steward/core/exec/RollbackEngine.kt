@@ -32,15 +32,35 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
 
     suspend fun rollback(runId: String, listener: ExecutionListener? = null): RollbackSummary {
         val store = requireNotNull(journals) { "No journal store" }
-        val summary = rollbackEntries(store.entries(runId), listener)
-        // Undone once nothing is left in the quarantine. A run marked undone loses its Undo button, and whatever had
-        // stayed behind would be lost when the quarantine is emptied.
-        if (summary.remaining == 0) store.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
-        return summary
+        // An unreadable journal says nothing about the run: it isn't "undone with nothing to restore".
+        val journal = store.readEntries(runId) ?: throw IOException("This run's journal couldn't be read, so nothing was undone")
+        val summary = rollbackEntries(journal, listener)
+        // Undone once nothing is left in the quarantine, recorded or not. A run marked undone loses its Undo button, and
+        // whatever had stayed behind would be lost when the quarantine is emptied.
+        val left = summary.remaining + QuarantineManager(guard, store).unrecorded(runId, journal).size
+        if (left == 0) store.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
+        return summary.copy(remaining = left)
     }
 
-    /** Reverts [journalEntries] (in journal order) without touching any journal file - used by the Shizuku helper. */
-    suspend fun rollbackEntries(journalEntries: List<JournalEntry>, listener: ExecutionListener? = null): RollbackSummary {
+    /**
+     * Whether a change written ahead and never confirmed (the run was stopped in between, [JournalAction.settle]) shows in
+     * the files: the item is at its new place and not at its old one, or the zip is there.
+     */
+    fun happened(e: JournalEntry): Boolean {
+        if (!guard.wellFormed(e.a) || (e.b.isNotEmpty() && !guard.wellFormed(e.b))) return false
+        val a = Paths.get(e.a)
+        return when (e.action) {
+            JournalAction.PACKED -> guard.exists(a)
+            JournalAction.DEDUPED -> !guard.exists(a) && guard.exists(Paths.get(e.b))
+            // Its new place was checked free just before (in the quarantine, only this run writes there): what is there
+            // now is what moved, even if something new has taken the old place since.
+            else -> e.b.isNotEmpty() && guard.exists(Paths.get(e.b))
+        }
+    }
+
+    /** Reverts [journal] (in journal order) without touching any journal file - used by the Shizuku helper. */
+    suspend fun rollbackEntries(journal: List<JournalEntry>, listener: ExecutionListener? = null): RollbackSummary {
+        val journalEntries = JournalAction.settle(journal, ::happened)
         val entries = journalEntries.asReversed()
         var restored = 0
         var skipped = 0
@@ -124,6 +144,9 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         if (!guard.wellFormed(to) || !from.startsWith(guard.rootString + "/")) return "Unsafe path"
         if (guard.exists(dst)) {
             if (!beside || !guard.exists(src)) return "Original path is occupied"
+            // An app's own folder taken again (the app was installed again): "com.app (restored)" next to it is a folder no
+            // app or scan looks at. It stays in the quarantine, and the run stays undoable.
+            if (isAppFolder(to)) return "The app has made a new folder since; this one stays in the quarantine"
             dst = freeNameBeside(dst, guard.isRealDirectory(src)) ?: return "Original path is occupied"
             restoredAs = dst.toString()
         }
@@ -133,6 +156,12 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         if (!ensureParent(dst)) return "Cannot recreate the original folder"
         Files.move(src, dst)
         return null
+    }
+
+    /** Android/data, obb or media's folder for one app: `Android/data/com.app`. */
+    private fun isAppFolder(path: String): Boolean {
+        val parts = guard.relative(path).split('/')
+        return parts.size == 3 && parts[0] == "Android" && parts[1] in setOf("data", "obb", "media")
     }
 
     private fun freeNameBeside(path: Path, directory: Boolean): Path? {

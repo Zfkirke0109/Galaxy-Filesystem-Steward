@@ -79,4 +79,32 @@ class NearCopyTest {
             assertTrue(lowered.insights.any { it.title == "Near-copies: mx_jadx and mx_jadx_bad" })
         }
     }
+    /**
+     * Nested pairs: Proj/vids is a newer copy of DCIM/Videos-export, and Proj an older copy of Proj-v2, which has no
+     * videos. Offering both older folders would put every copy of the videos in the quarantine.
+     */
+    @Test
+    fun nestedPairsNeverQuarantineEveryCopy() = runTest {
+        TestFs().use { fs ->
+            val now = System.currentTimeMillis()
+            for (i in 0 until 20) {
+                fs.random("DCIM/Videos-export/v$i.mp4", 1_000, 100 + i, mtime = now - 100 * DAY_MS)
+                fs.random("Download/Proj/vids/v$i.mp4", 1_000, 200 + i, mtime = now - 50 * DAY_MS)
+            }
+            for (i in 0 until 40) {
+                fs.random("Download/Proj/notes/n$i.txt", 1_000, 300 + i, mtime = now - 50 * DAY_MS)
+                fs.random("Download/Proj-v2/notes/n$i.txt", 1_000, 400 + i, mtime = now - 10 * DAY_MS)
+            }
+            fs.ageDirectories()
+            val report = Steward(fs.rootPath, testSettings.copy(nearCopyMinBytes = 1), TestEnv, null).scan()
+            val near = report.junk.filter { it.category == JunkCategory.NEAR_COPIES }.map { it.path }
+            assertTrue(near.toString(), near.isNotEmpty())
+            assertTrue(near.toString(), !(fs.path("DCIM/Videos-export") in near && fs.path("Download/Proj") in near))
+            // Every video still has a copy outside whatever is offered.
+            for (i in 0 until 20) {
+                val copies = listOf(fs.path("DCIM/Videos-export/v$i.mp4"), fs.path("Download/Proj/vids/v$i.mp4"))
+                assertTrue("v$i", copies.any { c -> near.none { c.startsWith("$it/") } })
+            }
+        }
+    }
 }

@@ -39,9 +39,10 @@ class PathGuard(rootPath: String, protectedFolders: List<String> = emptyList()) 
         if (!wellFormed(path)) return "unsafe or out-of-root path"
         val rel = relative(path)
         val top = rel.substringBefore('/')
-        if (top == "Android") return "app-owned storage"
-        if (top == SafetyPolicy.STEWARD_DIR) return "steward quarantine"
-        if (protectedPrefixes.any { rel == it || rel.startsWith("$it/") }) return "pinned folder"
+        // Shared storage ignores case: "android/data" is Android/data, and a pin of "documents/taxes" is Documents/Taxes.
+        if (top.equals("Android", ignoreCase = true)) return "app-owned storage"
+        if (top.equals(SafetyPolicy.STEWARD_DIR, ignoreCase = true)) return "steward quarantine"
+        if (protectedPrefixes.any { rel.equals(it, ignoreCase = true) || rel.startsWith("$it/", ignoreCase = true) }) return "pinned folder"
         if (SafetyPolicy.isCredentialName(rel.substringAfterLast('/'))) return "credential-like name"
         return null
     }

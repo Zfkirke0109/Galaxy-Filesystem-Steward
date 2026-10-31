@@ -16,7 +16,7 @@ object Hashing {
 
     private val buffers = ThreadLocal.withInitial { ByteArray(1024 * 1024) }
 
-    private fun hex(bytes: ByteArray): String {
+    fun hex(bytes: ByteArray): String {
         val chars = CharArray(bytes.size * 2)
         val digits = "0123456789abcdef"
         for (i in bytes.indices) {

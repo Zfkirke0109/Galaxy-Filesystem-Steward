@@ -16,6 +16,7 @@ import com.galaxy.steward.core.plan.RemoveEmptyDirOp
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.BufferedOutputStream
+import java.io.File
 import java.io.IOException
 import java.io.UncheckedIOException
 import java.nio.file.DirectoryIteratorException
@@ -96,6 +97,8 @@ class ActionExecutor(
     rootPath: String,
     private val journals: JournalStore,
     private val options: ExecutorOptions = ExecutorOptions(),
+    /** Opens the run's journal; tests pass one that fails, to check what a run does then. */
+    private val openJournal: (File) -> JournalOutput = ::JournalWriter,
 ) {
     private val guard = PathGuard(rootPath, options.protectedFolders)
     private val quarantine = QuarantineManager(guard, journals)
@@ -105,7 +108,7 @@ class ActionExecutor(
     private class Outcome(val status: Status, val message: String? = null)
 
     private lateinit var runId: String
-    private lateinit var journal: JournalWriter
+    private lateinit var journal: JournalOutput
     private var moved = 0
     private var deduped = 0
     private var quarantined = 0
@@ -141,7 +144,7 @@ class ActionExecutor(
         val partial = LinkedHashSet<String>()
         val total = items.sumOf { it.operations.size }
         var done = 0
-        JournalWriter(journals.fileFor(runId)).use { writer ->
+        openJournal(journals.fileFor(runId)).use { writer ->
             journal = writer
             writer.meta("title", title)
             writer.meta("kind", kind)
@@ -250,6 +253,13 @@ class ActionExecutor(
         }
     }
 
+    /**
+     * Journals [action] just before making it ([JournalAction.settle]): stopped in between, the run still knows of it.
+     * Nothing has changed yet when this fails.
+     */
+    private fun intend(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) =
+        record(JournalAction.pending(action), a, b, size, mtime, sha)
+
     /** Journals a move just made; when that fails, the move is put back first, since nothing could undo it. */
     private fun recordMove(from: Path, to: Path, journal: () -> Unit) {
         try {
@@ -294,9 +304,10 @@ class ActionExecutor(
         val dstPath = Paths.get(dst)
         if (!mkdirs(dstPath.parent)) return fail("Cannot create destination folder")
         if (guard.exists(dstPath)) return skip("Destination appeared during the move")
+        intend(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha)
         Files.move(srcPath, dstPath)
         val after = FileIdentity.of(dst)
-        if (guard.exists(srcPath) || after == null || after.size != id.size) {
+        if (after == null || after.size != id.size) {
             if (!guard.exists(srcPath) && after != null) {
                 try {
                     Files.move(dstPath, srcPath)
@@ -305,6 +316,7 @@ class ActionExecutor(
             }
             return fail("Post-move verification failed")
         }
+        // It did move, so it is journaled even if something new took its old place at once: Undo has to know.
         recordMove(srcPath, dstPath) { record(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha) }
         if (kept.remove(src)) kept += dst
         moved++
@@ -312,7 +324,7 @@ class ActionExecutor(
         changed += src
         changed += dst
         touchedParents.add(srcPath.parent)
-        return Outcome(Status.DONE)
+        return if (guard.exists(srcPath)) skip(REAPPEARED) else Outcome(Status.DONE)
     }
 
     // ------------------------------------------------------------------ move directory
@@ -327,16 +339,19 @@ class ActionExecutor(
         if (!guard.resolvesBeneath(src)) return skip("Unsafe source path")
         if (op.allowRename && !guard.exists(dst)) {
             if (!mkdirs(dst.parent)) return fail("Cannot create destination folder")
-            val renamed = try {
-                if (guard.exists(dst)) false else {
+            val renamed = !guard.exists(dst) && run {
+                intend(JournalAction.MOVED_DIR, op.src, op.dst)
+                try {
                     Files.move(src, dst)
                     true
+                } catch (_: IOException) {
+                    // Merged file by file below instead, each file journaled on its own.
+                    record(JournalAction.abandoned(JournalAction.MOVED_DIR), op.src, op.dst)
+                    false
                 }
-            } catch (_: IOException) {
-                false
             }
             if (renamed) {
-                if (guard.exists(src) || !guard.isRealDirectory(dst)) return fail("Post-move verification failed")
+                if (!guard.isRealDirectory(dst)) return fail("Post-move verification failed")
                 recordMove(src, dst) { record(JournalAction.MOVED_DIR, op.src, op.dst) }
                 kept.filter { it.startsWith(op.src + "/") }.forEach { k ->
                     kept -= k
@@ -347,7 +362,7 @@ class ActionExecutor(
                 changed += op.src
                 changed += op.dst
                 touchedParents.add(src.parent)
-                return Outcome(Status.DONE)
+                return if (guard.exists(src)) skip(REAPPEARED) else Outcome(Status.DONE)
             }
         }
         return mergeDir(src, dst)
@@ -427,12 +442,14 @@ class ActionExecutor(
         val p = Paths.get(path)
         if (options.quarantineDuplicates) {
             val q = quarantineTarget(path) ?: return fail("Quarantine unavailable")
+            intend(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha)
             Files.move(p, q)
-            if (guard.exists(p)) return fail("Post-quarantine verification failed")
+            if (!guard.exists(q)) return fail("Post-quarantine verification failed")
             recordMove(p, q) { record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha) }
             bytesQuarantined += id.size
             dedupedQuarantined++
         } else {
+            intend(JournalAction.DEDUPED, path, canonical, id.size, id.mtime, sha)
             Files.delete(p)
             if (guard.exists(p)) return fail("Delete verification failed")
             record(JournalAction.DEDUPED, path, canonical, id.size, id.mtime, sha)
@@ -442,7 +459,7 @@ class ActionExecutor(
         kept += canonical
         changed += path
         touchedParents.add(p.parent)
-        return Outcome(Status.DONE)
+        return if (guard.exists(p)) skip(REAPPEARED) else Outcome(Status.DONE)
     }
 
     /**
@@ -479,14 +496,17 @@ class ActionExecutor(
             return skip("The unpacked copy no longer matches the zip")
         }
         val q = quarantineTarget(op.path) ?: return fail("Quarantine unavailable")
+        intend(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime)
         Files.move(p, q)
-        if (guard.exists(p) || !guard.exists(q)) return fail("Post-quarantine verification failed")
+        if (!guard.exists(q)) return fail("Post-quarantine verification failed")
+        // Journaled even if something new took its place at once (an app writing there again): it is in the quarantine,
+        // and only its journal line lets Undo bring it back, or keeps emptying the quarantine from losing track of it.
         recordMove(p, q) { record(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime) }
         quarantined++
         bytesQuarantined += op.size
         changed += op.path
         touchedParents.add(p.parent)
-        return Outcome(Status.DONE)
+        return if (guard.exists(p)) skip(REAPPEARED) else Outcome(Status.DONE)
     }
 
     // ------------------------------------------------------------------ packing
@@ -520,7 +540,7 @@ class ActionExecutor(
             }
         }
         val name = dir.fileName.toString()
-        val partial = dir.resolveSibling(".$name.steward-partial.zip")
+        val partial = dir.resolveSibling(".$name$PARTIAL_ZIP")
         Files.deleteIfExists(partial)
         try {
             ZipOutputStream(BufferedOutputStream(Files.newOutputStream(partial), 1 shl 16)).use { out ->
@@ -555,14 +575,26 @@ class ActionExecutor(
                 Files.deleteIfExists(partial)
                 return skip("A file with the zip's name appeared")
             }
-            Files.move(partial, zip)
         } catch (e: IOException) {
             Files.deleteIfExists(partial)
             throw e
         }
-        val zipSize = Files.size(zip)
+        // What undo checks before it removes the zip again; a rename keeps all three.
+        val zipSize = Files.size(partial)
+        val zipTime = Files.getLastModifiedTime(partial).toMillis()
+        val zipSha = Hashing.sha256(partial.toString())
         try {
-            record(JournalAction.PACKED, op.zip, op.path, zipSize, Files.getLastModifiedTime(zip).toMillis(), Hashing.sha256(op.zip))
+            intend(JournalAction.PACKED, op.zip, op.path, zipSize, zipTime, zipSha)
+            Files.move(partial, zip)
+        } catch (e: IOException) {
+            Files.deleteIfExists(partial)
+            throw e
+        } catch (e: JournalBroken) {
+            Files.deleteIfExists(partial)
+            throw e
+        }
+        try {
+            record(JournalAction.PACKED, op.zip, op.path, zipSize, zipTime, zipSha)
         } catch (e: JournalBroken) {
             Files.deleteIfExists(zip)
             throw e
@@ -625,5 +657,11 @@ class ActionExecutor(
 
     companion object {
         const val KEPT_COPY = "Holds the copy kept for a duplicate removed in this run"
+
+        /** A change made and journaled, after which something new appeared at the old place straight away. */
+        const val REAPPEARED = "Something new took its place right away; both are kept"
+
+        /** End of the name of a zip still being written, beside its folder: ".<folder>.steward-partial.zip". */
+        const val PARTIAL_ZIP = ".steward-partial.zip"
     }
 }

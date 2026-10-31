@@ -76,6 +76,9 @@ class DuplicateFinder(
                 if (f.size <= 0 || (f.size < settings.minDuplicateBytes && f !in small)) continue
                 if (!settings.includeHiddenInDuplicates && f.hidden) continue
                 if (SafetyPolicy.isCredentialName(f.name) || SafetyPolicy.isInProgressDownload(f.name)) continue
+                // In the system trash or not yet written (with hidden files included): kept, Android would delete the
+                // only copy left when it empties its trash.
+                if (SafetyPolicy.isTrashedOrPending(f.name)) continue
                 out.add(f)
             }
         }

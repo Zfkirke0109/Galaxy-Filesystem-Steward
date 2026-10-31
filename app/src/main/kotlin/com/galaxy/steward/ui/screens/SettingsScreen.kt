@@ -405,7 +405,7 @@ private fun validDestination(dest: String): Boolean {
     if (d.isEmpty() || SafetyPolicy.isUnsafeName(d)) return false
     val parts = d.split('/')
     if (parts.any { it.isBlank() || it == "." || it == ".." }) return false
-    return parts.first() != "Android" && parts.first() != SafetyPolicy.STEWARD_DIR
+    return !parts.first().equals("Android", ignoreCase = true) && !parts.first().equals(SafetyPolicy.STEWARD_DIR, ignoreCase = true)
 }
 
 @Composable
@@ -415,15 +415,33 @@ private fun RuleDialog(onDismiss: () -> Unit, onSave: (KeywordRule) -> Unit) {
     var extensions by remember { mutableStateOf("") }
     var destination by remember { mutableStateOf("Documents/") }
     val words = keywords.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+    // "***" or "-" can never match: refused here, not saved as a rule that quietly files nothing.
+    val unusable = KeywordRule.unusableKeywords(words)
     val exts = extensions.split(',').map { it.trim().removePrefix(".").lowercase() }.filter { it.isNotEmpty() }.toSet()
-    val valid = name.isNotBlank() && (words.isNotEmpty() || exts.isNotEmpty()) && validDestination(destination)
+    val valid = name.isNotBlank() && (words.isNotEmpty() || exts.isNotEmpty()) && unusable.isEmpty() && validDestination(destination)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New filing rule") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
-                OutlinedTextField(keywords, { keywords = it }, label = { Text("Words in the name (comma separated, * for prefix)") })
+                OutlinedTextField(
+                    keywords,
+                    { keywords = it },
+                    label = { Text("Words in the name (comma separated, * for prefix)") },
+                    singleLine = true,
+                    isError = unusable.isNotEmpty(),
+                    supportingText = if (unusable.isEmpty()) {
+                        null
+                    } else {
+                        {
+                            Text(
+                                "No letter or digit in " + unusable.joinToString { "\"$it\"" } +
+                                    ". To file every file of the types below, leave the words empty.",
+                            )
+                        }
+                    },
+                )
                 OutlinedTextField(extensions, { extensions = it }, label = { Text("File types, optional (pdf, jpg)") }, singleLine = true)
                 OutlinedTextField(destination, { destination = it }, label = { Text("Destination folder") }, singleLine = true)
             }

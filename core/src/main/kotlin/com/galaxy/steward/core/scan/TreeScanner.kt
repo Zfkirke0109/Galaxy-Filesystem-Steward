@@ -15,6 +15,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.nio.file.DirectoryIteratorException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -48,10 +49,12 @@ class TreeScanner(
         fun onProgress(dirs: Int, files: Long, bytes: Long, current: String)
     }
 
-    private val protectedRel: Set<String> = settings.protectedFolders
-        .map { it.trim().trim('/') }
-        .filter { it.isNotEmpty() }
-        .toSet() + SafetyPolicy.LOGCAT_DIR
+    /** Pinned folders, in lower case: shared storage ignores case, so "documents/taxes" pins Documents/Taxes. */
+    private val protectedRel: Set<String> = (
+        settings.protectedFolders
+            .map { it.trim().trim('/') }
+            .filter { it.isNotEmpty() } + SafetyPolicy.LOGCAT_DIR
+        ).map { it.lowercase() }.toSet()
 
     /**
      * Folders are listed on [parallelism] threads at once. On Android every listing and stat goes through the
@@ -255,6 +258,10 @@ class TreeScanner(
         null
     } catch (_: SecurityException) {
         null
+    } catch (_: DirectoryIteratorException) {
+        // A listing that broke off half way (FUSE answers EIO): the folder counts as unreadable, not the scan as failed,
+        // and never as holding only what was read before the error.
+        null
     }
 
     private fun assignZone(child: DirNode) {
@@ -272,7 +279,7 @@ class TreeScanner(
             if (child.zone.removable) child.zone = Zone.PATH_SENSITIVE
         }
         if (child.depth >= 2 && SafetyPolicy.isDevContainerName(child.name)) markCodeTree(child)
-        if (child.zone != Zone.APP_OWNED && child.zone != Zone.STEWARD && child.relPath in protectedRel) {
+        if (child.zone != Zone.APP_OWNED && child.zone != Zone.STEWARD && child.relPath.lowercase() in protectedRel) {
             child.zone = Zone.USER_PROTECTED
         }
     }
