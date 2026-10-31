@@ -40,14 +40,18 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         emptyList()
     }
 
-    /** Permanently deletes one run's quarantine and marks its journal as purged. Returns bytes freed. */
+    /**
+     * Permanently deletes one run's quarantine and, once nothing of it is left, marks its journal as purged. Returns
+     * the bytes actually freed: a file that can't be deleted stays, with its run's Undo, and isn't counted.
+     */
     fun purge(runId: String, now: Long = System.currentTimeMillis()): Long {
         val dir = dirFor(runId)
         if (!dir.startsWith(guard.quarantineRoot) || dir == guard.quarantineRoot || !guard.isRealDirectory(dir)) return 0
-        val bytes = treeSize(dir)
+        val before = treeSize(dir)
         deleteTree(dir)
-        if (journals != null && journals.fileFor(runId).exists()) journals.appendMeta(runId, "purged", now.toString())
-        return bytes
+        val left = treeSize(dir)
+        if (left == 0L && journals != null && journals.fileFor(runId).exists()) journals.appendMeta(runId, "purged", now.toString())
+        return before - left
     }
 
     fun purgeAll(now: Long = System.currentTimeMillis()): Long = runsWithContent().sumOf { purge(it, now) }
@@ -85,7 +89,11 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         try {
             Files.walkFileTree(dir, object : SimpleFileVisitor<Path>() {
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    Files.deleteIfExists(file)
+                    try {
+                        Files.deleteIfExists(file)
+                    } catch (_: IOException) {
+                        // Left for the next time; the rest still goes.
+                    }
                     return FileVisitResult.CONTINUE
                 }
 

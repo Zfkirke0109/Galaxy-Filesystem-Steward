@@ -396,6 +396,9 @@ class LayoutCleanupTest {
             sparse("Documents/AI-Models/phi-3-mini.gguf", 70L * MIB)
             fs.text("Documents/Code/llm/build.gradle", "plugins {}")
             sparse("Documents/Code/llm/Llama-3.2-3B-Q4_K_M.gguf", model)
+            // Audible's and Amazon Music's copies are bound to their licences and come and go with them: yours stays.
+            val book = 80L * MIB
+            sparse("Documents/Books/MyBook.aax", book)
             fs.ageDirectories()
             val env = object : DeviceEnvironment {
                 override val deviceLabel = "Test-Phone"
@@ -403,6 +406,7 @@ class LayoutCleanupTest {
                 override fun appLargeFiles() = listOf(
                     com.galaxy.steward.core.appdata.AppLargeFile("com.layla", "/storage/emulated/0/Android/data/com.layla/files/models/llama-3.2-3b-q4_k_m.gguf", model, 0),
                     com.galaxy.steward.core.appdata.AppLargeFile("com.layla", "/storage/emulated/0/Android/data/com.layla/files/models/phi-3-mini.gguf", 71L * MIB, 0),
+                    com.galaxy.steward.core.appdata.AppLargeFile("com.audible.application", "/storage/emulated/0/Android/data/com.audible.application/files/MyBook.aax", book, 0),
                 )
             }
             val junk = Steward(fs.rootPath, testSettings.copy(minDuplicateBytes = 1L shl 40), env, null).scan().junk

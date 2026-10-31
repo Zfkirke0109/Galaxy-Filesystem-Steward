@@ -115,6 +115,14 @@ object AppPolicy {
         "network.loki.messenger", "org.briarproject.briar.android", "com.wire", "eu.siacs.conversations",
     )
 
+    /**
+     * Facebook and its preinstalled helpers keep your login in their data: clearing it signs you out, and with
+     * two-factor that can lock you out, so it is never cleared.
+     */
+    private val LOGINS = setOf(
+        "com.facebook.katana", "com.facebook.lite", "com.facebook.services", "com.facebook.appmanager", "com.facebook.system",
+    )
+
     /** Apps that are never force-stopped before a cache clear (`should_force_stop_cache_target_v18`). */
     private val NEVER_FORCE_STOP = MESSAGES + setOf(
         "com.android.providers.telephony", "com.google.android.apps.photos", "com.sec.android.app.shealth",
@@ -155,7 +163,7 @@ object AppPolicy {
     /**
      * Why an app's data may not be cleared ("Clear all data", which is Android's Clear storage), as a short label, or
      * null when it may. Clearing resets an app to a fresh install and cannot be undone, so it is never offered for
-     * system apps, messengers and mail, apps that may hold keys, Termux (its own tab cleans it safely), or the apps the
+     * system apps, messengers and mail, Facebook's login, apps that may hold keys, Termux (its own tab cleans it safely), or the apps the
      * steward itself depends on. [system] is the app's system flag when the caller knows it.
      */
     fun clearDataBlock(packageName: String, ownPackage: String?, system: Boolean = false): String? = when {
@@ -163,6 +171,7 @@ object AppPolicy {
         packageName == "com.termux" || packageName.startsWith("com.termux.") -> "Termux"
         system || packageName == "android" || PLATFORM_PREFIXES.any { packageName.startsWith(it) } -> "System app"
         packageName in MESSAGES -> "Messages"
+        packageName in LOGINS -> "Holds your login"
         packageName in KEYS -> "Holds keys"
         else -> null
     }

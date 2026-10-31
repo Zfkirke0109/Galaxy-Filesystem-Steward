@@ -96,14 +96,18 @@ class Steward(
             onProgress(ScanProgress(phase, done, total, "", filesSeen, bytesSeen))
         }
         onProgress(ScanProgress(ScanPhase.FINGERPRINT, filesSeen = filesSeen, bytesSeen = bytesSeen))
-        val duplicates = DuplicateFinder(settings, cache, hashListener).find(tree)
-
-        onProgress(ScanProgress(ScanPhase.FOLDERS, filesSeen = filesSeen, bytesSeen = bytesSeen))
         val folderListener = HashListener { _, done, total, _, _ ->
             onProgress(ScanProgress(ScanPhase.FOLDERS, done, total, "", filesSeen, bytesSeen))
         }
-        val folders = FolderAnalyzer(settings, cache, duplicates, folderListener, environment.deviceLabel).analyze(tree)
-        cache.save()
+        // Saved however hashing ends: a scan stopped by you, or the weekly upkeep stopped by Android, keeps what it worked
+        // out, and the next one starts from there instead of from nothing.
+        val (duplicates, folders) = try {
+            val duplicates = DuplicateFinder(settings, cache, hashListener).find(tree)
+            onProgress(ScanProgress(ScanPhase.FOLDERS, filesSeen = filesSeen, bytesSeen = bytesSeen))
+            duplicates to FolderAnalyzer(settings, cache, duplicates, folderListener, environment.deviceLabel).analyze(tree)
+        } finally {
+            cache.save()
+        }
         // Copies inside a folder that is itself a removable duplicate are covered by that folder group;
         // listing them again would double-count the reclaimable space.
         val folderRemovals = folders.exact.flatMap { g -> g.removals.map { it.path + "/" } }

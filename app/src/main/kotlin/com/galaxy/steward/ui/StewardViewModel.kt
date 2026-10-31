@@ -368,7 +368,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     fun rollback(runId: String, title: String) {
         if (_state.value.applying != null || _state.value.scanning) return
         if (app.journals.info(runId)?.kind == TermuxController.KIND_MOVE) {
-            launchRun("Moving back: $title") { progress ->
+            launchRun("Moving back: $title", stoppable = false) { progress ->
                 progress(0, 1, "Termux is copying and checking every file")
                 val summary = termux.moveBack(runId)
                 _state.update { it.copy(stale = true) }
@@ -377,7 +377,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         if (app.journals.info(runId)?.kind == AppsController.KIND_FOLDERS) {
-            launchRun("Undoing: $title") { progress ->
+            launchRun("Undoing: $title", stoppable = false) { progress ->
                 val summary = apps.rollback(runId, progress)
                 reindexLater(summary.changedPaths)
                 Outcome.RolledBack(title, summary)
@@ -421,6 +421,10 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     /**
      * Runs [block] as the single active run: progress dialog, foreground service, outcome dialog and a history
      * refresh. [block] reports progress through the callback it is given.
+     */
+    /**
+     * Runs [block] as the one run of the moment. [stoppable] is false for work Termux or the Shizuku helper does: it goes
+     * on there whatever the app does, so Stop would only drop its result, and for a move into Termux its History entry.
      */
     private fun launchRun(title: String, stoppable: Boolean = true, block: suspend (progress: (Int, Int, String) -> Unit) -> Outcome) {
         if (_state.value.applying != null || _state.value.scanning) return
@@ -475,7 +479,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
      * clutter, then packing), then the Termux ones through Termux. With [freeNow], what went to the quarantine is
      * emptied right away instead of after the retention days.
      */
-    fun reachGoal(plan: GoalPlan, freeNow: Boolean) = launchRun("Free up space") { progress ->
+    fun reachGoal(plan: GoalPlan, freeNow: Boolean) = launchRun("Free up space", stoppable = plan.picks.none { it.termux != null }) { progress ->
         val title = "Free up space"
         val keepers = _state.value.keepers
         val shared = plan.picks.mapNotNull { it.plan }.map { effective(it, keepers) }.sortedBy {
@@ -497,7 +501,9 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             }
             StewardLog.i(RunLog.applied(title, "goal", summary, SystemClock.uptimeMillis() - started))
             val emptied = if (freeNow && summary.bytesQuarantined > 0) withContext(Dispatchers.IO) { quarantine().purge(summary.runId) } else 0L
-            lines += "Freed ${(summary.bytesFreed + emptied).humanBytes()} in shared storage"
+            // Emptying counts packed folders in full, and their zips stay: those bytes aren't free.
+            val packedKept = if (emptied > 0) summary.bytesPacked else 0L
+            lines += "Freed ${(summary.bytesFreed + emptied - packedKept).coerceAtLeast(0).humanBytes()} in shared storage"
             (summary.bytesQuarantined - emptied).takeIf { it > 0 }?.let {
                 lines += "${it.humanBytes()} more once the quarantine is emptied (after ${s.quarantineRetentionDays} days, or now in History, " +
                     "where this run can also be undone)"
@@ -536,7 +542,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     /** Totals after each scan, oldest first, for the storage-over-time chart. */
     suspend fun storageHistory(): List<StoragePoint> = withContext(Dispatchers.IO) { app.memory.history() }
 
-    fun applyAppFolders(items: List<AppJunkItem>) = launchRun("App folder clean-up") { progress ->
+    fun applyAppFolders(items: List<AppJunkItem>) = launchRun("App folder clean-up", stoppable = false) { progress ->
         val summary = apps.applyFolders("App folder clean-up", items, progress)
         reindexLater(summary.changedPaths)
         Outcome.Applied("App folder clean-up", summary)
@@ -552,7 +558,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         val items = listing.itemsFor(listing.entries.filter { it.path in browser.selected }, quarantine)
         if (items.isEmpty()) return
         val title = (if (quarantine) "Removed from " else "Deleted from ") + apps.label(listing.packageName)
-        launchRun(title) { progress ->
+        launchRun(title, stoppable = false) { progress ->
             val summary = apps.applyFolders(title, items, progress)
             reindexLater(summary.changedPaths)
             apps.refreshBrowser()
@@ -560,12 +566,12 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun clearAppCaches(packages: List<String>, stopFirst: Boolean) = launchRun("Clearing app caches") { progress ->
+    fun clearAppCaches(packages: List<String>, stopFirst: Boolean) = launchRun("Clearing app caches", stoppable = false) { progress ->
         val result = apps.clearCaches(packages, stopFirst, progress)
         Outcome.Report("App caches", AppsController.describe(result), result.unchanged.map { "No verified change: $it" })
     }
 
-    fun clearAppData(packages: List<String>) = launchRun("Clearing app data") { progress ->
+    fun clearAppData(packages: List<String>) = launchRun("Clearing app data", stoppable = false) { progress ->
         val result = apps.clearData(packages, progress)
         Outcome.Report(
             "App data cleared",
@@ -574,7 +580,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
-    fun cleanTermux(items: List<TermuxItem>) = launchRun("Termux clean-up") { progress ->
+    fun cleanTermux(items: List<TermuxItem>) = launchRun("Termux clean-up", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         val (_, summary) = termux.clean(items)
         val lines = buildList {
@@ -587,19 +593,19 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         Outcome.Report("Termux cleaned", lines, summary.skipped.map { "${it.status.lowercase().replace('_', ' ')}: ${it.path.ifEmpty { it.targetId }} ${it.note}".trim() })
     }
 
-    fun removeTermuxPackages(names: List<String>, autoremove: Boolean) = launchRun("Removing Termux packages") { progress ->
+    fun removeTermuxPackages(names: List<String>, autoremove: Boolean) = launchRun("Removing Termux packages", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         val summary = termux.removePackages(names, autoremove)
         termuxOutcome("Termux packages removed", summary, "package", "packages")
     }
 
-    fun removeTermuxDistro(rootfs: String) = launchRun("Removing a Linux distribution") { progress ->
+    fun removeTermuxDistro(rootfs: String) = launchRun("Removing a Linux distribution", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         val summary = termux.removeDistro(rootfs)
         termuxOutcome("Linux distribution removed", summary, "distribution", "distributions")
     }
 
-    fun deleteTermuxPaths(paths: List<String>) = launchRun("Deleting in Termux") { progress ->
+    fun deleteTermuxPaths(paths: List<String>) = launchRun("Deleting in Termux", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         val summary = termux.deletePaths(paths)
         termuxOutcome("Deleted in Termux", summary, "item", "items")
@@ -610,7 +616,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
      * Android/data|obb|media leftovers through Shizuku into the quarantine, Termux paths and the shell's through their
      * helpers, each checked again there.
      */
-    fun removeFootprint(appName: String, hits: List<com.galaxy.steward.core.footprint.FootprintHit>) = launchRun("Removing $appName's leftovers") { progress ->
+    fun removeFootprint(appName: String, hits: List<com.galaxy.steward.core.footprint.FootprintHit>) = launchRun("Removing $appName's leftovers", stoppable = false) { progress ->
         val title = "$appName's leftovers"
         val byPlace = hits.filter { it.lock == null }.groupBy { it.place }
         val lines = ArrayList<String>()
@@ -672,14 +678,14 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Removes what was picked in /data/local/tmp and bug reports (Shizuku). Deleted for good. */
-    fun removeShellSpace(paths: List<String>) = launchRun("Removing shell leftovers") { progress ->
+    fun removeShellSpace(paths: List<String>) = launchRun("Removing shell leftovers", stoppable = false) { progress ->
         progress(0, 1, "Asking the Shizuku helper")
         val results = deepSpace.removeShell(paths)
         shellOutcome("Shell leftovers removed", results)
     }
 
     /** Removes picked parts of a debuggable app's private data, through run-as (the app is stopped first). */
-    fun removePrivateData(packageName: String, rels: List<String>) = launchRun("Removing private data") { progress ->
+    fun removePrivateData(packageName: String, rels: List<String>) = launchRun("Removing private data", stoppable = false) { progress ->
         progress(0, 1, "Stopping the app and removing")
         shellOutcome("Private data removed", deepSpace.removePrivate(packageName, rels))
     }
@@ -732,7 +738,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** "Always keep" in the Termux browser, or "Stop keeping" on the Termux screen. */
-    fun keepTermuxPaths(paths: List<String>, keep: Boolean) = launchRun(if (keep) "Keeping in Termux" else "No longer keeping") { progress ->
+    fun keepTermuxPaths(paths: List<String>, keep: Boolean) = launchRun(if (keep) "Keeping in Termux" else "No longer keeping", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         val summary = termux.keep(paths, keep)
         val done = summary.results.count { it.status == "KEPT" || it.status == "UNKEPT" }
@@ -748,13 +754,13 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
-    fun removeTermuxPrograms(programs: List<TermuxProgram>) = launchRun("Removing programs") { progress ->
+    fun removeTermuxPrograms(programs: List<TermuxProgram>) = launchRun("Removing programs", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         termuxOutcome("Programs removed", termux.removePrograms(programs), "program", "programs")
     }
 
     /** git gc in the repositories picked: lossless, they work as before. */
-    fun packTermuxRepos(paths: List<String>) = launchRun("Packing Git repositories") { progress ->
+    fun packTermuxRepos(paths: List<String>) = launchRun("Packing Git repositories", stoppable = false) { progress ->
         progress(0, 1, "git gc in ${paths.size.plural("repository", "repositories")}")
         val summary = termux.packRepos(paths)
         val report = termux.state.value.report
@@ -773,7 +779,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Moves project folders from shared storage into ~/projects in Termux, one checked copy at a time. */
-    fun moveIntoTermux(folders: List<String>) = launchRun("Moving into Termux") { progress ->
+    fun moveIntoTermux(folders: List<String>) = launchRun("Moving into Termux", stoppable = false) { progress ->
         val results = ArrayList<TermuxCleanResult>()
         folders.forEachIndexed { i, folder ->
             progress(i, folders.size, folder.substringAfterLast('/'))

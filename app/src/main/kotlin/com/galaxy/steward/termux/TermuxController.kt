@@ -441,18 +441,23 @@ class TermuxController(
      */
     private suspend fun run(mode: String, targets: List<String>, timeoutMs: Long): String {
         val outFile = withContext(Dispatchers.IO) { outputFile() }
-        val result = try {
-            bridge.run(TermuxScript.arguments(mode, outFile?.path, targets), timeoutMs)
-        } catch (_: TimeoutCancellationException) {
-            throw TermuxException("Termux did not answer in time. Open Termux once and try again.")
-        }
-        if (result.needsExternalApps) throw ExternalAppsDisabled()
-        if (result.err != 0 && result.err != -1 && result.stdout.isEmpty()) {
-            throw TermuxException(result.errmsg.ifEmpty { "Termux reported error ${result.err}" })
-        }
-        return withContext(Dispatchers.IO) {
-            val fromFile = outFile?.takeIf { it.isFile }?.let { f -> f.readText().also { f.delete() } }
-            if (fromFile != null && fromFile.lineSequence().any { it.startsWith("E\t") }) fromFile else result.stdout
+        try {
+            val result = try {
+                bridge.run(TermuxScript.arguments(mode, outFile?.path, targets), timeoutMs)
+            } catch (_: TimeoutCancellationException) {
+                throw TermuxException("Termux did not answer in time. Open Termux once and try again.")
+            }
+            if (result.needsExternalApps) throw ExternalAppsDisabled()
+            if (result.err != 0 && result.err != -1 && result.stdout.isEmpty()) {
+                throw TermuxException(result.errmsg.ifEmpty { "Termux reported error ${result.err}" })
+            }
+            return withContext(Dispatchers.IO) {
+                val fromFile = outFile?.takeIf { it.isFile }?.readText()
+                if (fromFile != null && fromFile.lineSequence().any { it.startsWith("E\t") }) fromFile else result.stdout
+            }
+        } finally {
+            // It lists Termux's private paths and Git remotes, in shared storage: not left there after a failed call.
+            outFile?.delete()
         }
     }
 

@@ -256,7 +256,7 @@ object AppDataWire {
         cleared = p[8].toInt(),
     )
 
-    fun encodeRollback(s: RollbackSummary): String = "R\t${s.restored}\t${s.skipped}\t${s.failed}"
+    fun encodeRollback(s: RollbackSummary): String = "R\t${s.restored}\t${s.skipped}\t${s.failed}\t${s.remaining}"
 
     fun message(text: String) = "N\t${clean(text)}"
 

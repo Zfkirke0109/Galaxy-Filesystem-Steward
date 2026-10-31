@@ -324,8 +324,10 @@ snapshot_ok() {
   [[ "${p##*/}" =~ $SNAPSHOT_DATE ]] || return 1
   [ -e "$p" ] && [ ! -L "$p" ] && beneath "$p" "$HOME" || return 1
   if [ -d "$p" ]; then
-    [ -e "$p/.git" ] || [ -e "$p/build.gradle" ] || [ -e "$p/build.gradle.kts" ] || [ -e "$p/package.json" ] || [ -e "$p/Cargo.toml" ] ||
-      [ -e "$p/pyproject.toml" ] && return 1
+    # A repository or project anywhere inside, not only at the top: a dated backup holding a checkout is a project.
+    [ -n "$(find "$p" -xdev \( -name .git -o -name build.gradle -o -name build.gradle.kts -o -name settings.gradle -o \
+      -name settings.gradle.kts -o -name package.json -o -name Cargo.toml -o -name pyproject.toml -o -name go.mod -o \
+      -name pom.xml \) -print -quit 2>/dev/null)" ] && return 1
     [ -n "$(find "$p" -xdev -mtime -3 -print -quit 2>/dev/null)" ] && return 1
     [ -n "$(private_key_in "$p")" ] && return 1
   else

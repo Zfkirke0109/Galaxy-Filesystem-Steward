@@ -17,6 +17,8 @@ data class RollbackSummary(
     val failed: Int,
     val messages: List<String>,
     val changedPaths: List<String>,
+    /** Quarantined items still in the quarantine after this undo; while there are any, the run can be undone again. */
+    val remaining: Int = 0,
 )
 
 /**
@@ -31,7 +33,9 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
     suspend fun rollback(runId: String, listener: ExecutionListener? = null): RollbackSummary {
         val store = requireNotNull(journals) { "No journal store" }
         val summary = rollbackEntries(store.entries(runId), listener)
-        store.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
+        // Undone once nothing is left in the quarantine. A run marked undone loses its Undo button, and whatever had
+        // stayed behind would be lost when the quarantine is emptied.
+        if (summary.remaining == 0) store.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
         return summary
     }
 
@@ -51,11 +55,12 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         entries.forEachIndexed { index, e ->
             currentCoroutineContext().ensureActive()
             listener?.onProgress(index, entries.size, e.a.substringAfterLast('/'))
+            restoredAs = null
             val result: String? = try {
                 when (e.action) {
                     JournalAction.MOVED -> restoreMovedFile(e)
                     JournalAction.MOVED_DIR -> restoreMove(e.b, e.a, directory = true)
-                    JournalAction.QUARANTINED, JournalAction.DEDUPED_QUARANTINED -> restoreMove(e.b, e.a, directory = null)
+                    JournalAction.QUARANTINED, JournalAction.DEDUPED_QUARANTINED -> restoreMove(e.b, e.a, directory = null, beside = true)
                     JournalAction.DEDUPED -> recreateDuplicate(e)
                     JournalAction.RMDIR -> recreateDir(e.a)
                     JournalAction.MKDIR -> removeCreatedDir(e.a)
@@ -72,16 +77,24 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
             }
             if (result == null) {
                 restored++
-                changed += e.a
+                changed += restoredAs ?: e.a
                 if (e.b.isNotEmpty()) changed += e.b
+                restoredAs?.let { note("RESTORED", "beside the newer item that has its name now", it) }
             } else if (result.isNotEmpty()) {
                 skipped++
                 note("SKIPPED", result, e.a)
             }
         }
         listener?.onProgress(entries.size, entries.size, "")
-        return RollbackSummary(restored, skipped, failed, messages, changed.toList())
+        val remaining = journalEntries.count { e ->
+            (e.action == JournalAction.QUARANTINED || e.action == JournalAction.DEDUPED_QUARANTINED) &&
+                guard.wellFormed(e.b) && guard.exists(Paths.get(e.b))
+        }
+        return RollbackSummary(restored, skipped, failed, messages, changed.toList(), remaining)
     }
+
+    /** Where the entry being reverted went back to when that wasn't its own path; see [restoreMove]. */
+    private var restoredAs: String? = null
 
     private fun ensureParent(path: Path): Boolean = guard.ensureDirectories(path.parent) { }
 
@@ -100,17 +113,35 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         return null
     }
 
-    private fun restoreMove(from: String, to: String, directory: Boolean?): String? {
+    /**
+     * Moves [from] back to [to]. With [beside], something that has taken the name since keeps it, and what comes back
+     * out of the quarantine goes next to it ("IMG_1 (restored).jpg"): left in the quarantine, it would be lost when that
+     * is emptied. Nothing is ever overwritten.
+     */
+    private fun restoreMove(from: String, to: String, directory: Boolean?, beside: Boolean = false): String? {
         val src = Paths.get(from)
-        val dst = Paths.get(to)
+        var dst = Paths.get(to)
         if (!guard.wellFormed(to) || !from.startsWith(guard.rootString + "/")) return "Unsafe path"
-        if (guard.exists(dst)) return "Original path is occupied"
+        if (guard.exists(dst)) {
+            if (!beside || !guard.exists(src)) return "Original path is occupied"
+            dst = freeNameBeside(dst, guard.isRealDirectory(src)) ?: return "Original path is occupied"
+            restoredAs = dst.toString()
+        }
         if (!guard.exists(src)) return "No longer available (quarantine emptied?)"
         if (directory == true && !guard.isRealDirectory(src)) return "Not a folder"
         if (Files.isSymbolicLink(src)) return "Unsafe path"
         if (!ensureParent(dst)) return "Cannot recreate the original folder"
         Files.move(src, dst)
         return null
+    }
+
+    private fun freeNameBeside(path: Path, directory: Boolean): Path? {
+        val name = path.fileName.toString()
+        val dot = if (directory) -1 else name.lastIndexOf('.')
+        val (stem, ext) = if (dot > 0) name.substring(0, dot) to name.substring(dot) else name to ""
+        return (1..99).asSequence()
+            .map { n -> path.resolveSibling("$stem (restored${if (n == 1) "" else " $n"})$ext") }
+            .firstOrNull { !guard.exists(it) }
     }
 
     private fun recreateDuplicate(e: JournalEntry): String? {

@@ -431,7 +431,7 @@ class OrganizePlanner(
             reason = if (merge) "$reason (merged)" else reason,
             group = if (merge) destination else destination.substringBeforeLast('/'),
             selected = selected,
-            op = MoveDirOp(dir.path, destination, allowRename = true),
+            op = MoveDirOp(dir.path, destination, allowRename = true, bytes = dir.totalBytes),
         )
     }
 

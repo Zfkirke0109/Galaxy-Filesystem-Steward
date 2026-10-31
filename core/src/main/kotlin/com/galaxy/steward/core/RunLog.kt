@@ -19,6 +19,16 @@ object RunLog {
     /** [phases] lists how long each scan phase took, in the order they ran. */
     fun scan(report: ScanReport, phases: List<Pair<ScanPhase, Long>> = emptyList()): String = buildString {
         append("scan done in ").append(seconds(report.finishedAt - report.startedAt)).append(": ")
+        append(findings(report))
+        if (phases.isNotEmpty()) {
+            append("; phases ")
+            append(phases.joinToString(", ") { (phase, millis) -> "${phase.name.lowercase()} ${seconds(millis)}" })
+        }
+        if (report.reusedFolders > 0) append("; ").append(count(report.reusedFolders)).append(" unchanged code folders not listed again")
+    }
+
+    /** What [report] holds: the files it covers, then each kind of suggestion with its count and size. */
+    fun findings(report: ScanReport): String = buildString {
         append(count(report.summary.totalFiles)).append(" files, ").append(report.summary.totalBytes.humanBytes())
         append("; duplicate files ").append(count(report.duplicates.size))
         append(" (").append(report.duplicates.sumOf { it.reclaimBytes }.humanBytes()).append(')')
@@ -31,16 +41,12 @@ object RunLog {
         }
         append(", to organize ").append(count(report.organize.size))
         append(", to optimize ").append(count(report.optimize.size))
-        if (phases.isNotEmpty()) {
-            append("; phases ")
-            append(phases.joinToString(", ") { (phase, millis) -> "${phase.name.lowercase()} ${seconds(millis)}" })
-        }
-        if (report.reusedFolders > 0) append("; ").append(count(report.reusedFolders)).append(" unchanged code folders not listed again")
     }
 
     fun applied(title: String, kind: String, s: ExecutionSummary, millis: Long): String =
         "run \"$title\" ($kind) done in ${seconds(millis)}: moved ${count(s.moved)} (${s.bytesMoved.humanBytes()}), " +
-            "deduplicated ${count(s.deduped)}, quarantined ${count(s.quarantined)} (${s.bytesQuarantined.humanBytes()}), " +
+            "deduplicated ${count(s.deduped)}" + (if (s.alreadyFiled > 0) " (${count(s.alreadyFiled)} already at their destination)" else "") +
+            ", quarantined ${count(s.quarantined)} (${s.bytesQuarantined.humanBytes()}), " +
             "cleared ${count(s.cleared)}, removed ${count(s.removedDirs)} empty folders, freed ${s.bytesFreed.humanBytes()}; " +
             (if (s.packed > 0) "packed ${count(s.packed)} into zips (${s.bytesPacked.humanBytes()}), " else "") +
             "skipped ${count(s.skipped)}, failed ${count(s.failed)}" + reasons(s.reasons)

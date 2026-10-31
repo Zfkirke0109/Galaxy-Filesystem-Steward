@@ -214,7 +214,7 @@ class OptimizePlanner(
         if (newest > recentCutoff || hasCode) return null
 
         val ops = ArrayList<Operation>()
-        for (d in inner.dirs) ops += MoveDirOp(d.path, "${wrapper.path}/${d.name}", allowRename = true)
+        for (d in inner.dirs) ops += MoveDirOp(d.path, "${wrapper.path}/${d.name}", allowRename = true, bytes = d.totalBytes)
         for (f in inner.files) ops += MoveFileOp(f.path, "${wrapper.path}/${f.name}", f.size, f.mtime)
         ops += RemoveEmptyDirOp(inner.path)
         return OptimizeItem(
@@ -329,7 +329,7 @@ class OptimizePlanner(
             detail = "Move ${end.name} up to ${dir.name} and remove the ${links.size} empty folders in between.",
             fileCount = end.totalFiles,
             defaultSelected = false,
-            operations = listOf(MoveDirOp(end.path, "${dir.path}/${end.name}", allowRename = true)) +
+            operations = listOf(MoveDirOp(end.path, "${dir.path}/${end.name}", allowRename = true, bytes = end.totalBytes)) +
                 links.reversed().map { RemoveEmptyDirOp(it.path) },
         )
     }

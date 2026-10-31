@@ -123,7 +123,8 @@ fun ApplyProgressDialog(progress: ApplyProgress, onCancel: () -> Unit) {
                 }
                 Text(
                     if (progress.stoppable) "Stopping is safe: completed steps stay journaled and can be undone."
-                    else "Android does this on its own and can't be stopped. You can leave the app; the result waits here.",
+                    else "Android, Termux or the Shizuku helper does this outside the app, so it can't be stopped halfway. You can leave " +
+                        "the app; the result waits here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -142,7 +143,12 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
             val lines = buildList {
                 if (s.bytesFreed > 0) add("Freed ${s.bytesFreed.humanBytes()}")
                 if (s.cleared > 0) add("${s.cleared.plural("file")} removed for good")
-                if (s.deduped > 0) add("${s.deduped.plural("verified duplicate", "verified duplicates")} removed")
+                if (s.deduped > 0) {
+                    add(
+                        "${s.deduped.plural("verified duplicate", "verified duplicates")} removed" +
+                            if (s.alreadyFiled > 0) " (${s.alreadyFiled} of them already filed where they were going)" else "",
+                    )
+                }
                 if (s.quarantined > 0) add("${s.quarantined.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
                 if (s.packed > 0) add("${s.packed.plural("folder", "folders")} packed into zips (${s.bytesPacked.humanBytes()}); the folders are in the quarantine")
                 if (s.moved > 0) add("${s.moved.plural("item", "items")} organised")
@@ -161,7 +167,8 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
                 "Undone",
                 listOf("${s.restored.plural("change", "changes")} reverted") +
                     (if (s.skipped > 0) listOf("${s.skipped} left as they are (already changed)") else emptyList()) +
-                    (if (s.failed > 0) listOf("${s.failed} could not be reverted") else emptyList()),
+                    (if (s.failed > 0) listOf("${s.failed} could not be reverted") else emptyList()) +
+                    (if (s.remaining > 0) listOf("${s.remaining} still in the quarantine: undo this run again from History") else emptyList()),
                 s.messages, null, "",
             )
         }

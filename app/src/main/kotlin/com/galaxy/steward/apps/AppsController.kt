@@ -547,7 +547,8 @@ class AppsController(
                 RollbackEngine(root, null).rollbackEntries(entries) { d, t, c -> progress(d, t, c) }
             }
         }
-        journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
+        // Undone once nothing is left in the quarantine, like any other run (RollbackEngine.rollback).
+        if (summary.remaining == 0) journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
         return summary
     }
 

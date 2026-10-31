@@ -143,7 +143,8 @@ object AppDataHelper {
             }
             error?.let { throw HelperException(it) }
             val r = result ?: throw HelperException("The helper stopped before finishing")
-            return RollbackSummary(r[1].toInt(), r[2].toInt(), r[3].toInt(), messages, changed)
+            // A helper from an older version sends no count of what was left.
+            return RollbackSummary(r[1].toInt(), r[2].toInt(), r[3].toInt(), messages, changed, r.getOrNull(4)?.toIntOrNull() ?: 0)
         }
     }
 }

@@ -24,6 +24,10 @@ class AppStoragePolicyTest {
         assertEquals("Messages", AppPolicy.clearDataBlock("com.whatsapp", own))
         assertEquals("Messages", AppPolicy.clearDataBlock("org.thoughtcrime.securesms", own))
         assertEquals("Messages", AppPolicy.clearDataBlock("com.google.android.gm", own))
+        // Facebook keeps your login in its data: clearing it signs you out, and with two-factor that can lock you out.
+        assertEquals("Holds your login", AppPolicy.clearDataBlock("com.facebook.katana", own))
+        assertEquals("Holds your login", AppPolicy.clearDataBlock("com.facebook.lite", own))
+        assertEquals("Holds your login", AppPolicy.clearDataBlock("com.facebook.katana", null)) // as the helper checks
         assertEquals("Holds keys", AppPolicy.clearDataBlock("com.google.android.apps.authenticator2", own))
         assertEquals("Holds keys", AppPolicy.clearDataBlock("io.metamask", own))
         assertEquals("Holds keys", AppPolicy.clearDataBlock("com.x8bit.bitwarden", own))

@@ -486,6 +486,11 @@ class TermuxInventoryTest {
         // A copy whose original is gone is no copy of anything here; a fresh snapshot is still in use.
         write(File(home, "notes.md.orig"), 100, 6, mtime = old)
         write(File(home, "Report-20991231/now.txt"), 100, 7)
+        // A dated backup with a repository inside is a project: it used to go for good with the snapshots.
+        write(File(home, "Layla-Backup-20260928-114347/relay/.git/HEAD"), 40, 8, mtime = old)
+        write(File(home, "Layla-Backup-20260928-114347/relay/relay.py"), 300, 9, mtime = old)
+        listOf("Layla-Backup-20260928-114347/relay/.git", "Layla-Backup-20260928-114347/relay", "Layla-Backup-20260928-114347")
+            .forEach { File(home, it).setLastModified(old) }
 
         val report = TermuxProtocol.parseAudit(run("audit"))
         val kept = report.kept.map { it.path.removePrefix(prefix.path).removePrefix(home.path) }.toSet()
@@ -510,10 +515,12 @@ class TermuxInventoryTest {
                     "file-copy=" + File(home, "notes.md.orig").path,
                     "old-snapshot=" + File(home, "Layla-Debug-20260928-114347").path,
                     "old-snapshot=" + File(home, "Report-20991231").path,
+                    "old-snapshot=" + File(home, "Layla-Backup-20260928-114347").path,
                 ),
             ),
         ).results
-        assertEquals(listOf("CLEARED", "SKIP_UNSAFE", "CLEARED", "SKIP_UNSAFE"), results.map { it.status })
+        assertEquals(listOf("CLEARED", "SKIP_UNSAFE", "CLEARED", "SKIP_UNSAFE", "SKIP_UNSAFE"), results.map { it.status })
+        assertTrue(File(home, "Layla-Backup-20260928-114347/relay/.git/HEAD").exists())
         assertEquals("SKIP_KEPT", TermuxProtocol.parseClean(run("delete", listOf(File(home, "relay.py").path))).results.single().status)
         assertTrue(File(home, "relay.py").exists())
     }

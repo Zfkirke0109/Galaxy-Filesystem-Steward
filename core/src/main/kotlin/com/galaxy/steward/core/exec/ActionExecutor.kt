@@ -57,12 +57,24 @@ data class ExecutionSummary(
     /** Folders packed into zips, and the bytes those zips take. */
     val packed: Int = 0,
     val bytesPacked: Long = 0,
+    /**
+     * Of [deduped], the files a move found already at its destination, identical: the move removed this copy instead
+     * (the 10-30 Autopilot run's "deduplicated 6" was 5 files of a duplicate folder and 1 of these).
+     */
+    val alreadyFiled: Int = 0,
 ) {
     val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs + packed > 0
 
     /** Something in this run can be reverted from History. */
     val undoable: Boolean get() = changedAnything
 }
+
+/** The run's journal couldn't be written; the run stopped there, so that everything it changed can still be undone. */
+class JournalBroken(cause: IOException) : IllegalStateException(
+    "This run's journal couldn't be written (${cause.message ?: cause.javaClass.simpleName}), so it stopped: what it did " +
+        "until then can be undone from History",
+    cause,
+)
 
 fun interface ExecutionListener {
     fun onProgress(done: Int, total: Int, current: String)
@@ -98,10 +110,17 @@ class ActionExecutor(
     private var bytesMoved = 0L
     private var packed = 0
     private var bytesPacked = 0L
+    private var alreadyFiled = 0
     private val messages = ArrayList<String>()
     private val reasons = LinkedHashMap<String, Int>()
     private val changed = LinkedHashSet<String>()
     private val touchedParents = LinkedHashSet<Path>()
+
+    /** The copies this run kept while it removed their duplicates; see [holdsAKeptCopy]. */
+    private val kept = HashSet<String>()
+
+    /** Set once the journal can't be written: nothing more may change, since it couldn't be undone. */
+    private var journalBroken = false
 
     suspend fun execute(
         title: String,
@@ -152,13 +171,17 @@ class ActionExecutor(
                     if (allGood) completed.add(item.id) else partial.add(item.id)
                 }
             } finally {
-                if (options.pruneEmptyParents) pruneEmptyParents()
-                writer.meta("finished", System.currentTimeMillis().toString())
-                writer.meta(
-                    "stats",
-                    "moved=$moved deduped=$deduped quarantined=$quarantined rmdir=$removedDirs skipped=$skipped " +
-                        "failed=$failed freed=$bytesFreed quarantinedBytes=$bytesQuarantined movedBytes=$bytesMoved",
-                )
+                if (options.pruneEmptyParents && !journalBroken) pruneEmptyParents()
+                try {
+                    writer.meta("finished", System.currentTimeMillis().toString())
+                    writer.meta(
+                        "stats",
+                        "moved=$moved deduped=$deduped filed=$alreadyFiled quarantined=$quarantined rmdir=$removedDirs skipped=$skipped " +
+                            "failed=$failed freed=$bytesFreed quarantinedBytes=$bytesQuarantined movedBytes=$bytesMoved",
+                    )
+                } catch (e: IOException) {
+                    if (!journalBroken) throw e
+                }
             }
         }
         listener?.onProgress(total, total, "")
@@ -168,6 +191,7 @@ class ActionExecutor(
             reasons = reasons.toMap(),
             packed = packed,
             bytesPacked = bytesPacked,
+            alreadyFiled = alreadyFiled,
         )
     }
 
@@ -199,8 +223,30 @@ class ActionExecutor(
         reasons[message] = (reasons[message] ?: 0) + 1
     }
 
+    /**
+     * Journals one change. When that fails the run stops ([JournalBroken]) instead of going on with changes nothing
+     * could undo, and quarantined items left without a journal line would go when the quarantine is emptied.
+     */
     private fun record(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) {
-        journal.entry(JournalEntry(action, a, b, size, mtime, sha))
+        try {
+            journal.entry(JournalEntry(action, a, b, size, mtime, sha))
+        } catch (e: IOException) {
+            journalBroken = true
+            throw JournalBroken(e)
+        }
+    }
+
+    /** Journals a move just made; when that fails, the move is put back first, since nothing could undo it. */
+    private fun recordMove(from: Path, to: Path, journal: () -> Unit) {
+        try {
+            journal()
+        } catch (e: JournalBroken) {
+            try {
+                Files.move(to, from)
+            } catch (_: IOException) {
+            }
+            throw e
+        }
     }
 
     private fun mkdirs(dir: Path): Boolean = guard.ensureDirectories(dir) { created ->
@@ -225,7 +271,7 @@ class ActionExecutor(
                 if (existing.key != null && existing.key == id.key) return Outcome(Status.NOOP)
                 if (Hashing.sha256(dst) == srcSha) {
                     // Identical file already filed at the destination: this copy is a verified duplicate.
-                    return removeVerifiedDuplicate(src, dst, id, srcSha)
+                    return removeVerifiedDuplicate(src, dst, id, srcSha).also { if (it.status == Status.DONE) alreadyFiled++ }
                 }
             }
             dst = guard.uniqueCollisionPath(dst, planSha ?: srcSha)
@@ -244,7 +290,7 @@ class ActionExecutor(
             }
             return fail("Post-move verification failed")
         }
-        record(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha)
+        recordMove(srcPath, dstPath) { record(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha) }
         moved++
         bytesMoved += id.size
         changed += src
@@ -275,8 +321,9 @@ class ActionExecutor(
             }
             if (renamed) {
                 if (guard.exists(src) || !guard.isRealDirectory(dst)) return fail("Post-move verification failed")
-                record(JournalAction.MOVED_DIR, op.src, op.dst)
+                recordMove(src, dst) { record(JournalAction.MOVED_DIR, op.src, op.dst) }
                 moved++
+                bytesMoved += op.bytes
                 changed += op.src
                 changed += op.dst
                 touchedParents.add(src.parent)
@@ -362,7 +409,7 @@ class ActionExecutor(
             val q = quarantineTarget(path) ?: return fail("Quarantine unavailable")
             Files.move(p, q)
             if (guard.exists(p)) return fail("Post-quarantine verification failed")
-            record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha)
+            recordMove(p, q) { record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha) }
             bytesQuarantined += id.size
         } else {
             Files.delete(p)
@@ -371,10 +418,18 @@ class ActionExecutor(
             bytesFreed += id.size
         }
         deduped++
+        kept += canonical
         changed += path
         touchedParents.add(p.parent)
         return Outcome(Status.DONE)
     }
+
+    /**
+     * A copy this run kept while removing its duplicates, or a folder holding one. Duplicates run before cleanup, and
+     * a near-copy folder or an old installer can be the very copy a duplicate was removed for: quarantining it then
+     * would leave no copy outside the quarantine, and emptying the quarantine none at all.
+     */
+    private fun holdsAKeptCopy(path: String): Boolean = kept.any { it == path || it.startsWith("$path/") }
 
     // ------------------------------------------------------------------ quarantine
 
@@ -387,6 +442,7 @@ class ActionExecutor(
 
     private fun quarantineOp(op: QuarantineOp): Outcome {
         guard.protectionReason(op.path)?.let { return skip("Protected ($it)") }
+        if (holdsAKeptCopy(op.path)) return skip(KEPT_COPY)
         val p = Paths.get(op.path)
         if (!guard.exists(p)) return Outcome(Status.NOOP)
         if (!guard.resolvesBeneath(p)) return skip("Unsafe path")
@@ -404,7 +460,7 @@ class ActionExecutor(
         val q = quarantineTarget(op.path) ?: return fail("Quarantine unavailable")
         Files.move(p, q)
         if (guard.exists(p) || !guard.exists(q)) return fail("Post-quarantine verification failed")
-        record(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime)
+        recordMove(p, q) { record(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime) }
         quarantined++
         bytesQuarantined += op.size
         changed += op.path
@@ -416,6 +472,7 @@ class ActionExecutor(
 
     private fun packDir(op: PackDirOp): Outcome {
         guard.protectionReason(op.path)?.let { return skip("Protected ($it)") }
+        if (holdsAKeptCopy(op.path)) return skip(KEPT_COPY)
         guard.protectionReason(op.zip)?.let { return skip("Protected destination ($it)") }
         val dir = Paths.get(op.path)
         val zip = Paths.get(op.zip)
@@ -538,5 +595,9 @@ class ActionExecutor(
             }
             if (empty && removeEmptyDir(dir.toString()).status == Status.DONE) queue.addLast(dir.parent)
         }
+    }
+
+    companion object {
+        const val KEPT_COPY = "Holds the copy kept for a duplicate removed in this run"
     }
 }

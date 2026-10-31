@@ -124,7 +124,10 @@ object StorageReportText {
 
     private fun StringBuilder.suggestions(scan: ScanReport) {
         appendLine("WHAT THE LAST SCAN SUGGESTS")
-        appendLine(RunLog.scan(scan))
+        // After a run this report holds only what is left: the scan's own line says what it found (the 10-30 report
+        // printed the leftovers under it, as if the scan had found only those).
+        appendLine(scan.found ?: RunLog.scan(scan))
+        if (scan.found != null) appendLine("Left after ${count(scan.applied)} applied since: ${RunLog.findings(scan)}")
         scan.junk.groupBy { it.category }.forEach { (category, items) ->
             appendLine("  ${category.title}: ${count(items.size)}, ${items.sumOf { it.bytes }.humanBytes()}${if (category.defaultSelected) "" else " (review)"}")
         }

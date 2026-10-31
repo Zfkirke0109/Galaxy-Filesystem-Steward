@@ -1,5 +1,6 @@
 package com.galaxy.steward.core.plan
 
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.dedupe.KeeperRanking
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.StorageTree
@@ -22,7 +23,13 @@ data class MoveFileOp(
  * Move a directory. Renamed as one unit when the destination does not exist and [allowRename] is set;
  * otherwise merged file by file, leaving protected content (credentials, nested projects, symlinks) in place.
  */
-data class MoveDirOp(val src: String, val dst: String, val allowRename: Boolean) : Operation
+data class MoveDirOp(
+    val src: String,
+    val dst: String,
+    val allowRename: Boolean,
+    /** What the folder held at the scan, counted as moved when it goes as one unit. */
+    val bytes: Long = 0,
+) : Operation
 
 /** Remove [path] after re-verifying, byte for byte, that it matches [canonical]. */
 data class DeleteDuplicateOp(
@@ -335,6 +342,10 @@ data class ScanReport(
     val sketches: List<com.galaxy.steward.core.dedupe.DirSketch> = emptyList(),
     /** Unchanged code folders filled in from the previous scan instead of listed again. */
     val reusedFolders: Int = 0,
+    /** What the scan itself found ([RunLog.scan]), kept once runs have taken items out; null until then. */
+    val found: String? = null,
+    /** Items applied since the scan and taken out of this report. */
+    val applied: Int = 0,
 ) {
     val duplicateBytes: Long get() = duplicates.sumOf { it.reclaimBytes } + folderDuplicates.sumOf { it.reclaimBytes }
     val junkBytes: Long get() = junk.sumOf { it.reclaimBytes }
@@ -343,6 +354,8 @@ data class ScanReport(
 
     /** Copy without the items that were applied successfully. */
     fun without(appliedIds: Set<String>): ScanReport = copy(
+        found = found ?: RunLog.scan(this),
+        applied = applied + allItems().count { it.id in appliedIds },
         duplicates = duplicates.filterNot { it.id in appliedIds },
         folderDuplicates = folderDuplicates.filterNot { it.id in appliedIds },
         folderMerges = folderMerges.filterNot { it.id in appliedIds },

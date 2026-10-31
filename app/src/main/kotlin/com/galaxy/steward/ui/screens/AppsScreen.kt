@@ -95,6 +95,7 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                             action = when (shizuku) {
                                 ShizukuStatus.NOT_INSTALLED -> "Get"
                                 ShizukuStatus.NOT_RUNNING -> "Open"
+                                ShizukuStatus.CONNECTING -> "Check again"
                                 ShizukuStatus.NO_PERMISSION -> "Allow"
                                 ShizukuStatus.READY -> null
                             },
@@ -102,6 +103,7 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                             when (shizuku) {
                                 ShizukuStatus.NOT_INSTALLED -> openUrl(context, "https://shizuku.rikka.app/download/")
                                 ShizukuStatus.NOT_RUNNING -> vm.apps.shizuku.launchManager()
+                                ShizukuStatus.CONNECTING -> vm.apps.shizuku.refresh()
                                 ShizukuStatus.NO_PERMISSION -> vm.apps.shizuku.requestPermission()
                                 ShizukuStatus.READY -> Unit
                             }

@@ -5,6 +5,7 @@ import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.appdata.AppPolicy
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileNode
@@ -31,9 +32,13 @@ class JunkPlanner(
     private val installers = ArrayList<Pair<FileNode, ApkInfo>>()
     private var archiveBudget = ARCHIVE_BUDGET
 
-    /** Big files apps keep, by lower-case name and size: a file of yours matching one is a copy of it. */
+    /**
+     * Big files apps keep, by lower-case name and size: a file of yours matching one is a copy of it. Not those of
+     * Amazon Music and Audible: theirs are bound to a licence and go when it does, so yours may be the one that lasts.
+     */
     private val appCopies: Map<Pair<String, Long>, String> by lazy {
-        environment.appLargeFiles().associate { (it.path.substringAfterLast('/').lowercase() to it.size) to it.packageName }
+        environment.appLargeFiles().filterNot { it.packageName in AppPolicy.STRICT_NO_TOUCH }
+            .associate { (it.path.substringAfterLast('/').lowercase() to it.size) to it.packageName }
     }
 
     /** Clutter left alone, and why: shown under "Left alone, and why", so nothing big goes unexplained. */
