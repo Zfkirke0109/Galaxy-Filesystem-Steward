@@ -25,6 +25,20 @@ val buildNumber = buildSetting("GALAXY_STEWARD_VERSION_CODE", "galaxySteward.ver
     it.toIntOrNull()?.takeIf { n -> n > 0 } ?: throw GradleException("GALAXY_STEWARD_VERSION_CODE must be a positive number, not '$it'")
 }
 
+// Robolectric fetched its Android jar itself at test time, from Maven Central and outside Gradle's repositories and cache,
+// and Central's HTTP 429s failed the tests for no reason in the code. Gradle fetches it now, like any dependency; the
+// version is the one Robolectric (libs.versions.toml) runs the tests' SDK 35 on, so a Robolectric update that needs
+// another fails the tests loudly instead of downloading it.
+val robolectricRuntime: Configuration by configurations.creating { isTransitive = false }
+dependencies {
+    robolectricRuntime(libs.robolectric.android.all)
+}
+val robolectricJarsDir = layout.buildDirectory.dir("robolectric-jars")
+val robolectricJars = tasks.register<Sync>("robolectricJars") {
+    from(robolectricRuntime)
+    into(robolectricJarsDir)
+}
+
 android {
     namespace = "com.galaxy.steward"
     compileSdk = 36
@@ -84,6 +98,10 @@ android {
             all {
                 it.systemProperty("roborazzi.test.record", "true")
                 it.maxHeapSize = "3g"
+                // Robolectric's Android jar comes from Gradle (below), not from Maven Central at test time.
+                it.dependsOn(robolectricJars)
+                it.systemProperty("robolectric.offline", "true")
+                it.systemProperty("robolectric.dependency.dir", robolectricJarsDir.get().asFile.path)
             }
         }
     }

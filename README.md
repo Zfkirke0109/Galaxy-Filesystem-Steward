@@ -184,14 +184,26 @@ Every workflow run also keeps its APK as an artifact, including runs for pull re
 
 ## Build from source
 
-Requirements: JDK 17 or later and the Android SDK (platform 36).
+Requirements: JDK 17 or later and the Android SDK (platform 36). Gradle checks its own download against a pinned
+SHA-256 (`gradle/wrapper/gradle-wrapper.properties`), and every dependency, Robolectric's Android jar included, comes
+through Gradle's repositories (Google for `androidx`/`com.android`/`com.google`, Maven Central for the rest).
 
 ```bash
 ./gradlew :core:test              # engine unit tests (plain JVM, fast)
 ./gradlew :app:testDebugUnitTest  # end-to-end app test (Robolectric) + screenshots in app/build/outputs/roborazzi
-./gradlew :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:assembleRelease    # shrunk with R8; signed with the release key if one is configured
+./gradlew :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk (com.galaxy.steward.debug)
+./gradlew -PgalaxySteward.versionCode=<n> :app:assembleRelease  # shrunk with R8; release key if one is configured
 ```
+
+Where Maven Central answers HTTP 429 (shared addresses, CI containers), Google's mirror of Central can go first, for
+one build, without changing the repository:
+
+```bash
+GALAXY_STEWARD_CENTRAL_MIRROR=https://maven-central.storage-download.googleapis.com/maven2/ \
+  ./gradlew --init-script gradle/init/central-mirror.gradle.kts :core:test
+```
+
+It is off unless that variable names an https URL, keeps Central as the fallback, and changes nothing else.
 
 Release builds keep real class names and line numbers, so crash traces in a phone's logcat are readable without a
 mapping file. To sign local builds with the release key, see [docs/SIGNING.md](docs/SIGNING.md#building-locally-with-the-key).

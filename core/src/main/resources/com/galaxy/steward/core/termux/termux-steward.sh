@@ -1,4 +1,5 @@
 # Galaxy Steward - Termux helper.
+# shellcheck shell=bash
 #
 # Sent by the app through Termux's RUN_COMMAND bridge and run as the Termux user:
 #   bash -c "<this script>" steward audit [--out FILE]
@@ -90,6 +91,7 @@ CRASH_AT=""
 crash_point() {
   if [ -n "$CRASH_AT" ] && [ "$CRASH_AT" = "$1" ]; then
     local -A boom=()
+    # shellcheck disable=SC2034 # set only to crash, as a real error would
     boom[""]=1
   fi
 }
@@ -691,7 +693,7 @@ foreign_ndks() {
 # Files of 8 MiB or more that share a size, hashed: identical copies (hard links counted once). Report only; the
 # browser deletes. At most 6 GiB is read.
 dup_large_files() {
-  local f s ino sum budget=$((6 * 1024 * 1024 * 1024))
+  local f s ino sum q budget=$((6 * 1024 * 1024 * 1024))
   declare -A by=() seen=() sizes=()
   for f in "${!BIG[@]}"; do
     [ "${BIG[$f]}" -ge "$DUP_MIN_KIB" ] && [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -705,13 +707,24 @@ dup_large_files() {
   done
   for s in "${!by[@]}"; do
     [ "${sizes[$s]}" -ge 2 ] || continue
+    # Their ends first (64 KiB each, as the app does): files of one size that differ there aren't copies, and needn't
+    # be read in full. Models and disk images of one size were each read whole on every inventory.
+    declare -A quick=() qn=()
     while IFS= read -r f; do
       [ -n "$f" ] || continue
+      q="$( { head -c 65536 -- "$f"; tail -c 65536 -- "$f"; } 2>/dev/null | sha256sum)" || continue
+      q="${q:0:64}"
+      quick["$f"]="$q"
+      qn["$q"]=$(( ${qn[$q]:-0} + 1 ))
+    done <<< "${by[$s]}"
+    while IFS= read -r f; do
+      [ -n "$f" ] && [ -n "${quick[$f]:-}" ] && [ "${qn[${quick[$f]}]}" -ge 2 ] || continue
       [ "$budget" -ge "$s" ] || return 0
       budget=$((budget - s))
       sum="$(sha256sum -- "$f" 2>/dev/null)" || continue
       [ -n "$sum" ] && emit Q "$s" "${sum:0:64}" "$f"
     done <<< "${by[$s]}"
+    unset quick qn
   done
 }
 
@@ -2396,6 +2409,7 @@ relocate() {
   name="${src##*/}"
   dest="$HOME/projects/$name"
   if [ -e "$dest" ] || [ -L "$dest" ]; then result move SKIP_EXISTS 0 0 "$src" "$dest already exists"; finish ok; fi
+  # shellcheck disable=SC2088 # "~/projects" is a message for you, not a path
   mkdir -p -- "$HOME/projects" && dir_beneath "$HOME/projects" "$HOME" || { result move SKIP_UNSAFE 0 0 "$src" "~/projects is not a plain folder"; finish ok; }
   copy_verify_move "$src" "$dest"
   finish ok

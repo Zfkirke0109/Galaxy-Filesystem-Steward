@@ -87,4 +87,35 @@ class FilingModelTest {
 
     @Suppress("unused")
     private fun File.touch() = setLastModified(System.currentTimeMillis())
+    /**
+     * A phone with many homes (albums and filed folders): finding the home of each loose file used to look through every
+     * home for every home it scored, H x H work per file. 1,500 homes and 800 loose files must take seconds, not minutes,
+     * and give the same picks as before.
+     */
+    @Test
+    fun manyHomesAndLooseFilesStayQuick() = runTest {
+        TestFs().use { fs ->
+            // Words of letters only ("kelaab"...), each a folder of its own in Documents with three or four files.
+            fun word(i: Int) = "kel" + (0 until 3).map { d -> 'a' + (i / listOf(676, 26, 1)[d]) % 26 }.joinToString("")
+            val topics = (0 until 1_500).map(::word)
+            topics.forEachIndexed { i, t ->
+                (0 until 3).forEach { n -> fs.text("Documents/$t/$t-note$n.pdf", "x") }
+                if (i % 2 == 0) fs.text("Documents/$t/$t-sheet.csv", "x")
+            }
+            val loose = (0 until 800).map { i -> fs.text("Download/${topics[i * 7 % topics.size]}-new$i.pdf", "x") }
+            val tree = TreeScanner(fs.rootPath, testSettings).scan()
+            val model = FilingModel.train(tree)
+            assertTrue(model.size >= 1_500)
+            val started = System.nanoTime()
+            val picks = loose.map { f -> model.homeFor(tree.findAbsolute(f.path.substringBeforeLast('/'))!!.files.first { it.name == f.name })?.folder }
+            val millis = (System.nanoTime() - started) / 1_000_000
+            println("FilingModel: ${model.size} homes, ${loose.size} loose files, homeFor took $millis ms")
+            // Each new file goes to the folder of its own topic.
+            loose.forEachIndexed { i, f ->
+                val topic = topics[i * 7 % topics.size]
+                assertEquals(f.name, "Documents/$topic", picks[i])
+            }
+            assertTrue("homeFor took $millis ms", millis < 60_000)
+        }
+    }
 }

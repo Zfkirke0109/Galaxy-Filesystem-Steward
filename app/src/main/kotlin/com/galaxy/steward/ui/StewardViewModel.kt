@@ -233,7 +233,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } catch (e: OutOfMemoryError) {
                 StewardLog.w("scan ran out of memory after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
-                _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed("Not enough memory to map this much storage.")) }
+                // The last map goes too: kept, it would leave every later scan just as short of memory.
+                _state.update { it.copy(scanning = false, progress = null, report = null, outcome = Outcome.Failed("Not enough memory to map this much storage.")) }
             }
         }
     }

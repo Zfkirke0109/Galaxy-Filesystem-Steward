@@ -26,8 +26,8 @@ import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.ExecutorOptions
-import com.galaxy.steward.core.goal.GoalPlanner
 import com.galaxy.steward.core.goal.RiskTier
+import com.galaxy.steward.core.goal.Upkeep
 import com.galaxy.steward.core.learn.PreferenceModel
 import com.galaxy.steward.core.plan.ScanReport
 import com.galaxy.steward.core.plural
@@ -137,9 +137,7 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         val root = StorageAccess.rootPath
         val now = System.currentTimeMillis()
         val model = if (settings.learnFromChoices) withContext(Dispatchers.IO) { PreferenceModel.train(app.decisions.load()) } else null
-        val items = report.junk.filter { item ->
-            item.defaultSelected && GoalPlanner.tierOf(item) == RiskTier.NOTHING_LOST && model?.choiceFor(item, root, now)?.select != false
-        }
+        val items = Upkeep.select(report, model, root, now)
         if (items.isEmpty()) return null
         val started = SystemClock.uptimeMillis()
         val summary = withContext(Dispatchers.IO) {
@@ -152,13 +150,17 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         return summary
     }
 
-    private fun stopReasonText(): String = when (stopReason) {
-        WorkInfo.STOP_REASON_TIMEOUT -> "it ran into the time limit for background work"
-        WorkInfo.STOP_REASON_CONSTRAINT_CHARGING -> "the phone was unplugged"
-        WorkInfo.STOP_REASON_CONSTRAINT_BATTERY_NOT_LOW -> "the battery got low"
-        WorkInfo.STOP_REASON_CONSTRAINT_DEVICE_IDLE -> "the phone was used"
-        WorkInfo.STOP_REASON_USER -> "it was stopped from settings"
-        else -> "reason $stopReason"
+    /** Why Android stopped the worker; Android 12 (API 31) and later say. */
+    private fun stopReasonText(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return "Android doesn't say why before Android 12"
+        return when (val reason = stopReason) {
+            WorkInfo.STOP_REASON_TIMEOUT -> "it ran into the time limit for background work"
+            WorkInfo.STOP_REASON_CONSTRAINT_CHARGING -> "the phone was unplugged"
+            WorkInfo.STOP_REASON_CONSTRAINT_BATTERY_NOT_LOW -> "the battery got low"
+            WorkInfo.STOP_REASON_CONSTRAINT_DEVICE_IDLE -> "the phone was used"
+            WorkInfo.STOP_REASON_USER -> "it was stopped from settings"
+            else -> "reason $reason"
+        }
     }
 
     private fun notify(context: Context, title: String, text: String, footer: String = "Nothing was changed - open the app to review.") {

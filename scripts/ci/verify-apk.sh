@@ -77,6 +77,10 @@ package_line=$(grep -m 1 '^package:' <<<"$badging")
 version=$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" <<<"$package_line")
 version_code=$(sed -n "s/.* versionCode='\([^']*\)'.*/\1/p" <<<"$package_line")
 [[ "$version" =~ ^[0-9A-Za-z.+-]+$ ]] || fail "No version" "could not read a usable versionName from the APK"
+# Another application id (a debug build's ".debug") would install as a second app, not as an update.
+grep -q "^package: name='com.galaxy.steward' " <<<"$package_line" || fail "Wrong package" "the APK is not com.galaxy.steward: $package_line"
+# Version code 1 is a release built without one (app/build.gradle.kts refuses that); it could update nothing.
+[[ "$version_code" =~ ^[0-9]+$ ]] && [ "$version_code" -gt 1 ] || fail "No version code" "the APK's versionCode is '$version_code'"
 
 mkdir -p "$out_dir"
 staged="$out_dir/galaxy-steward-$version.apk"

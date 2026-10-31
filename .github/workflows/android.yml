@@ -34,6 +34,10 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # The scripts that delete in Termux's home and set up signing; shellcheck is on GitHub's Ubuntu images.
+      - name: Shell scripts (shellcheck)
+        run: shellcheck -S warning core/src/main/resources/com/galaxy/steward/core/termux/termux-steward.sh scripts/*.sh scripts/ci/*.sh
+
       - name: Engine unit tests
         run: ./gradlew :core:test --console=plain
 
@@ -45,8 +49,11 @@ jobs:
 
       # The key only exists as encrypted secrets. It is decoded into the runner's temp folder for the build and deleted
       # afterwards; it is never committed or uploaded (this repository is public). See docs/SIGNING.md.
+      # Only main's own builds get it: a pull request's or a branch's code, signed with the release key, would install
+      # over the real app as an update, unreviewed (and its build scripts would see the key's password).
       - name: Prepare the release signing key
         id: key
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           KEYSTORE_BASE64: ${{ secrets.GALAXY_STEWARD_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.GALAXY_STEWARD_KEYSTORE_PASSWORD }}
@@ -79,9 +86,10 @@ jobs:
           # Every build gets a higher version code, so it installs as an update over the previous one. Only this step
           # sees it, so the test and lint builds above stay identical between runs and reuse the Gradle build cache.
           GALAXY_STEWARD_VERSION_CODE: ${{ github.run_number }}
-          GALAXY_STEWARD_KEYSTORE_PASSWORD: ${{ secrets.GALAXY_STEWARD_KEYSTORE_PASSWORD }}
-          GALAXY_STEWARD_KEY_ALIAS: ${{ secrets.GALAXY_STEWARD_KEY_ALIAS }}
-          GALAXY_STEWARD_KEY_PASSWORD: ${{ secrets.GALAXY_STEWARD_KEY_PASSWORD }}
+          # Empty for pull requests and branches, like the key itself (above).
+          GALAXY_STEWARD_KEYSTORE_PASSWORD: ${{ steps.key.outputs.signed == 'true' && secrets.GALAXY_STEWARD_KEYSTORE_PASSWORD || '' }}
+          GALAXY_STEWARD_KEY_ALIAS: ${{ steps.key.outputs.signed == 'true' && secrets.GALAXY_STEWARD_KEY_ALIAS || '' }}
+          GALAXY_STEWARD_KEY_PASSWORD: ${{ steps.key.outputs.signed == 'true' && secrets.GALAXY_STEWARD_KEY_PASSWORD || '' }}
         run: ./gradlew :app:assembleRelease --console=plain
 
       - name: Delete the signing key
@@ -114,9 +122,9 @@ jobs:
             app/build/outputs/roborazzi/
           if-no-files-found: ignore
 
-  # Each release-signed build of main becomes a GitHub release, so
-  # https://github.com/<owner>/<repo>/releases/latest/download/galaxy-steward.apk is always the newest build, and
-  # Obtainium or GitHub Store can install and update the app from this repository.
+  # Each release-signed build of main becomes a GitHub pre-release. One that was checked on the phone is promoted to the
+  # latest release (docs/SIGNING.md), so https://github.com/<owner>/<repo>/releases/latest/download/galaxy-steward.apk,
+  # and Obtainium or GitHub Store updating from this repository, only ever get a build that was tried on a phone.
   release:
     needs: build
     if: >-
@@ -144,11 +152,19 @@ jobs:
           cp "dist/galaxy-steward-$VERSION.apk" dist/galaxy-steward.apk
           tag="v$VERSION"
           if gh release view "$tag" > /dev/null 2>&1; then
-            # A re-run of the same build: replace the APK, keep the release.
+            # A re-run of the same build replaces its APK. A tag of another commit (the run numbers started over) is an
+            # error: its APK must not be swapped for a different build under the same name.
+            target="$(gh release view "$tag" --json targetCommitish -q .targetCommitish)"
+            if [ "$target" != "$GITHUB_SHA" ]; then
+              echo "::error title=Release exists::$tag was built from $target, not $GITHUB_SHA. Raise the version code instead."
+              exit 1
+            fi
             gh release upload "$tag" dist/galaxy-steward.apk --clobber
             exit 0
           fi
-          notes="Install \`galaxy-steward.apk\` over any earlier release: it's signed with the same key, so the app keeps its settings, history and permissions.
+          notes="A pre-release until it has been checked on the phone; then it becomes the latest release (docs/SIGNING.md).
+
+          Install \`galaxy-steward.apk\` over any earlier release: it's signed with the same key, so the app keeps its settings, history and permissions.
 
           | | |
           |---|---|
@@ -157,4 +173,4 @@ jobs:
           | Built from | $GITHUB_SHA |
           "
           gh release create "$tag" dist/galaxy-steward.apk --target "$GITHUB_SHA" --title "Galaxy Steward $VERSION" \
-            --notes "$notes" --generate-notes --latest
+            --notes "$notes" --generate-notes --prerelease

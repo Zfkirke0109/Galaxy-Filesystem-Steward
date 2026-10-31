@@ -62,9 +62,27 @@ class FilingModel private constructor(
 
     val size: Int get() = homes.size
 
+    /** Homes by folder, and by path for "every home inside this folder": looked up for every item planned. */
+    private val byDir = java.util.IdentityHashMap<DirNode, Home>().apply { homes.forEach { put(it.dir, it) } }
+    private val byPath = java.util.TreeMap<String, Home>().apply { homes.forEach { put(it.dir.path, it) } }
+
+    /** The homes at [path] or inside it. */
+    private fun homesAtOrInside(path: String): List<Home> =
+        listOfNotNull(byPath[path]) + byPath.subMap("$path/", "$path/\uffff").values
+
+    /** What [node] itself added to the counts: it is a member only of its own folder's home, if that is one. */
+    private fun ownEntry(node: Any, self: String): Map<String, Double>? = when (node) {
+        is FileNode -> byDir[node.dir]?.members?.get(self)
+        is DirNode -> node.parent?.let { byDir[it] }?.members?.get(self)
+        else -> null
+    }
+
     /**
      * The best home for [node], or null when no folder is clearly better than the rest. When [node] already sits in one
      * of the homes, it is taken out of that home's counts first (leave-one-out), so it can't vote for where it is.
+     *
+     * Each home is scored once, from counts looked up once: this used to look through every home again for every home
+     * it scored, and 800 downloads against 1,500 homes took 13 s (FilingModelTest).
      */
     fun homeFor(node: Any): LearnedHome? {
         val (features, self) = when (node) {
@@ -74,41 +92,61 @@ class FilingModel private constructor(
         }
         if (features.isEmpty()) return null
         // A folder is never its own home, nor one inside itself; and what it holds is no evidence about where it goes.
-        val inside = homes.filter { it.dir.path == self || it.dir.path.startsWith("$self/") }
+        val inside = if (node is DirNode) homesAtOrInside(self) else emptyList()
+        val skip = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Home, Boolean>()).apply { addAll(inside) }
         val excluded = Counts().apply { inside.forEach { h -> add(h.plain.features); items += h.plain.items - 1 } }
-        val out = homes.mapNotNull { h -> if (h in inside) null else evidence(h, features, self, excluded)?.let { h to it } }
-            .sortedByDescending { it.second.first }
-        val (home, best) = out.firstOrNull() ?: return null
-        val runnerUp = out.getOrNull(1)?.second?.first ?: Double.NEGATIVE_INFINITY
-        val (score, because, examples) = best
-        if (score < MIN_SCORE || score - runnerUp < MIN_MARGIN) return null
-        return LearnedHome(home.rel, score, because, examples)
+        val counted = ownEntry(node, self)
+        var best: Home? = null
+        var bestScore = Double.NEGATIVE_INFINITY
+        var bestReasons: List<Pair<String, Double>> = emptyList()
+        var runnerUp = Double.NEGATIVE_INFINITY
+        for (h in homes) {
+            if (h in skip) continue
+            val (score, reasons) = evidence(h, features, self, counted, excluded) ?: continue
+            if (score > bestScore) {
+                runnerUp = bestScore
+                best = h
+                bestScore = score
+                bestReasons = reasons
+            } else if (score > runnerUp) {
+                runnerUp = score
+            }
+        }
+        val home = best ?: return null
+        if (bestScore < MIN_SCORE || bestScore - runnerUp < MIN_MARGIN) return null
+        return LearnedHome(home.rel, bestScore, bestReasons.sortedByDescending { it.second }.map { (f, _) -> label(f) }, examples(home, bestReasons, self))
     }
 
     /** How well [node] fits the folder it is in (its own entry left out): 0 when nothing there is like it. */
     fun fitWhereItIs(node: DirNode): Double {
         val parent = node.parent ?: return 0.0
-        val home = homes.firstOrNull { it.dir === parent } ?: return 0.0
+        val home = byDir[parent] ?: return 0.0
         val self = node.path
-        val excluded = Counts().apply { homes.filter { it.dir.path == self || it.dir.path.startsWith("$self/") }.forEach { add(it.plain.features) } }
-        return evidence(home, featuresOf(node), self, excluded)?.first ?: 0.0
+        val excluded = Counts().apply { homesAtOrInside(self).forEach { add(it.plain.features) } }
+        return evidence(home, featuresOf(node), self, home.members[self], excluded)?.first ?: 0.0
     }
+
+    /** Items in [h] other than [self] that share something with it: "with 12 items there". */
+    private fun examples(h: Home, reasons: List<Pair<String, Double>>, self: String): Int =
+        h.members.count { (path, m) -> path != self && reasons.any { (f, _) -> m.containsKey(f) } }
 
     /**
      * Evidence that [features] belong in [h]: for each word or extension things in [h] share with them, how much more
      * common it is there than on the whole phone (a log ratio, with the home's counts smoothed towards the phone's).
      * Words nothing there shares count for nothing, but at least a third of what describes the item must match.
+     * [counted] is the item's own entry in its folder's home, if any ([ownEntry]). Every reason is a word or extension
+     * another item in [h] has, so there is always an example for it.
      */
     private fun evidence(
         h: Home,
         features: Map<String, Double>,
         self: String,
+        counted: Map<String, Double>?,
         excluded: Counts? = null,
-    ): Triple<Double, List<String>, Int>? {
+    ): Pair<Double, List<Pair<String, Double>>>? {
         // What the item itself added to the counts: to its home's (more when you moved it there yourself), and to the phone's.
         val own = h.members[self]
         val ownWeight = h.weights[self] ?: 1.0
-        val counted = own ?: homes.firstNotNullOfOrNull { it.members[self] }
         val sum = features.values.sum()
         val homeTotal = h.counts.total - (own?.values?.sum() ?: 0.0) * ownWeight
         val allTotal = background.total - (counted?.values?.sum() ?: 0.0) - (excluded?.total ?: 0.0)
@@ -127,9 +165,7 @@ class FilingModel private constructor(
             if (lr > 0) reasons += f to w * lr
         }
         if (reasons.isEmpty() || matched < sum / 3) return null
-        val examples = h.members.count { (path, m) -> path != self && reasons.any { (f, _) -> m.containsKey(f) } }
-        if (examples == 0) return null
-        return Triple(score, reasons.sortedByDescending { it.second }.map { (f, _) -> label(f) }, examples)
+        return score to reasons
     }
 
     companion object {

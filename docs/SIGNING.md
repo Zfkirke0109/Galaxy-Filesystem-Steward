@@ -60,26 +60,41 @@ Then add these under **Settings → Secrets and variables → Actions** in the r
 The [Android build](../.github/workflows/android.yml) workflow runs for every pull request, every push to `main` and
 on demand:
 
-1. It runs the engine tests, the end-to-end app test and lint.
-2. It decodes the key into the runner's temporary folder, checks that the password opens it, builds the release
-   APK, and deletes the key again.
+1. It runs shellcheck on the scripts, the engine tests, the end-to-end app test and lint.
+2. For `main`'s own builds only (a push, or a run started by hand on `main`), it decodes the key into the runner's
+   temporary folder, checks that the password opens it, builds the release APK, and deletes the key again. Pull
+   requests and other branches never get the key or its password: their code, signed with it, would install over the
+   real app as an update.
 3. The workflow's run number becomes the version code, and the version is `1.2.<run number>`. Every build is newer than
    the one before, so it installs as an update. Shizuku also restarts the helper with the new code.
 4. `apksigner` verifies the signature. The certificate must match `GALAXY_STEWARD_CERT_SHA256` when that is set. The
    job summary shows the version, the certificate fingerprint and the APK's SHA-256.
 5. It uploads `galaxy-steward-<version>.apk` as the run's artifact.
-6. For `main`, it publishes the APK as the GitHub release `v<version>`, attached as `galaxy-steward.apk`.
+6. For `main`, it publishes the APK as the GitHub **pre-release** `v<version>`, attached as `galaxy-steward.apk`. A
+   re-run of the same commit replaces its APK; a tag that already belongs to another commit fails the run.
 
-When the secrets aren't available (before setup, or for a pull request from a fork), the APK is signed with a
+When the secrets aren't available (before setup, for a pull request, or for a branch), the APK is signed with a
 throwaway debug key. The run shows a warning, and no release is published.
+
+### Promoting a release
+
+A pre-release is not offered as an update: `releases/latest` and Obtainium (by default) skip it. Once a build has been
+installed and checked on the phone, make it the latest release:
+
+```bash
+gh release edit v1.2.<n> --prerelease=false --latest
+```
 
 ## Installing and updating
 
 - **Direct download:**
   <https://github.com/Zfkirke0109/Galaxy-Filesystem-Steward/releases/latest/download/galaxy-steward.apk> is always
-  the newest release.
+  the newest promoted release.
 - **Automatic updates:** add `https://github.com/Zfkirke0109/Galaxy-Filesystem-Steward` to
-  [Obtainium](https://github.com/ImranR98/Obtainium) or GitHub Store. Each new release then shows up as an update.
+  [Obtainium](https://github.com/ImranR98/Obtainium) or GitHub Store. Each promoted release then shows up as an update.
+- **Debug builds** (`assembleDebug`) are `com.galaxy.steward.debug`: they install beside the real app, never over it,
+  so trying one never costs the real app's History. Both share the quarantine folder in shared storage, so each sees
+  the other's quarantine runs as having no journal.
 
 **Switching from a build made before signing was set up:** each of those builds was signed with a different
 throwaway key, so uninstall it once before installing the first release. The uninstall removes what the app keeps
@@ -97,9 +112,11 @@ galaxySteward.keystore=/absolute/path/to/release.jks
 galaxySteward.keystorePassword=...
 ```
 
-`./gradlew :app:assembleRelease` then signs with it. The matching environment variables (`GALAXY_STEWARD_KEYSTORE`,
-`GALAXY_STEWARD_KEYSTORE_PASSWORD`, `GALAXY_STEWARD_KEY_ALIAS`, `GALAXY_STEWARD_KEY_PASSWORD` and
-`GALAXY_STEWARD_VERSION_CODE`) work too. Without a key, release builds use your machine's debug key.
+`./gradlew -PgalaxySteward.versionCode=<n> :app:assembleRelease` then signs with it. A release build needs a version
+code higher than the installed one (it is refused without one; code 1 could update nothing). The matching environment
+variables (`GALAXY_STEWARD_KEYSTORE`, `GALAXY_STEWARD_KEYSTORE_PASSWORD`, `GALAXY_STEWARD_KEY_ALIAS`,
+`GALAXY_STEWARD_KEY_PASSWORD` and `GALAXY_STEWARD_VERSION_CODE`) work too. Without a key, release builds use your
+machine's debug key, which only updates an install signed with that same machine's debug key.
 
 ## Replacing a lost key
 
