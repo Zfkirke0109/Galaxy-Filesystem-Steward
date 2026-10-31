@@ -81,6 +81,26 @@ fun HistoryScreen(vm: StewardViewModel, state: UiState) {
                     }
                 }
             }
+            if (state.orphanBytes > 0) {
+                item {
+                    ReviewCard {
+                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("From before a reinstall", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "${state.orphanBytes.humanBytes()} in the quarantine from runs this install has no journal of, so " +
+                                        "they can't be undone here. Their items can still go back where they were, beside anything " +
+                                        "that has their name now. They are never emptied on their own.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            FilledTonalButton(onClick = { vm.restoreOrphans() }) { Text("Put back") }
+                        }
+                    }
+                }
+            }
             if (state.journals.isEmpty()) {
                 item { EmptyState(Icons.Rounded.History, "No runs yet", "Every cleanup is journaled here so you can undo it.") }
             } else {

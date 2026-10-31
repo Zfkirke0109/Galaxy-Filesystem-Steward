@@ -9,7 +9,7 @@
 #   EXPECTED_CERT_SHA256  Optional pinned certificate fingerprint (repository variable GALAXY_STEWARD_CERT_SHA256).
 #                         Colons and case are ignored. A different certificate fails the build, because phones that
 #                         have the app would refuse the update.
-#   ANDROID_HOME          Android SDK with build-tools (apksigner, aapt2).
+#   ANDROID_HOME          Android SDK with build-tools (apksigner, aapt2, zipalign).
 #
 # Writes version, version_code, cert_sha256, apk and apk_sha256 to $GITHUB_OUTPUT, and a summary to
 # $GITHUB_STEP_SUMMARY, when those are set (as they are in GitHub Actions).
@@ -61,6 +61,16 @@ else
     echo "::warning title=APK signed with a throwaway debug key::The GALAXY_STEWARD_KEYSTORE_* secrets are not available to this run (not set up yet, or a pull request from a fork). This APK can't be installed over a release build. See docs/SIGNING.md."
     signed_with="throwaway debug key (can't update a release install)"
 fi
+
+# Phones with 16 KB memory pages load a native library only when it is stored uncompressed and aligned to 16 KB.
+if [ -x "$tools/zipalign" ]; then
+    "$tools/zipalign" -c -P 16 -v 4 "$apk" >/dev/null || fail "Not 16 KB aligned" "zipalign -c -P 16 found native libraries not aligned for 16 KB page devices"
+else
+    echo "::warning title=16 KB alignment not checked::zipalign not found in $tools"
+fi
+# Read from the APK at run time, so shrinking or packaging must not drop it.
+unzip -Z1 "$apk" | grep -qx 'com/galaxy/steward/core/termux/termux-steward.sh' ||
+    fail "Termux script missing" "the APK lacks com/galaxy/steward/core/termux/termux-steward.sh, which the Termux tab runs"
 
 badging=$("$tools/aapt2" dump badging "$apk")
 package_line=$(grep -m 1 '^package:' <<<"$badging")

@@ -5,6 +5,7 @@ package com.galaxy.steward.ui.screens
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -68,8 +69,15 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
     LaunchedEffect(Unit) { vm.apps.shizuku.refresh() }
     var ruleDialog by remember { mutableStateOf(false) }
     var protectDialog by remember { mutableStateOf(false) }
-    val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+    val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         vm.setWeeklyAudit(true)
+        if (!granted) {
+            Toast.makeText(
+                context,
+                "Notifications are off, so the weekly audit can't tell you what it found or did. History lists every upkeep run.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
     }
 
     Scaffold(topBar = { ReviewTopBar("Settings", null) }) { padding ->
@@ -226,7 +234,8 @@ fun SettingsScreen(vm: StewardViewModel, state: UiState) {
             item {
                 Hint(
                     "Galaxy Steward ${BuildConfig.VERSION_NAME} · Koa engine, ported from the Koa Whole-Device Storage Steward v18.2 for Termux. " +
-                        "Scans are read-only; every change is SHA-256 verified, journaled and undoable. Device label: ${vm.deviceLabel}.",
+                        "Scans are read-only; every change is checked first and journaled, and all but what is deleted for good can be undone. " +
+                            "Device label: ${vm.deviceLabel}.",
                 )
             }
         }

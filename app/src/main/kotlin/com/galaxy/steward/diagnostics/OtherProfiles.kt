@@ -19,6 +19,13 @@ class OtherProfiles(private val myUser: Int, knownUsers: Set<Int> = SAMSUNG_PROF
     /** Other users seen or assumed so far: their bare uids are recognised from then on. */
     private val others = HashSet(knownUsers - myUser)
 
+    /**
+     * Apps seen opening for another user and not for this one. The system also names an open app by its window
+     * ("input_focus: [Focus entering 4b1f3a com.secret.app/…") with no user in the line, so lines naming these go too.
+     */
+    private val otherApps = HashSet<String>()
+    private val myApps = HashSet<String>()
+
     fun keep(line: String): Boolean {
         if (isOther(line)) {
             dropped++
@@ -39,7 +46,11 @@ class OtherProfiles(private val myUser: Int, knownUsers: Set<Int> = SAMSUNG_PROF
             headUser(line)?.let { if (other(it)) return true }
             if (line.contains(" am_") || line.contains(" wm_") || line.contains(" ssm_user_")) {
                 // Events that name the user first ("am_proc_start: [150,12247,…"), or a uid second ("am_pss: [pid,15010235,…").
-                USER_EVENT.find(line)?.let { if (other(it.groupValues[1].toInt())) return true }
+                USER_EVENT.find(line)?.let { m ->
+                    val user = m.groupValues[1].toInt()
+                    if (m.groupValues[0].contains("activity")) learnApp(line, user)
+                    if (other(user)) return true
+                }
                 UID_EVENT.find(line)?.let { if (other((it.groupValues[1].toLong() / PER_USER_RANGE).toInt())) return true }
             }
         }
@@ -61,6 +72,31 @@ class OtherProfiles(private val myUser: Int, knownUsers: Set<Int> = SAMSUNG_PROF
         }
         // A bare uid, only for a user known to be here, so sizes and ids that merely look like one stay.
         if (others.isNotEmpty() && bareUid(line)) return true
+        if (otherApps.isNotEmpty() && otherApps.any { names(line, it) }) return true
+        return false
+    }
+
+    /** The app an activity event names ("[150,61234567,812,com.secret.app/.MainActivity,…"), as opened for [user]. */
+    private fun learnApp(line: String, user: Int) {
+        val app = COMPONENT.find(line, line.indexOf('['))?.groupValues?.get(1) ?: return
+        if (user == myUser) {
+            myApps += app
+            otherApps -= app
+        } else if (app !in myApps) {
+            otherApps += app
+        }
+    }
+
+    /** [line] names [app] as a whole package name, not as the start of a longer one. */
+    private fun names(line: String, app: String): Boolean {
+        var i = line.indexOf(app)
+        while (i >= 0) {
+            val end = i + app.length
+            val before = if (i > 0) line[i - 1] else ' '
+            val after = if (end < line.length) line[end] else ' '
+            if (!before.isLetterOrDigit() && before != '.' && before != '_' && !after.isLetterOrDigit() && after != '.' && after != '_') return true
+            i = line.indexOf(app, i + 1)
+        }
         return false
     }
 
@@ -118,11 +154,21 @@ class OtherProfiles(private val myUser: Int, knownUsers: Set<Int> = SAMSUNG_PROF
         val SAMSUNG_PROFILES = setOf(95, 150)
 
         private val NAMED_UID = Regex("""^u(\d+)_""")
+        /**
+         * Events whose first field is the user, from Android's event log tags (and every one of them so in the 10-30
+         * log); events that start with a task, token or display aren't here, or display 1 would count as a user.
+         */
         private val USER_EVENT = Regex(
-            """ [IWEDV] (?:am_(?:proc_start|proc_bound|proc_died|kill|crash|anr|wtf)|ssm_user_[a-z_]+|wm_add_to_stopping|""" +
+            """ [IWEDV] (?:am_(?:proc_start|proc_bound|proc_died|kill|crash|anr|wtf|schedule_service_restart|create_service|""" +
+                """destroy_service|process_crashed_too_much|service_crashed_too_much|provider_lost_process|process_start_timeout|""" +
+                """broadcast_discard_filter|broadcast_discard_app|foreground_service_(?:start|stop|denied|timed_out))|""" +
+                """ssm_user_[a-z_]+|wm_add_to_stopping|wm_task_to_front|wm_focused_root_task|wm_activity_launch_time|""" +
                 """wm_set_resumed_activity|wm_new_intent|wm_(?:create|restart|pause|resume|finish|destroy|stop|idle|relaunch|""" +
                 """relaunch_resume|failed_to_pause)_activity)\s*: \[(\d+)[,\]]""",
         )
+
+        /** The package of a component ("com.secret.app/.MainActivity"). */
+        private val COMPONENT = Regex("""([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)/""")
         private val UID_EVENT = Regex(""" [IWEDV] am_(?:pss|cpu)\s*: \[\d+,(\d+),""")
 
         /** A user named outright: "u150a295", "u150_i3", "(u150)", "userId = 150", "user:150", "{4ab5a9f u150 ". */

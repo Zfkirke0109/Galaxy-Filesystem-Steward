@@ -17,6 +17,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.BufferedOutputStream
 import java.io.IOException
+import java.io.UncheckedIOException
+import java.nio.file.DirectoryIteratorException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -62,6 +64,8 @@ data class ExecutionSummary(
      * (the 10-30 Autopilot run's "deduplicated 6" was 5 files of a duplicate folder and 1 of these).
      */
     val alreadyFiled: Int = 0,
+    /** Of [deduped], the copies moved to the quarantine instead of deleted (Settings: quarantine duplicates). */
+    val dedupedQuarantined: Int = 0,
 ) {
     val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs + packed > 0
 
@@ -111,6 +115,7 @@ class ActionExecutor(
     private var packed = 0
     private var bytesPacked = 0L
     private var alreadyFiled = 0
+    private var dedupedQuarantined = 0
     private val messages = ArrayList<String>()
     private val reasons = LinkedHashMap<String, Int>()
     private val changed = LinkedHashSet<String>()
@@ -149,6 +154,11 @@ class ActionExecutor(
                             run(op)
                         } catch (e: IOException) {
                             Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
+                        } catch (e: UncheckedIOException) {
+                            // What Files.walk and directory streams throw for a folder they can't open: this step fails, not the run.
+                            Outcome(Status.FAILED, "I/O error: ${e.cause?.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
+                        } catch (e: DirectoryIteratorException) {
+                            Outcome(Status.FAILED, "I/O error: ${e.cause?.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
                         } catch (e: SecurityException) {
                             fail("Permission denied")
                         }
@@ -192,6 +202,7 @@ class ActionExecutor(
             packed = packed,
             bytesPacked = bytesPacked,
             alreadyFiled = alreadyFiled,
+            dedupedQuarantined = dedupedQuarantined,
         )
     }
 
@@ -411,6 +422,7 @@ class ActionExecutor(
             if (guard.exists(p)) return fail("Post-quarantine verification failed")
             recordMove(p, q) { record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha) }
             bytesQuarantined += id.size
+            dedupedQuarantined++
         } else {
             Files.delete(p)
             if (guard.exists(p)) return fail("Delete verification failed")

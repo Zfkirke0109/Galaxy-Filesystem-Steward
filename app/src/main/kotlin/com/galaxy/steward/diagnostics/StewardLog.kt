@@ -33,10 +33,19 @@ object StewardLog {
     }
 
     fun w(message: String, error: Throwable? = null) {
-        val line = if (error == null) message else "$message: ${error.message ?: error.javaClass.simpleName}"
+        val line = if (error == null) message else "$message: ${error.message?.let(::redact) ?: error.javaClass.simpleName}"
         Log.w(TAG, line)
         remember("W", line)
     }
+
+    /**
+     * An exception's message without the paths in it: Java's file errors name the file ("/storage/emulated/0/Download/
+     * notes.txt: open failed: EACCES"), and this log goes into exports shared for support.
+     */
+    internal fun redact(text: String): String = PATH.replace(text, "<path>")
+
+    // To the ": " or " -> " Java puts after a path, since file names can hold spaces; to the end of the line otherwise.
+    private val PATH = Regex("""(?<![\w.])/(?:storage|sdcard|mnt|data)/.*?(?=: | -> |['")\]\r\n]|$)""")
 
     /** The kept lines, oldest first (at most [KEEP_LINES]). */
     fun lines(): List<String> = synchronized(this) {

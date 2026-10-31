@@ -87,6 +87,8 @@ data class UiState(
     val journals: List<JournalInfo> = emptyList(),
     val quarantineBytes: Long = 0,
     val quarantineByRun: Map<String, Long> = emptyMap(),
+    /** What runs from before a reinstall left in the quarantine, with no journal to undo them ([QuarantineManager.orphans]). */
+    val orphanBytes: Long = 0,
     val space: VolumeSpace? = null,
     /** The media index is being refreshed after a run (in the background; nothing waits on it). */
     val indexing: Boolean = false,
@@ -815,6 +817,39 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         return Outcome.Report(title, lines, skipped)
     }
 
+    /**
+     * Puts back what runs from before a reinstall left in the quarantine: each item to its own path, or beside what
+     * has its name now, checked like any undo; app folders through Shizuku.
+     */
+    fun restoreOrphans() = launchRun("Putting back from before a reinstall", stoppable = false) { progress ->
+        val q = quarantine()
+        val runs = withContext(Dispatchers.IO) { q.orphans() }
+        val entries = withContext(Dispatchers.IO) { runs.flatMap { q.orphanEntries(it) } }
+        val (appFolders, shared) = entries.partition { it.a.removePrefix("$rootPath/").startsWith("Android/") }
+        var summary = withContext(Dispatchers.IO) { RollbackEngine(rootPath, null).rollbackEntries(shared) { d, t, c -> progress(d, t, c) } }
+        if (appFolders.isNotEmpty()) {
+            summary = try {
+                summary + apps.rollbackEntries(appFolders, progress)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                StewardLog.w("putting back app folders from before a reinstall failed", e)
+                summary.copy(
+                    remaining = summary.remaining + appFolders.size,
+                    messages = summary.messages + "${appFolders.size} in Android/data or obb need Shizuku: ${e.message ?: e.javaClass.simpleName}",
+                )
+            }
+        }
+        withContext(Dispatchers.IO) { runs.forEach { q.pruneEmpty(it) } }
+        reindexLater(summary.changedPaths)
+        _state.update { it.copy(stale = true) }
+        Outcome.RolledBack("Items from before a reinstall", summary)
+    }
+
+    private operator fun RollbackSummary.plus(o: RollbackSummary) = RollbackSummary(
+        restored + o.restored, skipped + o.skipped, failed + o.failed, messages + o.messages, changedPaths + o.changedPaths, remaining + o.remaining,
+    )
+
     /** Empties one run's quarantine, or all of it when [runId] is null. */
     fun purgeQuarantine(runId: String?) {
         scope.launch {
@@ -841,7 +876,10 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         } else {
             emptyMap()
         }
-        _state.update { it.copy(journals = journals, quarantineByRun = byRun, quarantineBytes = byRun.values.sum()) }
+        val orphans = if (byRun.isEmpty()) emptyList() else quarantine().orphans()
+        _state.update {
+            it.copy(journals = journals, quarantineByRun = byRun, quarantineBytes = byRun.values.sum(), orphanBytes = orphans.sumOf { id -> byRun[id] ?: 0L })
+        }
     }
 
     // ------------------------------------------------------------------ settings

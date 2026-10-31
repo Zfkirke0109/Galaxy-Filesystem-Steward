@@ -55,7 +55,7 @@ fun PermissionScreen(onLegacyResult: () -> Unit) {
         )
         Promise(Icons.Rounded.Search, "Read-only until you approve", "Scans only look. Every change is shown to you first.")
         Promise(Icons.Rounded.VerifiedUser, "Verified byte for byte", "Duplicates are re-checked with SHA-256 immediately before removal; the kept copy is never touched.")
-        Promise(Icons.AutoMirrored.Rounded.Undo, "Everything is undoable", "Each run is journaled. Clutter goes to a quarantine first.")
+        Promise(Icons.AutoMirrored.Rounded.Undo, "Undo from History", "Each run is journaled. Clutter goes to a quarantine first; only what says so is deleted for good.")
         Promise(Icons.Rounded.Lock, "Hands off what matters", "Android/data, app media, projects, Git repositories, keys and credentials are never moved or deleted.")
         Spacer(Modifier.height(8.dp))
         Button(

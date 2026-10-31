@@ -145,11 +145,14 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
                 if (s.cleared > 0) add("${s.cleared.plural("file")} removed for good")
                 if (s.deduped > 0) {
                     add(
-                        "${s.deduped.plural("verified duplicate", "verified duplicates")} removed" +
+                        "${s.deduped.plural("verified duplicate", "verified duplicates")} " +
+                            (if (s.dedupedQuarantined > 0) "moved to the quarantine" else "removed") +
                             if (s.alreadyFiled > 0) " (${s.alreadyFiled} of them already filed where they were going)" else "",
                     )
                 }
-                if (s.quarantined > 0) add("${s.quarantined.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
+                // The quarantined bytes include duplicates moved there, so they are counted with the items.
+                val inQuarantine = s.quarantined + s.dedupedQuarantined
+                if (inQuarantine > 0) add("${inQuarantine.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
                 if (s.packed > 0) add("${s.packed.plural("folder", "folders")} packed into zips (${s.bytesPacked.humanBytes()}); the folders are in the quarantine")
                 if (s.moved > 0) add("${s.moved.plural("item", "items")} organised")
                 if (s.removedDirs > 0) add("${s.removedDirs.plural("empty folder", "empty folders")} removed")

@@ -80,4 +80,33 @@ class OtherProfilesTest {
         assertFalse(g.keep("10-01 06:22:16.958  1000  3288  3288 I MultiUserInstallPolicy: Set package state for userId: 11"))
         assertFalse(g.keep("10-01 06:22:38.942  1000  3288  3928 I am_uid_running: 1110309"))
     }
+
+    /**
+     * The system names an app opened in Secure Folder by its window too, with no user in the line: what the user opened
+     * there would show in an export. Events that start with the user, and the windows of apps seen opening for another
+     * user, are left out; the same app opened for you stays in.
+     */
+    @Test
+    fun appsOpenedInSecureFolderAreNotNamedByTheirWindows() {
+        val f = OtherProfiles(0)
+        val secure = listOf(
+            "10-30 10:40:01.100  1000  3777  3901 I wm_create_activity: [150,61234567,812,com.secret.app/.MainActivity,android.intent.action.MAIN,NULL,NULL,270532608]",
+            "10-30 10:40:01.300  1000  3777  3901 I wm_activity_launch_time: [150,61234567,com.secret.app/.MainActivity,412]",
+            "10-30 10:40:01.310  1000  3777  3901 I wm_task_to_front: [150,812,0]",
+            "10-30 10:40:01.320  1000  3777  3901 I wm_focused_root_task: [150,0,812,1,bringingFoundTaskToFront]",
+            "10-30 10:40:01.330  1000  3777  3901 I am_foreground_service_start: [150,com.secret.app/.SyncService,1,1,com.secret.app,4,0,0,1,0]",
+            "10-30 10:40:01.400  1000  3777  5336 I input_focus: [Focus entering 4b1f3a com.secret.app/com.secret.app.MainActivity (server),reason=Window became focusable]",
+            "10-30 10:40:01.410  1000  3777  5336 I InputDispatcher: Focus entered window (0): 4b1f3a com.secret.app/com.secret.app.MainActivity",
+        )
+        val mine = listOf(
+            "10-30 10:41:00.000  1000  3777  3901 I wm_create_activity: [0,7654321,813,com.galaxy.steward/.MainActivity,android.intent.action.MAIN,NULL,NULL,270532608]",
+            "10-30 10:41:00.100  1000  3777  5336 I input_focus: [Focus entering 9c2d1e com.galaxy.steward/com.galaxy.steward.MainActivity (server),reason=Window became focusable]",
+            "10-30 10:41:00.200  1000  3777  3901 I wm_task_moved: [813,812,0,1,2]",
+            // An app that is opened for you as well isn't hidden from then on.
+            "10-30 10:42:00.000  1000  3777  3901 I wm_create_activity: [0,7654322,814,com.secret.app/.MainActivity,android.intent.action.MAIN,NULL,NULL,270532608]",
+            "10-30 10:42:00.100  1000  3777  5336 I input_focus: [Focus entering 77aa11 com.secret.app/com.secret.app.MainActivity (server),reason=Window became focusable]",
+        )
+        secure.forEach { assertFalse(it, f.keep(it)) }
+        mine.forEach { assertTrue(it, f.keep(it)) }
+    }
 }

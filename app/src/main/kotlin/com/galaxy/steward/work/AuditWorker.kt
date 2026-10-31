@@ -96,8 +96,10 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         upkeep?.takeIf { it.changedAnything }?.let { s ->
             notify(
                 app,
-                "Weekly upkeep: ${(s.bytesQuarantined + s.bytesFreed).humanBytes()} cleared",
-                "${(s.quarantined + s.removedDirs).plural("item")} to the quarantine for ${settings.quarantineRetentionDays} days",
+                // Quarantined bytes are freed only when the quarantine is emptied, and empty folders aren't quarantined.
+                "Weekly upkeep: ${s.quarantined.plural("item")} to the quarantine (${s.bytesQuarantined.humanBytes()})" +
+                    (if (s.bytesFreed > 0) ", ${s.bytesFreed.humanBytes()} freed" else ""),
+                "Kept for ${settings.quarantineRetentionDays} days" + (if (s.removedDirs > 0) "; ${s.removedDirs.plural("empty folder")} removed" else ""),
                 "Temp files, old logs and empty folders the rules tick. Undo it in History.",
             )
             return Result.success()

@@ -532,7 +532,14 @@ class AppsController(
 
     /** Undo for an app-folder run: quarantined OBBs and leftovers go back (through Shizuku when needed). */
     suspend fun rollback(runId: String, progress: (Int, Int, String) -> Unit): RollbackSummary {
-        val entries = journals.entries(runId)
+        val summary = rollbackEntries(journals.entries(runId), progress)
+        // Undone once nothing is left in the quarantine, like any other run (RollbackEngine.rollback).
+        if (summary.remaining == 0) journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
+        return summary
+    }
+
+    /** Reverts [entries], through Shizuku when they reach into Android/data or obb. */
+    suspend fun rollbackEntries(entries: List<JournalEntry>, progress: (Int, Int, String) -> Unit): RollbackSummary {
         val root = StorageAccess.rootPath
         val restricted = entries.any { e ->
             val rel = e.a.removePrefix("$root/")
@@ -547,8 +554,6 @@ class AppsController(
                 RollbackEngine(root, null).rollbackEntries(entries) { d, t, c -> progress(d, t, c) }
             }
         }
-        // Undone once nothing is left in the quarantine, like any other run (RollbackEngine.rollback).
-        if (summary.remaining == 0) journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
         return summary
     }
 

@@ -118,6 +118,10 @@ fun OptimizeScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 list.filter { it.kind == OptimizeKind.REPAIR_DATE_FOLDERS }.takeIf { it.isNotEmpty() }?.let { r ->
                     "${r.sumOf { it.fileCount }} source files moved out of date folders, back into their packages"
                 },
+                list.count { it.kind == OptimizeKind.PACK_COLD_FOLDER }.takeIf { it > 0 }?.let {
+                    "${it.plural("untouched folder", "untouched folders")} packed into zips; the folders go to the quarantine, " +
+                        "and are deleted for good when it is emptied"
+                },
             ),
             confirmLabel = "Apply",
             onConfirm = {
