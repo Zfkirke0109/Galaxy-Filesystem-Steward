@@ -53,14 +53,44 @@ no automated test could reproduce the trigger here), **DOCUMENTED** (left as is,
 | Release | CI actions are pinned by tag, not by commit SHA, while the release key is present | Medium (supply chain) | DOCUMENTED | none |
 | Release | verify-apk.sh didn't check 16 KB alignment or that the Termux script survives shrinking | Low-medium | FIXED | run on the 1.2.13 APK |
 
+## Second review of the diff
+
+A reviewer who hadn't written the changes read `git diff 2cc31a9..HEAD` and found 10 problems, most of them in
+this session's new code:
+
+| Finding | Severity | Status | Test |
+|---|---|---|---|
+| Put back judged app folders from the app, which can't see other apps' `Android/data` and `obb` on Android 11+, so it renamed a package folder to "<pkg> (restored)"; and quarantine contents went through the shell helper, which any app able to write the quarantine could use to write into app folders | High | FIXED: Put back restores shared storage only; app-folder items stay in the quarantine and the outcome says so | `OrphanQuarantineTest` (red) |
+| App-folder runs through the helper kept going after a journal write failed | Medium | FIXED: the item goes back and the run stops | `AppFolderJournalTest` (red) |
+| `redact` left most of a name with a quote or bracket (`Sam's results (1).pdf`) | Medium (privacy) | FIXED | `StewardLogTest` (red) |
+| A kept copy moved later in the same run lost its protection | Low | FIXED | `KeptCopyTest.aKeptCopyIsFollowedWhenTheSameRunMovesIt` (red) |
+| A zip whose journal line failed stayed and blocked later packs; a failed move-back was silent | Low | FIXED (inspection): the zip is removed, and the stopped run names the stuck item | none |
+| Apps opened in Secure Folder are learned only from the point they appear (one pass); the app's own package could be learned | Low | PARTLY FIXED: the app's own package is never learned. Two passes over the log are DOCUMENTED | none |
+| A Termux results file written after its call timed out waited a day to go | Low | FIXED (inspection): files older than the longest call (65 min) go | none |
+| A repeated Undo replays the whole journal | Low | DOCUMENTED | none |
+| The upkeep notice could read "0 items to the quarantine" | Cosmetic | FIXED | none |
+
+Also checked and found correct:
+- compatibility with a helper from an older version;
+- restore never overwrites and never leaves the storage root;
+- the `remaining` count and the Undo mark;
+- purge accounting;
+- the single-flight Shizuku bind and its timeout;
+- the Termux nonce;
+- the report counts;
+- the new counters;
+- the exception catches;
+- saving the hash cache.
+
 ## Verification
 
 All commands ran in a fresh build container. JDK 21; Gradle 8.14.3; AGP 8.13.2; SDK platform 36 and build-tools 36.0.0.
 Maven Central rate-limited the container (HTTP 429), so a local-only Gradle init script used Google's mirror of Central.
 The repository is unchanged by that.
 
-- `./gradlew :core:test :app:testDebugUnitTest`: BUILD SUCCESSFUL, 147 tests, 0 failures, 0 skipped. That is core 137 and app 10; the baseline had 136. Tests marked "red" above were run against the old code first and failed there. The others cover behavior the old code didn't have at all: new counters, report lines and put-back.
+- `./gradlew :core:test --rerun :app:testDebugUnitTest --rerun` at the final code: BUILD SUCCESSFUL, 149 tests, 0 failures, 0 skipped. That is core 139 and app 10; the baseline had 136. Tests marked "red" above were run against the old code first and failed there. The others cover behavior the old code didn't have at all: new counters, report lines and put-back.
 - `./gradlew :app:lintDebug`: BUILD SUCCESSFUL.
+- GitHub Actions on the pushed branch: the build job passed (tests, lint, release build, `verify-apk.sh`).
 - `shellcheck -S warning`:
   - `scripts/ci/verify-apk.sh` and `scripts/setup-signing.sh`: clean.
   - `termux-steward.sh`: the same 3 findings as on the baseline, none new.
