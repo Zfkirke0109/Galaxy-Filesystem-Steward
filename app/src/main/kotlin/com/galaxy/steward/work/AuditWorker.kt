@@ -14,6 +14,7 @@ import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.galaxy.steward.R
@@ -38,12 +39,14 @@ import com.galaxy.steward.diagnostics.StewardLog
 import com.galaxy.steward.ui.MainActivity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.TimeUnit
 
 /**
@@ -71,8 +74,10 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         }
 
         val started = SystemClock.uptimeMillis()
+        // The tree of the app's last scan, when it is still open: unchanged code folders needn't be listed again.
+        val previous = app.session.state.value.report?.tree
         val report = coroutineScope {
-            val scan = async(Dispatchers.IO) { Steward(root, settings, app.environment, app.hashCacheFile, app.memory).scan(StorageAccess.space()) }
+            val scan = async(Dispatchers.IO) { Steward(root, settings, app.environment, app.hashCacheFile, app.memory).scan(StorageAccess.space(), previous) }
             val yieldToYou = launch {
                 app.session.state.first { it.scanning || it.applying != null }
                 scan.cancel()
@@ -80,7 +85,11 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             try {
                 scan.await()
             } catch (e: CancellationException) {
-                if (!isActive) throw e // the worker itself was stopped
+                if (!isActive) {
+                    // The worker itself was stopped: say why, or a survey that never finishes leaves no trace.
+                    StewardLog.i("weekly audit stopped by Android after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${stopReasonText()}")
+                    throw e
+                }
                 null
             } finally {
                 yieldToYou.cancel()
@@ -138,8 +147,18 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
                 .execute("Weekly upkeep", "upkeep", items)
         }
         StewardLog.i(RunLog.applied("Weekly upkeep", "upkeep", summary, SystemClock.uptimeMillis() - started))
-        withContext(Dispatchers.IO) { StorageAccess.rescan(app, summary.changedPaths) }
+        // Even if Android stops the worker now: the gallery would go on listing what moved into the quarantine.
+        withContext(NonCancellable + Dispatchers.IO) { withTimeoutOrNull(60_000) { StorageAccess.rescan(app, summary.changedPaths) } }
         return summary
+    }
+
+    private fun stopReasonText(): String = when (stopReason) {
+        WorkInfo.STOP_REASON_TIMEOUT -> "it ran into the time limit for background work"
+        WorkInfo.STOP_REASON_CONSTRAINT_CHARGING -> "the phone was unplugged"
+        WorkInfo.STOP_REASON_CONSTRAINT_BATTERY_NOT_LOW -> "the battery got low"
+        WorkInfo.STOP_REASON_CONSTRAINT_DEVICE_IDLE -> "the phone was used"
+        WorkInfo.STOP_REASON_USER -> "it was stopped from settings"
+        else -> "reason $stopReason"
     }
 
     private fun notify(context: Context, title: String, text: String, footer: String = "Nothing was changed - open the app to review.") {
@@ -182,10 +201,14 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
                     Constraints.Builder()
                         .setRequiresCharging(true)
                         .setRequiresBatteryNotLow(true)
+                        // While nobody uses the phone (overnight on the charger): the survey doesn't compete with you,
+                        // and you starting something doesn't keep stopping it at the 10-minute limit's edge.
+                        .setRequiresDeviceIdle(true)
                         .build(),
                 )
                 .build()
-            wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, request)
+            // UPDATE keeps an existing schedule's timing but gives it these constraints.
+            wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
         }
     }
 }

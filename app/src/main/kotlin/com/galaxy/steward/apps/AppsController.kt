@@ -248,7 +248,8 @@ class AppsController(
         val targets = packages.filterNot { AppPolicy.isProtected(it, ownPackage) }.distinct()
         val helper = shizuku.helper()
         val runId = journals.newId()
-        val labels = targets.associateWith { AppStorage.label(context, it) }
+        // Off the main thread (runs start there): a label is a binder call and a resource load, per app.
+        val labels = withContext(Dispatchers.IO) { targets.associateWith { AppStorage.label(context, it) } }
         val verified = LinkedHashMap<String, Long>()
         withContext(Dispatchers.IO) {
             JournalWriter(journals.fileFor(runId)).use { journal ->
@@ -305,12 +306,14 @@ class AppsController(
      */
     suspend fun clearData(packages: List<String>, progress: (Int, Int, String) -> Unit): DataClearResult {
         val requested = packages.distinct()
-        val blocked = requested.associateWith { AppPolicy.clearDataBlock(it, ownPackage, AppStorage.isSystem(context, it)) }
-            .filterValues { it != null }
+        // Off the main thread (runs start there): isSystem and a label are binder calls, and a label loads resources.
+        val (blocked, labels) = withContext(Dispatchers.IO) {
+            requested.associateWith { AppPolicy.clearDataBlock(it, ownPackage, AppStorage.isSystem(context, it)) }.filterValues { it != null } to
+                requested.associateWith { AppStorage.label(context, it) }
+        }
         val targets = requested.filterNot { it in blocked }
         val helper = shizuku.helper()
         val runId = journals.newId()
-        val labels = requested.associateWith { AppStorage.label(context, it) }
         val verified = LinkedHashMap<String, Long>()
         val unchanged = ArrayList<String>()
         val refused = blocked.map { (pkg, why) -> "${labels.getValue(pkg)}: $why" }.toMutableList()

@@ -35,11 +35,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.ui.components.IconBadge
+import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 
 @Composable
 fun PermissionScreen(onLegacyResult: () -> Unit) {
     val context = LocalContext.current
-    val legacyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { onLegacyResult() }
+    val legacyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        onLegacyResult()
+        // Android 8-10, after "Don't ask again": the button would do nothing ever again, so App info opens instead.
+        openSettingsIfDeniedForGood(context, result.keys, result.values.all { it })
+    }
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),

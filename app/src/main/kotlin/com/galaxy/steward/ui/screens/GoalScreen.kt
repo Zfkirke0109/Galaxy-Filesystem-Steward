@@ -74,7 +74,10 @@ fun GoalScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
     var gib by rememberSaveable { mutableIntStateOf(2) }
     var review by rememberSaveable { mutableStateOf(false) }
     var freeNow by rememberSaveable { mutableStateOf(false) }
-    var leaveOut by remember { mutableStateOf(setOf<String>()) }
+    // Saved like the rest: kept only in memory, what you unticked came back ticked after a rotation, while "free now"
+    // stayed on, and the confirm dialog shows only counts.
+    var leaveOutIds by rememberSaveable { mutableStateOf(listOf<String>()) }
+    val leaveOut = leaveOutIds.toSet()
     var confirm by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf<List<StoragePoint>>(emptyList()) }
     LaunchedEffect(state.report) { history = vm.storageHistory() }
@@ -177,7 +180,7 @@ fun GoalScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                     ReviewCard {
                         SelectRow(
                             checked = pick.id !in leaveOut,
-                            onCheckedChange = { leaveOut = if (pick.id in leaveOut) leaveOut - pick.id else leaveOut + pick.id },
+                            onCheckedChange = { leaveOutIds = if (pick.id in leaveOut) leaveOutIds - pick.id else leaveOutIds + pick.id },
                             title = pick.title,
                             subtitle = describe(pick, vm.rootPath, termuxState.report?.home, termuxState.report?.prefix),
                             trailing = { SizeText(pick.bytes) },
@@ -212,7 +215,7 @@ fun GoalScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
             onConfirm = {
                 confirm = false
                 vm.reachGoal(plan, freeNow)
-                leaveOut = emptySet()
+                leaveOutIds = emptyList()
             },
             onDismiss = { confirm = false },
             footnote = "Every change in shared storage is checked and journaled" +

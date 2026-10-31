@@ -6,7 +6,6 @@ import com.galaxy.steward.core.termux.TermuxScript
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 
@@ -19,7 +18,7 @@ class NearCopyTest {
         } catch (_: Exception) {
             false
         }
-        assumeTrue(bash)
+        requireTool("bash is needed to compare with the Termux script", bash)
         val program = TermuxScript.text.substringAfter("SKETCH_AWK='").substringBefore("'\n\n")
         val lines = listOf("sources/com/a/B.java\t1234", "Übung/файл.txt\t5", "x\t0", "deep/" + "n".repeat(300) + "\t99999999999")
         val input = File.createTempFile("sketch", ".txt").apply { writeText(lines.joinToString("\n", postfix = "\n")) }

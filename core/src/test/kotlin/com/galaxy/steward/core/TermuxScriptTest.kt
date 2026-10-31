@@ -10,7 +10,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -51,7 +50,7 @@ class TermuxScriptTest {
 
     @Before
     fun setUp() {
-        assumeTrue("bash and git are needed to run the Termux helper", haveTool("bash") && haveTool("git"))
+        requireTool("bash and git are needed to run the Termux helper", haveTool("bash") && haveTool("git"))
         fixture = Files.createTempDirectory("termux-fixture").toFile().canonicalFile
         outside = Files.createTempDirectory("termux-outside").toFile().canonicalFile
         File(fixture, ".steward-termux-fixture").writeText("DISPOSABLE-FIXTURE\n")
@@ -114,9 +113,8 @@ class TermuxScriptTest {
             put("PREFIX", prefixDir.path)
             put("STEWARD_TERMUX_FIXTURE", "1")
         }
-        val p = pb.start()
-        val stdout = p.inputStream.readBytes().decodeToString()
-        assertTrue(p.waitFor(120, TimeUnit.SECONDS))
+        val (done, stdout) = runBounded(pb, 120)
+        assertTrue("the Termux helper didn't finish in 120 s:\n$stdout", done)
         // The full report goes to the --out file; stdout only names it.
         return if (out.isFile && out.length() > 0) out.readText() else stdout
     }

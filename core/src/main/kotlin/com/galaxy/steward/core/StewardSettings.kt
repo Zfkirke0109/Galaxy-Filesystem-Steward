@@ -61,6 +61,12 @@ interface DeviceEnvironment {
     /** Installed version code of [packageName], or null when the package is not installed. */
     fun installedVersionCode(packageName: String): Long? = null
 
+    /**
+     * Whether the phone knows [packageName] at all: installed, or archived (Android 15's archived apps keep their data
+     * and their icon, but answer no version code). An app it knows hasn't left anything behind.
+     */
+    fun isKnownPackage(packageName: String): Boolean = installedVersionCode(packageName) != null
+
     /** Package metadata parsed from an APK file, or null when it cannot be parsed. */
     fun apkInfo(path: String): ApkInfo? = null
 

@@ -723,6 +723,16 @@ object TermuxProtocol {
         return TermuxCleanSummary(results)
     }
 
+    /**
+     * The result that says [folder] (in shared storage) moved into Termux, if Termux's answer says exactly that: from
+     * that folder, to ~/projects/<its name>, where the script puts it. Anything else isn't journaled, since History's
+     * "move back" would hand it to the script again (a results file other apps could write to named some other folder).
+     */
+    fun relocated(folder: String, summary: TermuxCleanSummary): TermuxCleanResult? =
+        summary.results.firstOrNull { r ->
+            r.status == "MOVED" && r.path == folder && r.note == "${TermuxScript.HOME}/projects/${folder.substringAfterLast('/')}"
+        }
+
     /** "~/.cache/huggingface" or "$PREFIX/var/..." style display paths. */
     fun relative(path: String, home: String, prefix: String): String = when {
         home.isNotEmpty() && path.startsWith("$home/") -> "~/" + path.removePrefix("$home/")

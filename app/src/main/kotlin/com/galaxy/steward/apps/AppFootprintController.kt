@@ -72,7 +72,10 @@ class AppFootprintController(
     private fun removedApps(): List<FootprintApp> {
         val pm = context.packageManager
         val out = LinkedHashMap<String, FootprintApp>()
-        fun installed(pkg: String) = try {
+        // Archived apps (Android 15+) aren't removed: they keep their data, their icon stays, and they come back with it.
+        // Looked up without the archived flag, they used to be offered as removed, their folders ticked for removal.
+        val known = AppStorage.knownPackages(context)
+        fun installed(pkg: String) = pkg in known || try {
             pm.getApplicationInfo(pkg, 0)
             true
         } catch (_: PackageManager.NameNotFoundException) {

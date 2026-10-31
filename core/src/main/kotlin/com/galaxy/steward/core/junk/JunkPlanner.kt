@@ -270,7 +270,8 @@ class JunkPlanner(
         for (d in root.dirs) {
             if (d.name in SafetyPolicy.STANDARD_TOP_DIRS || d.hidden || !packageName.matches(d.name)) continue
             if (d.zone != Zone.OTHER_SHARED || d.subtreeHas(NodeFlags.SUBTREE_BLOCKERS) || d.totalFiles == 0) continue
-            if (environment.installedVersionCode(d.name) == null) {
+            // Archived apps (Android 15+) aren't gone: they keep their data and come back with it.
+            if (!environment.isKnownPackage(d.name)) {
                 add(JunkCategory.ORPHANED_APP_FOLDERS, d.path, true, d.totalBytes, d.mtime, "${d.name} is not installed")
             }
         }

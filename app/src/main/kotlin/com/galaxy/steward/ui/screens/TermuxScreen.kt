@@ -64,6 +64,7 @@ import com.galaxy.steward.ui.components.IrreversibleDialog
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.SelectRow
+import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 import com.galaxy.steward.ui.components.toggleState
 
 /** Termux's private home: package caches, developer caches, proot distros and build outputs. */
@@ -78,7 +79,10 @@ fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () ->
     var confirm by remember { mutableStateOf<List<TermuxItem>?>(null) }
     var removeDistro by remember { mutableStateOf<TermuxRootfs?>(null) }
     val context = LocalContext.current
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.termux.refresh() }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.termux.refresh()
+        openSettingsIfDeniedForGood(context, listOf(TermuxBridge.PERMISSION), granted)
+    }
 
     LifecycleResumeEffect(Unit) {
         vm.termux.refresh()

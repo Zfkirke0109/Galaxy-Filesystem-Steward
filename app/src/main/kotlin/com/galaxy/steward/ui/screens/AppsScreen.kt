@@ -55,6 +55,7 @@ import com.galaxy.steward.ui.components.InlineNotice
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.UsageBar
+import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 import kotlinx.coroutines.launch
 
 /** Everything apps keep outside your own folders: per-app storage, Android/data|obb|media and Termux. */
@@ -65,7 +66,10 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
     val termux by vm.termux.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val termuxPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.termux.refresh() }
+    val termuxPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.termux.refresh()
+        openSettingsIfDeniedForGood(context, listOf(TermuxBridge.PERMISSION), granted)
+    }
 
     LifecycleResumeEffect(Unit) {
         vm.apps.refreshAccess()

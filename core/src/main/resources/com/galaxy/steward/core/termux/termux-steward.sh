@@ -905,6 +905,9 @@ prefix_leftovers() {
 #  - what you listed in ~/.config/galaxy-steward/keep (one path per line; "Always keep" in the app adds to it).
 # KEPT: path -> why. KEPT_CMDS: command -> why; the packages that provide those commands stay installed.
 declare -A KEPT=() KEPT_CMDS=()
+# What you listed yourself in the keep file, as resolved paths: honoured even by the clean-ups that go by age alone.
+CHOSEN="you chose to keep it"
+declare -a CHOSEN_PATHS=()
 KEEP_LOADED=""
 KEEP_FILE="$HOME/.config/galaxy-steward/keep"
 KEEP_NAMES='layla|sidekick|relay|mini-?apps?'
@@ -1186,7 +1189,9 @@ keep_listed() {
     line="${line%$'\r'}"
     # shellcheck disable=SC2088 # a literal "~/" as the list says it
     case "$line" in ''|'#'*) continue ;; "~/"*) line="$HOME/${line#"~/"}" ;; esac
-    keep_add "$line" "you chose to keep it" exact
+    keep_add "$line" "$CHOSEN" exact
+    has_controls "$line" && continue
+    line="$(realpath -m -s -- "$line" 2>/dev/null)" && [ -n "$line" ] && CHOSEN_PATHS+=("$line")
   done < "$KEEP_FILE"
 }
 
@@ -1237,6 +1242,24 @@ kept_why() {
       ;;
   esac
   return 1
+}
+
+# Why P has to stay because you chose to keep it, it, something around it or something in it; fails when nothing you
+# listed is involved. The clean-ups that go by age alone (KEEP_EXEMPT) ignore what the steward infers, never this.
+chosen_why() {
+  local p="$1" k
+  [ "${#CHOSEN_PATHS[@]}" -gt 0 ] || return 1
+  for k in "${CHOSEN_PATHS[@]}"; do
+    case "$p" in "$k"|"$k"/*) printf '%s: %s' "${k/#"$HOME"/\~}" "$CHOSEN"; return 0 ;; esac
+    case "$k" in "$p"/*) printf '%s: %s' "${k/#"$HOME"/\~}" "$CHOSEN"; return 0 ;; esac
+  done
+  return 1
+}
+
+# True when P may go as far as your keep list is concerned.
+not_chosen() {
+  [ "${#CHOSEN_PATHS[@]}" -eq 0 ] && return 0
+  ! chosen_why "$1" > /dev/null
 }
 
 # Packages the kept things run with: those that put a kept command in $PREFIX/bin or installed a kept path, to why.
@@ -1516,63 +1539,69 @@ clear_path() {
   case "$mode" in
     debs)
       while IFS= read -r -d '' f; do
-        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && rm -f -- "$f"
+        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && not_chosen "$f" && rm -f -- "$f"
       done < <(find "$p" -xdev -mindepth 1 -maxdepth 1 -type f -name '*.deb' -print0 2>/dev/null)
       ;;
     aptbin)
       for f in "$p/pkgcache.bin" "$p/srcpkgcache.bin"; do
-        file_beneath "$f" "$root" && rm -f -- "$f"
+        file_beneath "$f" "$root" && not_chosen "$f" && rm -f -- "$f"
       done
       ;;
     old)
       while IFS= read -r -d '' f; do
-        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && rm -f -- "$f"
+        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && not_chosen "$f" && rm -f -- "$f"
       done < <(find "$p" -xdev -type f -mtime +7 -print0 2>/dev/null)
       while IFS= read -r -d '' d; do
-        dir_beneath "$d" "$p" && rmdir -- "$d" 2>/dev/null
+        dir_beneath "$d" "$p" && not_chosen "$d" && rmdir -- "$d" 2>/dev/null
       done < <(find "$p" -xdev -mindepth 1 -depth -type d -empty -mtime +7 -print0 2>/dev/null)
       ;;
     oldlog)
       while IFS= read -r -d '' f; do
-        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && rm -f -- "$f"
+        dir_beneath "$p" "$root" && file_beneath "$f" "$p" && not_chosen "$f" && rm -f -- "$f"
       done < <(find "$p" -xdev -type f -name '*.log' -mtime +7 -print0 2>/dev/null)
       ;;
     pycache)
       while IFS= read -r -d '' d; do
-        [ "${d##*/}" = __pycache__ ] && dir_beneath "$d" "$p" && rm -rf -- "$d"
+        [ "${d##*/}" = __pycache__ ] && dir_beneath "$d" "$p" && not_chosen "$d" && rm -rf -- "$d"
       done < <(pycache_dirs "$p")
       ;;
     oldversions|oldversions-unsure)
       dir_beneath "$p" "$root" || return 1
       while IFS= read -r -d '' e; do
-        beneath "$e" "$p" && rm -rf -- "$e"
+        beneath "$e" "$p" && not_chosen "$e" && rm -rf -- "$e"
       done < <(if [ "$mode" = oldversions ]; then old_versions "$p"; else old_versions "$p" unsure; fi)
       ;;
     oldgradle)
       dir_beneath "$p" "$root" || return 1
       while IFS= read -r -d '' e; do
-        beneath "$e" "$p" && rm -rf -- "$e"
+        beneath "$e" "$p" && not_chosen "$e" && rm -rf -- "$e"
       done < <(old_gradle_dists "$p")
       ;;
     gomod)
       # Everything but the download cache, which has its own target; Go makes it read-only.
       dir_beneath "$p" "$root" || return 1
       while IFS= read -r -d '' e; do
-        beneath "$e" "$p" && chmod -R u+w -- "$e" 2>/dev/null && rm -rf -- "$e"
+        beneath "$e" "$p" && not_chosen "$e" && chmod -R u+w -- "$e" 2>/dev/null && rm -rf -- "$e"
       done < <(find "$p" -xdev -mindepth 1 -maxdepth 1 ! -name cache -print0 2>/dev/null)
       ;;
     contents|contents-rw)
       dir_beneath "$p" "$root" || return 1
       # Go makes its module cache read-only; make it writable again before removing it.
       [ "$mode" = contents-rw ] && chmod -R u+w -- "$p" 2>/dev/null
-      dir_beneath "$p" "$root" && find "$p" -xdev -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null
+      if [ "${#CHOSEN_PATHS[@]}" -eq 0 ]; then
+        dir_beneath "$p" "$root" && find "$p" -xdev -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null
+      else
+        while IFS= read -r -d '' e; do
+          dir_beneath "$p" "$root" && not_chosen "$e" && rm -rf -- "$e" 2>/dev/null
+        done < <(find "$p" -xdev -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+      fi
       ;;
   esac
   return 0
 }
 
 clean_one() {
-  local spec="$1" id p info root mode before after repo r suffix why
+  local spec="$1" id p info root mode before after repo r suffix why k
   id="${spec%%=*}"
   p=""
   [ "$id" != "$spec" ] && p="${spec#*=}"
@@ -1580,7 +1609,16 @@ clean_one() {
   # What only goes by age, or is rebuilt on the next run, can't break what is kept; anything else that would touch a
   # kept path stays.
   case "$id" in
-    pycache|proot-tmp|termux-tmp|var-tmp|termux-var-log|npm-logs|gradle-daemon-logs|apt-archives|apt-pkgcache|claude-versions|claude-versions-unsure|app-logs) ;;
+    pycache|proot-tmp|termux-tmp|var-tmp|termux-var-log|npm-logs|gradle-daemon-logs|apt-archives|apt-pkgcache|claude-versions|claude-versions-unsure|app-logs)
+      # What you listed yourself still stays: the folder as a whole when you kept it or a folder around it, and what you
+      # kept inside it, entry by entry (clear_path).
+      [ -n "$p" ] || { info="$(target_info "$id")" && p="${info%%|*}"; }
+      if [ -n "$p" ] && why="$(chosen_why "$p")"; then
+        for k in "${CHOSEN_PATHS[@]}"; do
+          case "$p" in "$k"|"$k"/*) result "$id" SKIP_KEPT 0 0 "$p" "${k/#"$HOME"/\~}: $CHOSEN"; return ;; esac
+        done
+      fi
+      ;;
     *)
       # Fixed targets name their folder in target_info; the others carry it.
       [ -n "$p" ] || { info="$(target_info "$id")" && p="${info%%|*}"; }
@@ -2077,10 +2115,13 @@ pkg_remove() {
 
 # Removes one proot distribution, the way proot-distro does, when it isn't running.
 distro_remove() {
-  local r="${1:-}" known="" c name="" before after
+  local r="${1:-}" known="" c name="" before after why
   emit V 1 "$HOME" "$PREFIX" 0
   while IFS= read -r -d '' c; do [ "$c" = "$r" ] && rootfs_allowed "$c" && known=1; done < <(list_rootfs)
   if [ -z "$known" ]; then result distro SKIP_UNSAFE 0 0 "$r" "not a known proot distribution"; finish ok; fi
+  # Like every other removal: not a distribution you chose to keep, or one something kept lives in.
+  load_keep
+  if why="$(kept_why "$r")"; then result distro SKIP_KEPT 0 0 "$r" "$why"; finish ok; fi
   if proot_running; then result distro SKIP_ACTIVE 0 0 "$r" "a proot distribution is running"; finish ok; fi
   before="$(size_now "$r")"
   case "$r" in
@@ -2340,7 +2381,8 @@ copy_verify_move() {
     rm -rf -- "$tmp" 2>/dev/null
     result move FAILED "$before" "$before" "$src" "the copy didn't match; nothing was moved"; return
   fi
-  mv -- "$tmp" "$dest" || { rm -rf -- "$tmp"; result move FAILED "$before" "$before" "$src" "couldn't name the copy"; return; }
+  # -T: a folder that appeared at DEST meanwhile makes this fail, instead of the copy landing inside it.
+  mv -T -- "$tmp" "$dest" || { rm -rf -- "$tmp"; result move FAILED "$before" "$before" "$src" "couldn't name the copy"; return; }
   rm -rf -- "$src" 2>/dev/null
   if [ -e "$src" ]; then result move PARTIAL "$before" "$before" "$src" "$dest"
   else result move MOVED "$before" 0 "$src" "$dest"; fi

@@ -86,11 +86,12 @@ fun HistoryScreen(vm: StewardViewModel, state: UiState) {
                     ReviewCard {
                         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text("From before a reinstall", style = MaterialTheme.typography.titleMedium)
+                                Text("Not in any journal", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    "${state.orphanBytes.humanBytes()} in the quarantine from runs this install has no journal of, so " +
-                                        "they can't be undone here. Your files can still go back where they were, beside anything " +
-                                        "that has their name now; what came from app folders stays. They are never emptied on their own.",
+                                    "${state.orphanBytes.humanBytes()} in the quarantine that no journal of this install records: from " +
+                                        "before a reinstall, or a run Android stopped mid-step. Undo can't reach them, but your files can " +
+                                        "still go back where they were, beside anything that has their name now; what came from app " +
+                                        "folders stays. They are never emptied on their own.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

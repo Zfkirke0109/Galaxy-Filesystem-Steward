@@ -1,12 +1,13 @@
 package com.galaxy.steward.core
 
+import com.galaxy.steward.core.termux.TermuxCleanResult
+import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.core.termux.TermuxScript
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -46,7 +47,7 @@ class TermuxManageTest {
 
     @Before
     fun setUp() {
-        assumeTrue("bash is needed to run the Termux helper", haveBash())
+        requireTool("bash is needed to run the Termux helper", haveBash())
         fixture = Files.createTempDirectory("termux-manage").toFile().canonicalFile
         File(fixture, ".steward-termux-fixture").writeText("DISPOSABLE-FIXTURE\n")
         home.mkdirs()
@@ -153,9 +154,8 @@ class TermuxManageTest {
             put("PREFIX", prefix.path)
             put("STEWARD_TERMUX_FIXTURE", "1")
         }
-        val p = pb.start()
-        val stdout = p.inputStream.readBytes().decodeToString()
-        assertTrue(p.waitFor(120, TimeUnit.SECONDS))
+        val (done, stdout) = runBounded(pb, 120)
+        assertTrue("the Termux helper didn't finish in 120 s:\n$stdout", done)
         return if (out.isFile && out.length() > 0) out.readText() else stdout
     }
 
@@ -282,5 +282,16 @@ class TermuxManageTest {
         assertTrue(entries.getValue(File(home, "models").path).isDirectory)
         assertFalse(File(home, "models/small.bin").path in entries)
         assertEquals(listOf(big.path), report.children(File(home, "models").path).map { it.path })
+    }
+    /** Only an answer that names the folder asked for, moved to ~/projects/<its name>, is journaled for "move back". */
+    @Test
+    fun onlyTheRequestedMoveIsJournaled() {
+        val folder = "/storage/emulated/0/Download/tool"
+        fun summary(path: String, note: String) = TermuxCleanSummary(listOf(TermuxCleanResult("move", "MOVED", 10, 0, path, note)))
+        val home = TermuxScript.HOME
+        assertEquals(folder, TermuxProtocol.relocated(folder, summary(folder, "$home/projects/tool"))?.path)
+        assertEquals(null, TermuxProtocol.relocated(folder, summary(folder, "$home/projects/private")))
+        assertEquals(null, TermuxProtocol.relocated(folder, summary("/storage/emulated/0/Download/other", "$home/projects/tool")))
+        assertEquals(null, TermuxProtocol.relocated(folder, TermuxCleanSummary(listOf(TermuxCleanResult("move", "FAILED", 10, 10, folder, "")))))
     }
 }

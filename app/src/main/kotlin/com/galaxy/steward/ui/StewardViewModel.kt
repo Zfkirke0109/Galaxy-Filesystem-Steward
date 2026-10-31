@@ -87,7 +87,10 @@ data class UiState(
     val journals: List<JournalInfo> = emptyList(),
     val quarantineBytes: Long = 0,
     val quarantineByRun: Map<String, Long> = emptyMap(),
-    /** What runs from before a reinstall left in the quarantine, with no journal to undo them ([QuarantineManager.orphans]). */
+    /**
+     * What no journal of this install records in the quarantine: runs from before a reinstall ([QuarantineManager.orphans])
+     * and what a run Android stopped mid-step moved there without its line.
+     */
     val orphanBytes: Long = 0,
     val space: VolumeSpace? = null,
     /** The media index is being refreshed after a run (in the background; nothing waits on it). */
@@ -347,7 +350,6 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                             space = StorageAccess.space(),
                         )
                     }
-                    refreshHistory()
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
@@ -393,17 +395,17 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             StewardLog.i("undo \"$title\" started")
             try {
                 keepAlive(label) {
+                    val report = throttled { done, total, current ->
+                        _state.update { it.copy(applying = ApplyProgress(label, done, total, current)) }
+                        KeepAlive.update(app, label, current, done, total)
+                    }
                     val summary = withContext(Dispatchers.IO) {
-                        RollbackEngine(rootPath, app.journals).rollback(runId) { done, total, current ->
-                            _state.update { it.copy(applying = ApplyProgress(label, done, total, current)) }
-                            KeepAlive.update(app, label, current, done, total)
-                        }
+                        RollbackEngine(rootPath, app.journals).rollback(runId) { done, total, current -> report(done, total, current) }
                     }
                     StewardLog.i(RunLog.rolledBack(title, summary, SystemClock.uptimeMillis() - started))
                     // Undoing a run says its suggestions were wrong for you.
                     withContext(Dispatchers.IO) { app.decisions.undone(runId, System.currentTimeMillis()) }
                     _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
-                    refreshHistory()
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
@@ -436,13 +438,14 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             StewardLog.i("run \"$title\" started")
             try {
                 keepAlive(title) {
-                    val outcome = block { done, total, current ->
-                        _state.update { it.copy(applying = ApplyProgress(title, done, total, current, stoppable)) }
-                        KeepAlive.update(app, title, current, done, total)
-                    }
+                    val outcome = block(
+                        throttled { done, total, current ->
+                            _state.update { it.copy(applying = ApplyProgress(title, done, total, current, stoppable)) }
+                            KeepAlive.update(app, title, current, done, total)
+                        },
+                    )
                     StewardLog.i(outcomeLine(title, outcome, SystemClock.uptimeMillis() - started))
                     _state.update { it.copy(applying = null, outcome = outcome, space = StorageAccess.space()) }
-                    refreshHistory()
                     pendingReindex?.let {
                         pendingReindex = null
                         reindex(it)
@@ -457,6 +460,21 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 _state.update { it.copy(applying = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
                 refreshHistory()
+            }
+        }
+    }
+
+    /**
+     * [report] at most every 80 ms, and always for the last step: a big undo or app-folder run redrew the progress dialog
+     * and the notification for every file.
+     */
+    private fun throttled(report: (Int, Int, String) -> Unit): (Int, Int, String) -> Unit {
+        var last = 0L
+        return { done, total, current ->
+            val now = SystemClock.uptimeMillis()
+            if (now - last >= 80 || done >= total) {
+                last = now
+                report(done, total, current)
             }
         }
     }
@@ -818,16 +836,19 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * Puts back what runs from before a reinstall left in the quarantine: each item to its own path, or beside what
-     * has its name now, checked like any undo. What came from app folders stays ([QuarantineManager.orphanEntries]).
+     * Puts back what no journal of this install records: what runs from before a reinstall left in the quarantine, and
+     * what a run Android stopped mid-step moved there without its line. Each item goes to its own path, or beside what has
+     * its name now, checked like any undo. What came from app folders stays ([QuarantineManager.orphanEntries]).
      */
-    fun restoreOrphans() = launchRun("Putting back from before a reinstall", stoppable = false) { progress ->
+    fun restoreOrphans() = launchRun("Putting back what no journal records", stoppable = false) { progress ->
         val q = quarantine()
         val (summary, left) = withContext(Dispatchers.IO) {
             val runs = q.orphans()
-            val summary = RollbackEngine(rootPath, null).rollbackEntries(runs.flatMap { q.orphanEntries(it) }) { d, t, c -> progress(d, t, c) }
-            runs.forEach { q.pruneEmpty(it) }
-            summary to runs.sumOf { q.sizeOf(it) }
+            val interrupted = q.interruptedWithUnrecorded()
+            val entries = runs.flatMap { q.orphanEntries(it) } + interrupted.flatMap { q.unrecordedEntries(it) }
+            val summary = RollbackEngine(rootPath, null).rollbackEntries(entries) { d, t, c -> progress(d, t, c) }
+            (runs + interrupted).forEach { q.pruneEmpty(it) }
+            summary to (runs.sumOf { q.sizeOf(it) } + interrupted.sumOf { q.unrecordedBytes(it) })
         }
         reindexLater(summary.changedPaths)
         _state.update { it.copy(stale = true) }
@@ -836,19 +857,20 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             summary.remaining > 0 -> listOf("${left.humanBytes()} stays in the quarantine: what came from app folders, and what couldn't go back")
             else -> listOf("${left.humanBytes()} from app folders (Android/data, obb) stays in the quarantine")
         }
-        Outcome.RolledBack("Items from before a reinstall", summary.copy(messages = note + summary.messages))
+        Outcome.RolledBack("Items no journal records", summary.copy(messages = note + summary.messages))
     }
 
-    /** Empties one run's quarantine, or all of it when [runId] is null. */
-    fun purgeQuarantine(runId: String?) {
-        scope.launch {
-            val freed = withContext(Dispatchers.IO) {
-                val q = quarantine()
-                if (runId == null) q.purgeAll() else q.purge(runId)
-            }
-            _state.update { it.copy(outcome = Outcome.Purged(freed), space = StorageAccess.space()) }
-            refreshHistory()
+    /**
+     * Empties one run's quarantine, or all of it when [runId] is null: as the one run of the moment, so Undo can't work on
+     * a quarantine while it is being deleted, and a failure is shown instead of ending the app.
+     */
+    fun purgeQuarantine(runId: String?) = launchRun(if (runId == null) "Emptying the quarantine" else "Emptying a run's quarantine", stoppable = false) { progress ->
+        progress(0, 1, "")
+        val freed = withContext(Dispatchers.IO) {
+            val q = quarantine()
+            if (runId == null) q.purgeAll() else q.purge(runId)
         }
+        Outcome.Purged(freed)
     }
 
     fun dismissOutcome() = _state.update { it.copy(outcome = null) }
@@ -865,9 +887,17 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         } else {
             emptyMap()
         }
-        val orphans = if (byRun.isEmpty()) emptyList() else quarantine().orphans()
+        val q = if (byRun.isEmpty()) null else quarantine()
+        val orphans = q?.orphans().orEmpty()
+        // Runs Android stopped mid-step can hold something their journal doesn't record: offered with the orphans.
+        val unrecorded = q?.interruptedWithUnrecorded().orEmpty().sumOf { q!!.unrecordedBytes(it) }
         _state.update {
-            it.copy(journals = journals, quarantineByRun = byRun, quarantineBytes = byRun.values.sum(), orphanBytes = orphans.sumOf { id -> byRun[id] ?: 0L })
+            it.copy(
+                journals = journals,
+                quarantineByRun = byRun,
+                quarantineBytes = byRun.values.sum(),
+                orphanBytes = orphans.sumOf { id -> byRun[id] ?: 0L } + unrecorded,
+            )
         }
     }
 

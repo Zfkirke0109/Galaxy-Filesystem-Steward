@@ -1,5 +1,6 @@
 package com.galaxy.steward.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -74,6 +75,8 @@ fun AppLeftoversScreen(vm: StewardViewModel, onBack: () -> Unit) {
     }
     val target = state.target
     val picked = state.picked
+    // Back closes the open app first, like the top bar's arrow (predictive back pops the route otherwise).
+    BackHandler(enabled = target != null) { vm.footprint.close() }
 
     Scaffold(
         topBar = {

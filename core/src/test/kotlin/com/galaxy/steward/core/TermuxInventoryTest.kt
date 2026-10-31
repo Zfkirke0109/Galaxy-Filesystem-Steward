@@ -8,7 +8,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -61,7 +60,7 @@ class TermuxInventoryTest {
 
     @Before
     fun setUp() {
-        assumeTrue("bash is needed to run the Termux helper", works("bash", "--version"))
+        requireTool("bash is needed to run the Termux helper", works("bash", "--version"))
         fixture = Files.createTempDirectory("termux-inventory").toFile().canonicalFile
         File(fixture, ".steward-termux-fixture").writeText("DISPOSABLE-FIXTURE\n")
         home.mkdirs()
@@ -89,9 +88,8 @@ class TermuxInventoryTest {
             put("STEWARD_FIXTURE_MIN_KIB", "1024")
             putAll(env)
         }
-        val p = pb.start()
-        val stdout = p.inputStream.readBytes().decodeToString()
-        assertTrue(p.waitFor(180, TimeUnit.SECONDS))
+        val (done, stdout) = runBounded(pb, 180)
+        assertTrue("the Termux helper didn't finish in 180 s:\n$stdout", done)
         return if (out.isFile && out.length() > 0) out.readText() else stdout
     }
 
@@ -249,6 +247,31 @@ class TermuxInventoryTest {
         assertEquals("CLEARED", done.status)
         assertFalse(File(home, ".local/share/claude/versions/2.1.278").exists())
         assertTrue(File(home, ".local/share/claude/versions/2.1.280").exists())
+    }
+
+    /**
+     * What you chose to keep stays even in the clean-ups that go by age alone: they ignored the keep list, and an older
+     * Claude Code version you kept went with "clean claude-versions" (reproduced by the 1.2.14 review).
+     */
+    @Test
+    fun whatYouChoseToKeepSurvivesTheCleanUpsThatGoByAge() {
+        val kept = write(File(home, ".local/share/claude/versions/2.1.276"), 3 * mib / 2, 2).apply { setLastModified(1_699_900_000_000L) }
+        write(File(home, ".local/share/claude/versions/2.1.278"), 3 * mib / 2, 3).setLastModified(1_700_000_000_000L)
+        write(File(home, ".local/share/claude/versions/2.1.280"), 3 * mib / 2, 4).setLastModified(1_700_086_400_000L)
+        text(File(home, ".local/bin/claude"), "#!/bin/sh\nexec grun ~/.local/share/claude/versions/2.1.280 \"$@\"\n")
+        assertEquals("KEPT", TermuxProtocol.parseClean(run("keep", listOf(kept.path))).results.single().status)
+
+        val done = TermuxProtocol.parseClean(run("clean", listOf("claude-versions"))).results.single()
+        assertEquals("CLEARED", done.status)
+        assertTrue("the kept version went", kept.exists())
+        assertFalse(File(home, ".local/share/claude/versions/2.1.278").exists())
+        assertTrue(File(home, ".local/share/claude/versions/2.1.280").exists())
+
+        // Keeping the whole folder keeps the clean-up away from it.
+        assertEquals("KEPT", TermuxProtocol.parseClean(run("keep", listOf(File(home, ".local/share/claude/versions").path))).results.single().status)
+        write(File(home, ".local/share/claude/versions/2.1.279"), 3 * mib / 2, 5).setLastModified(1_700_050_000_000L)
+        assertEquals("SKIP_KEPT", TermuxProtocol.parseClean(run("clean", listOf("claude-versions"))).results.single().status)
+        assertTrue(File(home, ".local/share/claude/versions/2.1.279").exists())
     }
 
     @Test
@@ -648,7 +671,7 @@ class TermuxInventoryTest {
 
     @Test
     fun repositoriesSayWhenTheyWereUsedAndPackLosslessly() {
-        assumeTrue("git is needed", works("git", "--version"))
+        requireTool("git is needed", works("git", "--version"))
         val app = File(home, "code/app").apply { mkdirs() }
         git(app, "init", "-q")
         repeat(150) { text(File(app, "src/F$it.kt"), "val x$it = \"${"y".repeat(it * 20)}\"\n") }

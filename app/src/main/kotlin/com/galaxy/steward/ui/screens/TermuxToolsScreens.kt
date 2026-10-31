@@ -12,7 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.DriveFileMove
+import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -144,7 +144,7 @@ fun TermuxReposScreen(vm: StewardViewModel, onBack: () -> Unit) {
                     }
                 }
             } else if (!state.reposLoading && state.repos != null) {
-                item { EmptyState(Icons.Rounded.DriveFileMove, "No repositories", "Termux found no Git repositories it may look at.") }
+                item { EmptyState(Icons.AutoMirrored.Rounded.DriveFileMove, "No repositories", "Termux found no Git repositories it may look at.") }
             }
             items(repos, key = { it.path }) { r ->
                 val where = when {
@@ -271,7 +271,7 @@ fun TermuxProjectsScreen(vm: StewardViewModel, onBack: () -> Unit) {
         },
     ) { padding ->
         if (tree == null) {
-            EmptyState(Icons.Rounded.DriveFileMove, "Scan first", "The scan finds projects and decompiled apps in shared storage.", Modifier.padding(padding))
+            EmptyState(Icons.AutoMirrored.Rounded.DriveFileMove, "Scan first", "The scan finds projects and decompiled apps in shared storage.", Modifier.padding(padding))
             return@Scaffold
         }
         LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(vertical = 6.dp)) {

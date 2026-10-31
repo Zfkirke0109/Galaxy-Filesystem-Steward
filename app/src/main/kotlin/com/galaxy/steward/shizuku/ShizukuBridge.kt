@@ -115,7 +115,10 @@ class ShizukuBridge(
 
     fun requestPermission() {
         try {
-            if (Shizuku.pingBinder() && !Shizuku.isPreV11()) Shizuku.requestPermission(REQUEST_CODE)
+            if (Shizuku.pingBinder() && !Shizuku.isPreV11()) {
+                // Denied with "don't ask again": asking does nothing any more, but Shizuku's own app can still allow it.
+                if (Shizuku.shouldShowRequestPermissionRationale()) launchManager() else Shizuku.requestPermission(REQUEST_CODE)
+            }
         } catch (e: RuntimeException) {
             StewardLog.w("Shizuku could not ask for permission", e)
             refresh()
@@ -208,7 +211,12 @@ class ShizukuBridge(
     fun pipeOf(request: String): ParcelFileDescriptor {
         val (read, write) = ParcelFileDescriptor.createPipe()
         Thread {
-            ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(request.toByteArray()) }
+            // The helper may be gone or have closed its end (EPIPE): the call itself reports that. Uncaught here, the
+            // IOException ended the whole app.
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(request.toByteArray()) }
+            } catch (_: IOException) {
+            }
         }.apply { name = "steward-request" }.start()
         return read
     }

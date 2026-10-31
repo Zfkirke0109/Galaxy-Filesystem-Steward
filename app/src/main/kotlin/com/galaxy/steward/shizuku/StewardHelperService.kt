@@ -13,6 +13,7 @@ import com.galaxy.steward.core.device.ShellSpace
 import com.galaxy.steward.diagnostics.LogcatDump
 import kotlinx.coroutines.runBlocking
 import java.io.BufferedWriter
+import java.io.IOException
 import java.io.OutputStreamWriter
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
@@ -212,19 +213,26 @@ class StewardHelperService : IStewardHelper.Stub {
     private fun stream(producer: ((String) -> Unit) -> Unit): ParcelFileDescriptor {
         val (read, write) = ParcelFileDescriptor.createPipe()
         Thread {
-            BufferedWriter(OutputStreamWriter(ParcelFileDescriptor.AutoCloseOutputStream(write), Charsets.UTF_8)).use { out ->
-                try {
-                    producer { line ->
-                        out.write(line)
-                        out.write("\n")
-                        if (line.startsWith("J\t") || line.startsWith("P\t")) out.flush()
+            // The app may stop reading (it was closed, or gave up waiting): writes then fail with EPIPE. Uncaught, that
+            // ended the helper process and every other stream it was serving.
+            try {
+                BufferedWriter(OutputStreamWriter(ParcelFileDescriptor.AutoCloseOutputStream(write), Charsets.UTF_8)).use { out ->
+                    try {
+                        producer { line ->
+                            out.write(line)
+                            out.write("\n")
+                            if (line.startsWith("J\t") || line.startsWith("P\t")) out.flush()
+                        }
+                    } catch (e: Exception) {
+                        runCatching {
+                            out.write(AppDataWire.error(e.message ?: e.javaClass.simpleName))
+                            out.write("\n")
+                            out.write(AppDataWire.END)
+                            out.write("\n")
+                        }
                     }
-                } catch (e: Exception) {
-                    out.write(AppDataWire.error(e.message ?: e.javaClass.simpleName))
-                    out.write("\n")
-                    out.write(AppDataWire.END)
-                    out.write("\n")
                 }
+            } catch (_: IOException) {
             }
         }.apply { name = "steward-helper" }.start()
         return read

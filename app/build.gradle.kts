@@ -49,6 +49,12 @@ android {
     }
 
     buildTypes {
+        // A debug build installs beside the real app instead of over it: their keys differ, and Android only lets a build
+        // in over an app signed with another key by uninstalling it, which wipes History (every Undo), rules and choices.
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -79,6 +85,17 @@ android {
                 it.systemProperty("roborazzi.test.record", "true")
                 it.maxHeapSize = "3g"
             }
+        }
+    }
+}
+
+// A release without a version code would be 1 and could never update an install (Android refuses a lower code), and
+// getting it on would mean uninstalling, which wipes History. CI always passes one; so must a local release build.
+val versionCodeMissing = buildNumber == null
+tasks.matching { it.name == "packageRelease" }.configureEach {
+    doFirst {
+        if (versionCodeMissing) {
+            throw GradleException("Set the version code for a release build: -PgalaxySteward.versionCode=<n>, higher than the installed one")
         }
     }
 }

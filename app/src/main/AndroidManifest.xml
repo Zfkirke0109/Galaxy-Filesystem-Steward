@@ -22,6 +22,8 @@
     <!-- Keeps a scan or cleanup running when you switch apps (see KeepAliveService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keeps the CPU running while a run you started lasts, screen off or not (capped at two hours). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Per-app storage sizes (StorageStatsManager); granted in Settings, or through Shizuku with one tap. -->
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"

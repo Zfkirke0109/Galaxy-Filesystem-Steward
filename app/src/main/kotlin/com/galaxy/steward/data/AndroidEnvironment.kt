@@ -11,7 +11,7 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /** Device facts for the engine: a folder-safe model label and package-manager lookups. */
-class AndroidEnvironment(context: Context) : DeviceEnvironment {
+class AndroidEnvironment(private val context: Context) : DeviceEnvironment {
     private val pm: PackageManager = context.packageManager
 
     /** The app folder scan's big files, once the apps controller exists (set by [com.galaxy.steward.StewardApp]). */
@@ -33,6 +33,21 @@ class AndroidEnvironment(context: Context) : DeviceEnvironment {
         PackageInfoCompat.getLongVersionCode(pm.getPackageInfo(packageName, 0))
     } catch (_: PackageManager.NameNotFoundException) {
         null
+    }
+
+    /**
+     * Installed and archived packages, read once a minute at most: an archived app (Android 15+) answers no version code
+     * but keeps its data, so its folders aren't leftovers.
+     */
+    @Volatile
+    private var known: Pair<Long, Set<String>>? = null
+
+    override fun isKnownPackage(packageName: String): Boolean {
+        val now = System.currentTimeMillis()
+        val set = known?.takeIf { now - it.first < 60_000 }?.second
+            ?: com.galaxy.steward.apps.AppStorage.knownPackages(context).also { known = now to it }
+        // Empty when the list couldn't be read: then only an installed version counts, as before.
+        return packageName in set || installedVersionCode(packageName) != null
     }
 
     /**

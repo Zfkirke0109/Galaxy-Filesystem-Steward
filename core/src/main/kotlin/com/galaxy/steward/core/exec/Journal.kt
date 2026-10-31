@@ -191,12 +191,25 @@ class JournalStore(val directory: File) {
         JournalWriter(fileFor(id)).use { it.meta(key, value) }
     }
 
-    fun info(id: String): JournalInfo? = parse(fileFor(id))
+    fun info(id: String): JournalInfo? = cached(fileFor(id))
 
     fun list(): List<JournalInfo> =
         (directory.listFiles { f -> f.isFile && f.name.endsWith(".tsv") } ?: emptyArray())
-            .mapNotNull(::parse)
+            .mapNotNull(::cached)
             .sortedByDescending { it.startedAt }
+
+    /**
+     * Journals only ever grow, so one whose size and time are unchanged reads as before. History refreshes on every
+     * return to the app, and read every line of every journal each time (megabytes after a year of weekly upkeep).
+     */
+    private val parsed = java.util.concurrent.ConcurrentHashMap<String, Pair<Pair<Long, Long>, JournalInfo>>()
+
+    private fun cached(file: File): JournalInfo? {
+        if (!file.isFile) return null
+        val stamp = file.length() to file.lastModified()
+        parsed[file.name]?.takeIf { it.first == stamp }?.let { return it.second }
+        return parse(file)?.also { parsed[file.name] = stamp to it }
+    }
 
     private fun parse(file: File): JournalInfo? {
         if (!file.isFile) return null

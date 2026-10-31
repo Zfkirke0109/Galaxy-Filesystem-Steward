@@ -77,6 +77,8 @@ fun DuplicatesScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
 
     val files = remember(report, state.keepers) { report?.duplicates.orEmpty().map { vm.effective(it, state.keepers) as DuplicateGroup } }
+    // Once per scan, not on every progress update while a run is going (each group's kind is worked out from its name).
+    val kindsPresent = remember(files) { files.map { it.kind }.toSet().let { present -> FileKind.entries.filter { it in present } } }
     val folders = remember(report, state.keepers) { report?.folderDuplicates.orEmpty().map { vm.effective(it, state.keepers) as FolderDuplicateGroup } }
     val merges = report?.folderMerges.orEmpty()
     val selected = remember(files, folders, merges, state.selected) { (files + folders + merges).filter { it.id in state.selected } }
@@ -113,7 +115,7 @@ fun DuplicatesScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 0 -> {
                     Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(kindFilter == null, { kindFilter = null }, label = { Text("All") })
-                        FileKind.entries.filter { k -> files.any { it.kind == k } }.forEach { k ->
+                        kindsPresent.forEach { k ->
                             FilterChip(kindFilter == k.name, { kindFilter = if (kindFilter == k.name) null else k.name }, label = { Text(k.label) })
                         }
                     }

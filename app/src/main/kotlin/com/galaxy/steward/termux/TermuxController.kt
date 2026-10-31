@@ -339,7 +339,7 @@ class TermuxController(
             val moved = summary.results.filter { it.status == "MOVED" }.map { it.path }.toSet()
             s.copy(repos = s.repos?.filterNot { r -> moved.any { r.path == it || r.path.startsWith("$it/") } }, repoSelected = s.repoSelected - moved)
         }
-        summary.results.filter { it.status == "MOVED" }.forEach { r ->
+        TermuxProtocol.relocated(folder, summary)?.let { r ->
             val runId = journals.newId()
             withContext(Dispatchers.IO) {
                 JournalWriter(journals.fileFor(runId)).use { j ->
