@@ -1,6 +1,7 @@
 package com.galaxy.steward.core.exec
 
 import com.galaxy.steward.core.DAY_MS
+import com.galaxy.steward.core.SafetyPolicy
 import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -79,6 +80,10 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
      * item's path): an entry for every item whose path is free now, the folder's contents one level down where a
      * folder of that name exists again, and the item itself, to go beside it, where a file has its name. Fed to
      * [RollbackEngine.rollbackEntries], which checks every one again.
+     *
+     * Not what went there from Android/ (app folders) or the steward's own folder: this app can't see other apps'
+     * Android/data and obb folders, so it would misjudge which exist, and only the shell helper could write them, which
+     * would let any app that can write the quarantine have it write into an app's folder. They stay in the quarantine.
      */
     fun orphanEntries(runId: String): List<JournalEntry> {
         val dir = dirFor(runId)
@@ -94,7 +99,9 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
             }
             for (q in children) {
                 if (Files.isSymbolicLink(q)) continue
-                val original = guard.root.resolve(dir.relativize(q).toString())
+                val rel = dir.relativize(q)
+                if (rel.getName(0).toString().let { it == "Android" || it == SafetyPolicy.STEWARD_DIR }) continue
+                val original = guard.root.resolve(rel.toString())
                 if (guard.isRealDirectory(q) && guard.isRealDirectory(original)) {
                     stack.addLast(q)
                 } else {

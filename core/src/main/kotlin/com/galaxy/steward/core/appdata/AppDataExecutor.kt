@@ -4,6 +4,7 @@ import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.exec.ExecutionListener
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.JournalAction
+import com.galaxy.steward.core.exec.JournalBroken
 import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalSink
 import com.galaxy.steward.core.exec.PathGuard
@@ -72,6 +73,7 @@ class AppDataExecutor(
     private var bytesQuarantined = 0L
     private val messages = ArrayList<String>()
     private val changed = LinkedHashSet<String>()
+    private var journalBroken = false
 
     suspend fun execute(title: String, items: List<AppJunkItem>, listener: ExecutionListener? = null): ExecutionSummary {
         sink.meta("title", title)
@@ -106,12 +108,16 @@ class AppDataExecutor(
                 if (ok) completed += item.id else partial += item.id
             }
         } finally {
-            sink.meta("finished", System.currentTimeMillis().toString())
-            sink.meta(
-                "stats",
-                "cleared=$cleared quarantined=$quarantined rmdir=$removedDirs skipped=$skipped failed=$failed " +
-                    "freed=$bytesFreed quarantinedBytes=$bytesQuarantined",
-            )
+            try {
+                sink.meta("finished", System.currentTimeMillis().toString())
+                sink.meta(
+                    "stats",
+                    "cleared=$cleared quarantined=$quarantined rmdir=$removedDirs skipped=$skipped failed=$failed " +
+                        "freed=$bytesFreed quarantinedBytes=$bytesQuarantined",
+                )
+            } catch (e: IOException) {
+                if (!journalBroken) throw e
+            }
         }
         listener?.onProgress(total, total, "")
         return ExecutionSummary(
@@ -263,6 +269,24 @@ class AppDataExecutor(
         return if (Files.exists(q, LinkOption.NOFOLLOW_LINKS)) null else q
     }
 
+    /**
+     * Journals a move into the quarantine just made. When that fails the item goes back and the run stops, as in
+     * [com.galaxy.steward.core.exec.ActionExecutor]: an item in the quarantine without its journal line couldn't be
+     * undone, and would go when the quarantine is emptied.
+     */
+    private fun journalMove(from: Path, to: Path, entry: JournalEntry) {
+        try {
+            sink.entry(entry)
+        } catch (e: IOException) {
+            journalBroken = true
+            try {
+                Files.move(to, from)
+            } catch (_: IOException) {
+            }
+            throw JournalBroken(e)
+        }
+    }
+
     private fun quarantineFile(target: AppTarget, path: Path): String? {
         val a = attrs(path) ?: return null
         if (!a.isRegularFile) return skip("No longer a regular file")
@@ -273,7 +297,7 @@ class AppDataExecutor(
             failed++
             return "Post-quarantine verification failed"
         }
-        sink.entry(JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null))
+        journalMove(path, q, JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null))
         quarantined++
         bytesQuarantined += target.size
         changed += target.path
@@ -304,7 +328,7 @@ class AppDataExecutor(
                 failed++
                 return "Post-quarantine verification failed"
             }
-            sink.entry(JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), bytes, a.lastModifiedTime().toMillis(), null))
+            journalMove(dir, q, JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), bytes, a.lastModifiedTime().toMillis(), null))
             quarantined++
             bytesQuarantined += bytes
             changed += dir.toString()
@@ -346,7 +370,7 @@ class AppDataExecutor(
                             continue
                         }
                         val mtime = a.lastModifiedTime().toMillis()
-                        sink.entry(JournalEntry(JournalAction.QUARANTINED, entry.toString(), q.toString(), a.size(), mtime, null))
+                        journalMove(entry, q, JournalEntry(JournalAction.QUARANTINED, entry.toString(), q.toString(), a.size(), mtime, null))
                         quarantined++
                         bytesQuarantined += a.size()
                     }

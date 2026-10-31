@@ -89,8 +89,8 @@ fun HistoryScreen(vm: StewardViewModel, state: UiState) {
                                 Text("From before a reinstall", style = MaterialTheme.typography.titleMedium)
                                 Text(
                                     "${state.orphanBytes.humanBytes()} in the quarantine from runs this install has no journal of, so " +
-                                        "they can't be undone here. Their items can still go back where they were, beside anything " +
-                                        "that has their name now. They are never emptied on their own.",
+                                        "they can't be undone here. Your files can still go back where they were, beside anything " +
+                                        "that has their name now; what came from app folders stays. They are never emptied on their own.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

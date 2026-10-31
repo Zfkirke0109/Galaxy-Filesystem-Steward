@@ -107,7 +107,7 @@ class LogcatExporter(
                 file.outputStream().buffered(BUFFER_BYTES).use { out ->
                     out.write(header(now, source).toByteArray())
                     // The whole device's log also holds other Android users': Secure Folder, a work profile.
-                    val others = if (source.wholeDevice) OtherProfiles(Process.myUid() / 100_000) else null
+                    val others = if (source.wholeDevice) OtherProfiles(Process.myUid() / 100_000, ownPackage = context.packageName) else null
                     copy(input, out, others)
                     if (others != null && others.dropped > 0) {
                         out.write(

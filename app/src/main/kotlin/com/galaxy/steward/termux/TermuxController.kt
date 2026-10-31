@@ -465,7 +465,8 @@ class TermuxController(
         val dir = File(StorageAccess.rootPath, "${SafetyPolicy.STEWARD_DIR}/termux")
         if (!dir.isDirectory && !dir.mkdirs()) return null
         runCatching { File(dir.parentFile, ".nomedia").takeIf { !it.exists() }?.createNewFile() }
-        dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 24 * 3600_000L }?.forEach { it.delete() }
+        // Left by calls that timed out (Termux may write after the app stopped waiting): older than any call can take.
+        dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > RELOCATE_TIMEOUT_MS + 5 * 60_000L }?.forEach { it.delete() }
         return File(dir, "run-${System.currentTimeMillis()}.tsv")
     }
 

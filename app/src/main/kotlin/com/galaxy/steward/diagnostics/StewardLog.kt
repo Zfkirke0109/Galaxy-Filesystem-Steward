@@ -44,8 +44,9 @@ object StewardLog {
      */
     internal fun redact(text: String): String = PATH.replace(text, "<path>")
 
-    // To the ": " or " -> " Java puts after a path, since file names can hold spaces; to the end of the line otherwise.
-    private val PATH = Regex("""(?<![\w.])/(?:storage|sdcard|mnt|data)/.*?(?=: | -> |['")\]\r\n]|$)""")
+    // To the ": " or " -> " Java puts after a path, or the end of the line: file names can hold spaces, quotes and
+    // brackets ("Sam's (1).pdf"), so nothing inside one ends it. What follows a path on the same line can go with it.
+    private val PATH = Regex("""(?<![\w.])/(?:storage|sdcard|mnt|data)/.*?(?=: | -> |[\r\n]|$)""")
 
     /** The kept lines, oldest first (at most [KEEP_LINES]). */
     fun lines(): List<String> = synchronized(this) {

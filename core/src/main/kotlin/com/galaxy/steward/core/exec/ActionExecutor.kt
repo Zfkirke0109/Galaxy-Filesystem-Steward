@@ -73,10 +73,13 @@ data class ExecutionSummary(
     val undoable: Boolean get() = changedAnything
 }
 
-/** The run's journal couldn't be written; the run stopped there, so that everything it changed can still be undone. */
-class JournalBroken(cause: IOException) : IllegalStateException(
+/**
+ * The run's journal couldn't be written; the run stopped there, so that everything it changed can still be undone.
+ * [stuck] is an item that couldn't be put back either: where it is now, for the user to move back by hand.
+ */
+class JournalBroken(cause: IOException, stuck: String? = null) : IllegalStateException(
     "This run's journal couldn't be written (${cause.message ?: cause.javaClass.simpleName}), so it stopped: what it did " +
-        "until then can be undone from History",
+        "until then can be undone from History" + (stuck?.let { ". One item couldn't be put back and is at $it" } ?: ""),
     cause,
 )
 
@@ -255,6 +258,7 @@ class ActionExecutor(
             try {
                 Files.move(to, from)
             } catch (_: IOException) {
+                throw JournalBroken(e.cause as IOException, stuck = guard.relative(to.toString()))
             }
             throw e
         }
@@ -302,6 +306,7 @@ class ActionExecutor(
             return fail("Post-move verification failed")
         }
         recordMove(srcPath, dstPath) { record(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha) }
+        if (kept.remove(src)) kept += dst
         moved++
         bytesMoved += id.size
         changed += src
@@ -333,6 +338,10 @@ class ActionExecutor(
             if (renamed) {
                 if (guard.exists(src) || !guard.isRealDirectory(dst)) return fail("Post-move verification failed")
                 recordMove(src, dst) { record(JournalAction.MOVED_DIR, op.src, op.dst) }
+                kept.filter { it.startsWith(op.src + "/") }.forEach { k ->
+                    kept -= k
+                    kept += op.dst + k.removePrefix(op.src)
+                }
                 moved++
                 bytesMoved += op.bytes
                 changed += op.src
@@ -552,7 +561,12 @@ class ActionExecutor(
             throw e
         }
         val zipSize = Files.size(zip)
-        record(JournalAction.PACKED, op.zip, op.path, zipSize, Files.getLastModifiedTime(zip).toMillis(), Hashing.sha256(op.zip))
+        try {
+            record(JournalAction.PACKED, op.zip, op.path, zipSize, Files.getLastModifiedTime(zip).toMillis(), Hashing.sha256(op.zip))
+        } catch (e: JournalBroken) {
+            Files.deleteIfExists(zip)
+            throw e
+        }
         packed++
         bytesPacked += zipSize
         changed += op.zip

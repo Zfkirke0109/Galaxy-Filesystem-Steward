@@ -11,7 +11,12 @@ package com.galaxy.steward.diagnostics
  * 15010309"). A bare number counts as a uid only for a user known to be on the phone, so sizes and ids that merely
  * look like one stay. When in doubt a line is left out: a missing line costs less than a leaked one.
  */
-class OtherProfiles(private val myUser: Int, knownUsers: Set<Int> = SAMSUNG_PROFILES) {
+class OtherProfiles(
+    private val myUser: Int,
+    knownUsers: Set<Int> = SAMSUNG_PROFILES,
+    /** This app: never taken for another user's app, or its own lines (its crash header too) would go. */
+    private val ownPackage: String? = null,
+) {
     /** Lines left out so far. */
     var dropped = 0
         private set
@@ -79,6 +84,7 @@ class OtherProfiles(private val myUser: Int, knownUsers: Set<Int> = SAMSUNG_PROF
     /** The app an activity event names ("[150,61234567,812,com.secret.app/.MainActivity,…"), as opened for [user]. */
     private fun learnApp(line: String, user: Int) {
         val app = COMPONENT.find(line, line.indexOf('['))?.groupValues?.get(1) ?: return
+        if (app == ownPackage) return
         if (user == myUser) {
             myApps += app
             otherApps -= app

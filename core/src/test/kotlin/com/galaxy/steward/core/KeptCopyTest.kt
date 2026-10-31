@@ -8,6 +8,8 @@ import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.plan.DuplicateCopy
 import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.JunkItem
+import com.galaxy.steward.core.plan.MoveFileOp
+import com.galaxy.steward.core.plan.OrganizeMove
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -47,6 +49,29 @@ class KeptCopyTest {
             assertEquals(0, summary.quarantined)
             assertEquals(2, summary.skipped)
             assertEquals(2, summary.reasons[ActionExecutor.KEPT_COPY])
+        }
+    }
+
+    @Test
+    fun aKeptCopyIsFollowedWhenTheSameRunMovesIt() = runTest {
+        TestFs().use { fs ->
+            val photo = Random(13).nextBytes(20_000)
+            fs.file("Download/x/IMG_0002.jpg", photo)
+            fs.file("Download/y/IMG_0002.jpg", photo)
+            fs.ageDirectories()
+            val dedupe = group("dup:photo", fs, photo.size, "Download/x/IMG_0002.jpg", "Download/y/IMG_0002.jpg")
+            val kept = File(fs.path("Download/x/IMG_0002.jpg"))
+            val move = OrganizeMove(
+                "organize:photo", kept.path, fs.path("Pictures/Old/IMG_0002.jpg"), false, photo.size.toLong(), 1, "test", "Pictures/Old", true,
+                listOf(MoveFileOp(kept.path, fs.path("Pictures/Old/IMG_0002.jpg"), kept.length(), kept.lastModified())),
+            )
+            val folder = junk(JunkCategory.NEAR_COPIES, fs, "Pictures/Old", photo.size, isDirectory = true).copy(mtime = -1)
+            fs.dir("Pictures/Old")
+
+            val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals"))).execute("Autopilot", "autopilot", listOf(dedupe, move, folder))
+
+            assertTrue(fs.exists("Pictures/Old/IMG_0002.jpg"))
+            assertEquals(1, summary.reasons[ActionExecutor.KEPT_COPY])
         }
     }
 

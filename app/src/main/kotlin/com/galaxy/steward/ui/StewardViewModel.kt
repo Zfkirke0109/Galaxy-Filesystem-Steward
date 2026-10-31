@@ -819,36 +819,25 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     /**
      * Puts back what runs from before a reinstall left in the quarantine: each item to its own path, or beside what
-     * has its name now, checked like any undo; app folders through Shizuku.
+     * has its name now, checked like any undo. What came from app folders stays ([QuarantineManager.orphanEntries]).
      */
     fun restoreOrphans() = launchRun("Putting back from before a reinstall", stoppable = false) { progress ->
         val q = quarantine()
-        val runs = withContext(Dispatchers.IO) { q.orphans() }
-        val entries = withContext(Dispatchers.IO) { runs.flatMap { q.orphanEntries(it) } }
-        val (appFolders, shared) = entries.partition { it.a.removePrefix("$rootPath/").startsWith("Android/") }
-        var summary = withContext(Dispatchers.IO) { RollbackEngine(rootPath, null).rollbackEntries(shared) { d, t, c -> progress(d, t, c) } }
-        if (appFolders.isNotEmpty()) {
-            summary = try {
-                summary + apps.rollbackEntries(appFolders, progress)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                StewardLog.w("putting back app folders from before a reinstall failed", e)
-                summary.copy(
-                    remaining = summary.remaining + appFolders.size,
-                    messages = summary.messages + "${appFolders.size} in Android/data or obb need Shizuku: ${e.message ?: e.javaClass.simpleName}",
-                )
-            }
+        val (summary, left) = withContext(Dispatchers.IO) {
+            val runs = q.orphans()
+            val summary = RollbackEngine(rootPath, null).rollbackEntries(runs.flatMap { q.orphanEntries(it) }) { d, t, c -> progress(d, t, c) }
+            runs.forEach { q.pruneEmpty(it) }
+            summary to runs.sumOf { q.sizeOf(it) }
         }
-        withContext(Dispatchers.IO) { runs.forEach { q.pruneEmpty(it) } }
         reindexLater(summary.changedPaths)
         _state.update { it.copy(stale = true) }
-        Outcome.RolledBack("Items from before a reinstall", summary)
+        val note = when {
+            left <= 0 -> emptyList()
+            summary.remaining > 0 -> listOf("${left.humanBytes()} stays in the quarantine: what came from app folders, and what couldn't go back")
+            else -> listOf("${left.humanBytes()} from app folders (Android/data, obb) stays in the quarantine")
+        }
+        Outcome.RolledBack("Items from before a reinstall", summary.copy(messages = note + summary.messages))
     }
-
-    private operator fun RollbackSummary.plus(o: RollbackSummary) = RollbackSummary(
-        restored + o.restored, skipped + o.skipped, failed + o.failed, messages + o.messages, changedPaths + o.changedPaths, remaining + o.remaining,
-    )
 
     /** Empties one run's quarantine, or all of it when [runId] is null. */
     fun purgeQuarantine(runId: String?) {

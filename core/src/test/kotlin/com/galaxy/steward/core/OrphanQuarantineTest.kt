@@ -29,6 +29,8 @@ class OrphanQuarantineTest {
             put(old, "Download/notes.txt", "notes")
             put(old, "Download/photo.jpg", "old photo")
             put(old, "Documents/Old/a.txt", "a")
+            // From an app-folder run: this app can't see other apps' Android/obb, so it stays where it is.
+            put(old, "Android/obb/com.game/main.41.com.game.obb", "obb")
             fs.text("Download/photo.jpg", "a new photo")
             fs.text("Documents/Old/b.txt", "b")
             // A run of this install has its journal, so History undoes it: not one of these.
@@ -48,8 +50,10 @@ class OrphanQuarantineTest {
             assertEquals("old photo", File(fs.path("Download/photo (restored).jpg")).readText())
             assertEquals("a", File(fs.path("Documents/Old/a.txt")).readText())
             assertEquals("b", File(fs.path("Documents/Old/b.txt")).readText())
-            assertTrue(q.orphans().isEmpty())
-            assertFalse(q.dirFor(old).toFile().exists())
+            assertEquals(listOf(old), q.orphans())
+            assertEquals("obb", q.dirFor(old).resolve("Android/obb/com.game/main.41.com.game.obb").toFile().readText())
+            assertFalse(File(fs.path("Android/obb/com.game (restored)")).exists() || File(fs.path("Android/obb/com.game")).exists())
+            assertFalse(q.dirFor(old).resolve("Download").toFile().exists())
             assertTrue(q.dirFor(mine).resolve("Download/mine.txt").toFile().exists())
         }
     }
