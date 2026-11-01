@@ -3,31 +3,53 @@ package com.galaxy.steward.ui
 import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
+import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.StewardApp
+import com.galaxy.steward.apps.AppFootprintController
 import com.galaxy.steward.apps.AppsController
+import com.galaxy.steward.apps.DeepSpaceController
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.ScanPhase
 import com.galaxy.steward.core.ScanProgress
 import com.galaxy.steward.core.Steward
 import com.galaxy.steward.core.StewardSettings
 import com.galaxy.steward.core.appdata.AppJunkItem
+import com.galaxy.steward.core.appdata.AppJunkKind
+import com.galaxy.steward.core.device.PhoneSpace
 import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.ExecutorOptions
 import com.galaxy.steward.core.exec.JournalInfo
 import com.galaxy.steward.core.exec.PathGuard
+import com.galaxy.steward.core.exec.Preflight
+import com.galaxy.steward.core.exec.PreflightResult
 import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
+import com.galaxy.steward.core.footprint.AppFootprint
+import com.galaxy.steward.core.footprint.FootprintPlace
+import com.galaxy.steward.core.goal.GoalPlan
+import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.learn.LearnedChoice
+import com.galaxy.steward.core.learn.PreferenceModel
+import com.galaxy.steward.core.learn.StoragePoint
 import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
+import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
-import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
+import com.galaxy.steward.core.termux.TermuxCleanResult
+import com.galaxy.steward.core.termux.TermuxCleanSummary
 import com.galaxy.steward.core.termux.TermuxItem
+import com.galaxy.steward.core.termux.TermuxProgram
+import com.galaxy.steward.core.termux.TermuxProtocol
 import com.galaxy.steward.data.AppPreferences
 import com.galaxy.steward.data.StorageAccess
+import com.galaxy.steward.diagnostics.LogcatExporter
+import com.galaxy.steward.diagnostics.StewardLog
+import com.galaxy.steward.diagnostics.StorageReportExporter
 import com.galaxy.steward.termux.TermuxController
 import com.galaxy.steward.work.AuditWorker
 import com.galaxy.steward.work.KeepAlive
@@ -41,7 +63,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-data class ApplyProgress(val title: String, val done: Int, val total: Int, val current: String)
+/** [stoppable] is false for work Android does on its own once asked (trim-caches, art cleanup): Stop can't end it. */
+data class ApplyProgress(val title: String, val done: Int, val total: Int, val current: String, val stoppable: Boolean = true)
 
 sealed interface Outcome {
     data class Applied(val title: String, val summary: ExecutionSummary) : Outcome
@@ -67,9 +90,16 @@ data class UiState(
     val journals: List<JournalInfo> = emptyList(),
     val quarantineBytes: Long = 0,
     val quarantineByRun: Map<String, Long> = emptyMap(),
+    /**
+     * What no journal of this install records in the quarantine: runs from before a reinstall ([QuarantineManager.orphans])
+     * and what a run Android stopped mid-step moved there without its line.
+     */
+    val orphanBytes: Long = 0,
     val space: VolumeSpace? = null,
     /** The media index is being refreshed after a run (in the background; nothing waits on it). */
     val indexing: Boolean = false,
+    /** Suggestions whose starting tick came from your past choices instead of the rules. */
+    val learned: Map<String, LearnedChoice> = emptyMap(),
 )
 
 /** Process-wide state shared by every [StewardViewModel] instance; runs outlive the screen that started them. */
@@ -78,6 +108,9 @@ class StewardSession {
     var scanJob: Job? = null
     var applyJob: Job? = null
     var started = false
+
+    /** A scan or a run (clean-up, undo, app data, Termux) is in progress. */
+    fun busy(): Boolean = state.value.let { it.scanning || it.applying != null }
 }
 
 class StewardViewModel(application: Application) : AndroidViewModel(application) {
@@ -90,6 +123,12 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     /** App data (per-app storage, caches, Android/data|obb|media) and Termux. */
     val apps: AppsController = app.apps
     val termux: TermuxController = app.termux
+    val deepSpace: DeepSpaceController = app.deepSpace
+
+    /** Everything an app left behind, across shared storage, app folders, Termux and the shell's places. */
+    val footprint = AppFootprintController(app, app.environment, app.apps, app.termux, app.deepSpace, app.appScope) { app.session.state.value.report }
+    val logcat: LogcatExporter = app.logcat
+    val storageReport: StorageReportExporter = app.storageReport
 
     private val session = app.session
     private val scope = app.appScope
@@ -103,6 +142,11 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             scope.launch(Dispatchers.IO) {
                 if (StorageAccess.hasAccess(app)) quarantine().purgeExpired(settings.value.quarantineRetentionDays)
                 refreshHistoryNow()
+            }
+            // Once per version: a weekly audit scheduled by an older one gets this one's constraints (only when idle).
+            // Not in Application.onCreate, where replacing the schedule could stop the very run that started the process.
+            if (app.settings.app.value.weeklyAudit && app.settings.auditScheduledFor != BuildConfig.VERSION_CODE) {
+                AuditWorker.schedule(app, true)
             }
         }
     }
@@ -141,41 +185,105 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         if (_state.value.scanning || _state.value.applying != null) return
         session.scanJob = scope.launch {
             _state.update { it.copy(scanning = true, progress = ScanProgress(ScanPhase.MAPPING), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("scan started")
             try {
                 val space = StorageAccess.space()
+                // How long each phase took, for the log line at the end.
+                val phases = ArrayList<Pair<ScanPhase, Long>>()
                 val report = keepAlive("Scanning storage") { withContext(Dispatchers.IO) {
                     var last = 0L
                     var lastPhase: ScanPhase? = null
-                    Steward(rootPath, settings.value, app.environment, app.hashCacheFile).scan(space) { p ->
+                    var phaseStarted = started
+                    // The last map: code folders whose dates haven't changed since are filled in from it, not listed again.
+                    val previous = _state.value.report?.tree
+                    val result = Steward(rootPath, settings.value, app.environment, app.hashCacheFile, app.memory).scan(space, previous) { p ->
                         val now = SystemClock.uptimeMillis()
                         if (p.phase != lastPhase || now - last >= 120) {
+                            if (p.phase != lastPhase) {
+                                lastPhase?.let { phases += it to now - phaseStarted }
+                                phaseStarted = now
+                            }
                             last = now
                             lastPhase = p.phase
                             _state.update { it.copy(progress = p) }
                             KeepAlive.update(app, "Scanning storage", p.phase.label, (p.overall * 100).toInt(), 100)
                         }
                     }
+                    lastPhase?.takeIf { it != ScanPhase.DONE }?.let { phases += it to SystemClock.uptimeMillis() - phaseStarted }
+                    result
                 } }
+                app.settings.lastScanAt = System.currentTimeMillis()
+                StewardLog.i(RunLog.scan(report, phases))
+                val learned = if (settings.value.learnFromChoices) withContext(Dispatchers.IO) { learnedChoices(report) } else emptyMap()
+                if (learned.isNotEmpty()) {
+                    StewardLog.i("learned from your choices: ${learned.count { it.value.select }} ticked, ${learned.count { !it.value.select }} unticked")
+                }
+                val defaults = report.allItems().filter { item -> item.defaultSelected }.map { item -> item.id }.toSet()
                 _state.update {
                     it.copy(
                         scanning = false,
                         progress = null,
                         report = report,
                         stale = false,
-                        selected = report.allItems().filter { item -> item.defaultSelected }.map { item -> item.id }.toSet(),
+                        selected = defaults + learned.filterValues { c -> c.select }.keys - learned.filterValues { c -> !c.select }.keys,
                         keepers = emptyMap(),
                         space = space,
+                        learned = learned,
                     )
                 }
             } catch (e: CancellationException) {
+                StewardLog.i("scan cancelled after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}")
                 _state.update { it.copy(scanning = false, progress = null) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("scan failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } catch (e: OutOfMemoryError) {
-                _state.update { it.copy(scanning = false, progress = null, outcome = Outcome.Failed("Not enough memory to map this much storage.")) }
+                StewardLog.w("scan ran out of memory after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
+                // The last map goes too: kept, it would leave every later scan just as short of memory.
+                _state.update { it.copy(scanning = false, progress = null, report = null, outcome = Outcome.Failed("Not enough memory to map this much storage.")) }
             }
         }
+    }
+
+    /** Starting ticks your past decisions point to, where enough of them agree. */
+    private fun learnedChoices(report: ScanReport): Map<String, LearnedChoice> {
+        val model = PreferenceModel.train(app.decisions.load())
+        if (model.decisions == 0) return emptyMap()
+        val now = System.currentTimeMillis()
+        return report.allItems().mapNotNull { item -> model.choiceFor(item, rootPath, now)?.let { item.id to it } }.toMap()
+    }
+
+    /** Remembers what was offered and what you ran, once a run has finished. */
+    private fun recordDecisions(runId: String, kind: String, report: ScanReport?, items: List<PlanItem>) {
+        if (!settings.value.learnFromChoices || report == null) return
+        val offered = when (kind) {
+            "autopilot" -> report.allItems()
+            "junk" -> report.junk
+            "organize" -> report.organize
+            "optimize" -> report.optimize
+            "dedupe" -> report.duplicates + report.folderDuplicates + report.folderMerges
+            else -> items
+        }
+        app.decisions.record(runId, offered, items.map { it.id }.toSet(), rootPath, System.currentTimeMillis())
+    }
+
+    /** How many decisions the steward has learned from (Settings → Learning). */
+    suspend fun decisionCount(): Int = withContext(Dispatchers.IO) { app.decisions.load().size }
+
+    fun forgetLearning() {
+        scope.launch(Dispatchers.IO) {
+            app.decisions.clear()
+            app.memory.forgetPlaces()
+        }
+        _state.update { it.copy(learned = emptyMap()) }
+    }
+
+    fun shouldAskForNotifications(): Boolean = !app.settings.askedForNotifications
+
+    fun markAskedForNotifications() {
+        app.settings.askedForNotifications = true
     }
 
     fun cancelScan() {
@@ -192,7 +300,18 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         it.copy(selected = if (selected) it.selected + ids else it.selected - ids.toSet())
     }
 
-    fun setKeeper(groupId: String, index: Int) = _state.update { it.copy(keepers = it.keepers + (groupId to index)) }
+    /**
+     * Keeps copy [index] of group [groupId]. Clutter holding that copy leaves the report ([ScanReport.leavingInPlace]):
+     * applied after the duplicates, it would have taken the only copy left into the quarantine.
+     */
+    fun setKeeper(groupId: String, index: Int) = _state.update { s ->
+        val report = s.report
+        val kept = report?.duplicates?.firstOrNull { it.id == groupId }?.withKeeper(index)?.keeper?.path
+            ?: report?.folderDuplicates?.firstOrNull { it.id == groupId }?.withKeeper(index)?.keeper?.path
+        val updated = if (report != null && kept != null) report.leavingInPlace(kept) else report
+        val dropped = if (updated === report || report == null || updated == null) emptySet() else (report.junk - updated.junk.toSet()).mapTo(HashSet()) { it.id }
+        s.copy(keepers = s.keepers + (groupId to index), report = updated, selected = s.selected - dropped)
+    }
 
     /** Plan item with the user's keeper choice applied. */
     fun effective(item: PlanItem, keepers: Map<String, Int> = _state.value.keepers): PlanItem = when (item) {
@@ -215,11 +334,20 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     // ------------------------------------------------------------------ applying
 
+    /** The dry run of [items] for a confirm dialog: what changed since the scan, checked without changing anything. */
+    suspend fun preflight(items: List<PlanItem>): PreflightResult = withContext(Dispatchers.IO) {
+        Preflight.check(rootPath, items, settings.value.protectedFolders)
+    }
+
     fun apply(title: String, kind: String, items: List<PlanItem>) {
         if (items.isEmpty() || _state.value.applying != null || _state.value.scanning) return
+        val offeredFrom = _state.value.report
         session.applyJob = scope.launch {
             val total = items.sumOf { it.operations.size }
             _state.update { it.copy(applying = ApplyProgress(title, 0, total, ""), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("run \"$title\" ($kind) started: ${items.size} items, $total operations")
+            var refreshed = false
             try {
                 keepAlive(title) {
                     val s = settings.value
@@ -235,25 +363,34 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                                 }
                             }
                     }
+                    StewardLog.i(RunLog.applied(title, kind, summary, SystemClock.uptimeMillis() - started))
+                    withContext(Dispatchers.IO) { recordDecisions(summary.runId, kind, offeredFrom, items) }
                     _state.update {
                         it.copy(
                             applying = null,
                             outcome = Outcome.Applied(title, summary),
                             report = it.report?.without(summary.completedItemIds),
-                            selected = it.selected - summary.completedItemIds,
+                            // Items that were only partly done stay listed but unticked: running them again before a
+                            // new scan only skips the same files again.
+                            selected = it.selected - summary.completedItemIds - summary.partialItemIds,
                             space = StorageAccess.space(),
                         )
                     }
+                    // History lists the run, with its Undo and its share of the quarantine, as the outcome shows: the
+                    // media rescan below can take minutes.
                     refreshHistory()
+                    refreshed = true
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
+                StewardLog.i("run \"$title\" cancelled after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}")
                 _state.update { it.copy(applying = null, stale = true) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("run \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, stale = true, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
-                refreshHistory()
+                if (!refreshed) refreshHistory()
             }
         }
     }
@@ -264,8 +401,17 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
 
     fun rollback(runId: String, title: String) {
         if (_state.value.applying != null || _state.value.scanning) return
+        if (app.journals.info(runId)?.kind == TermuxController.KIND_MOVE) {
+            launchRun("Moving back: $title", stoppable = false) { progress ->
+                progress(0, 1, "Termux is copying and checking every file")
+                val summary = termux.moveBack(runId)
+                _state.update { it.copy(stale = true) }
+                termuxMoveOutcome("Moved back to shared storage", summary)
+            }
+            return
+        }
         if (app.journals.info(runId)?.kind == AppsController.KIND_FOLDERS) {
-            launchRun("Undoing: $title") { progress ->
+            launchRun("Undoing: $title", stoppable = false) { progress ->
                 val summary = apps.rollback(runId, progress)
                 reindexLater(summary.changedPaths)
                 Outcome.RolledBack(title, summary)
@@ -275,25 +421,34 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         session.applyJob = scope.launch {
             val label = "Undoing: $title"
             _state.update { it.copy(applying = ApplyProgress(label, 0, 1, ""), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("undo \"$title\" started")
+            var refreshed = false
             try {
                 keepAlive(label) {
-                    val summary = withContext(Dispatchers.IO) {
-                        RollbackEngine(rootPath, app.journals).rollback(runId) { done, total, current ->
-                            _state.update { it.copy(applying = ApplyProgress(label, done, total, current)) }
-                            KeepAlive.update(app, label, current, done, total)
-                        }
+                    val report = throttled { done, total, current ->
+                        _state.update { it.copy(applying = ApplyProgress(label, done, total, current)) }
+                        KeepAlive.update(app, label, current, done, total)
                     }
+                    val summary = withContext(Dispatchers.IO) {
+                        RollbackEngine(rootPath, app.journals).rollback(runId) { done, total, current -> report(done, total, current) }
+                    }
+                    StewardLog.i(RunLog.rolledBack(title, summary, SystemClock.uptimeMillis() - started))
+                    // Undoing a run says its suggestions were wrong for you.
+                    withContext(Dispatchers.IO) { app.decisions.undone(runId, System.currentTimeMillis()) }
                     _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
                     refreshHistory()
+                    refreshed = true
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
                 _state.update { it.copy(applying = null, stale = true) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("undo \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, stale = true, outcome = Outcome.Failed(e.message ?: "Undo failed")) }
             } finally {
-                refreshHistory()
+                if (!refreshed) refreshHistory()
             }
         }
     }
@@ -304,32 +459,56 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
      * Runs [block] as the single active run: progress dialog, foreground service, outcome dialog and a history
      * refresh. [block] reports progress through the callback it is given.
      */
-    private fun launchRun(title: String, block: suspend (progress: (Int, Int, String) -> Unit) -> Outcome) {
+    /**
+     * Runs [block] as the one run of the moment. [stoppable] is false for work Termux or the Shizuku helper does: it goes
+     * on there whatever the app does, so Stop would only drop its result, and for a move into Termux its History entry.
+     */
+    private fun launchRun(title: String, stoppable: Boolean = true, block: suspend (progress: (Int, Int, String) -> Unit) -> Outcome) {
         if (_state.value.applying != null || _state.value.scanning) return
         session.applyJob = scope.launch {
-            _state.update { it.copy(applying = ApplyProgress(title, 0, 1, ""), outcome = null) }
+            _state.update { it.copy(applying = ApplyProgress(title, 0, 1, "", stoppable), outcome = null) }
+            val started = SystemClock.uptimeMillis()
+            StewardLog.i("run \"$title\" started")
+            var refreshed = false
             try {
                 keepAlive(title) {
-                    val outcome = block { done, total, current ->
-                        _state.update { it.copy(applying = ApplyProgress(title, done, total, current)) }
-                        KeepAlive.update(app, title, current, done, total)
-                    }
+                    val outcome = block(
+                        throttled { done, total, current ->
+                            _state.update { it.copy(applying = ApplyProgress(title, done, total, current, stoppable)) }
+                            KeepAlive.update(app, title, current, done, total)
+                        },
+                    )
+                    StewardLog.i(outcomeLine(title, outcome, SystemClock.uptimeMillis() - started))
                     _state.update { it.copy(applying = null, outcome = outcome, space = StorageAccess.space()) }
                     refreshHistory()
+                    refreshed = true
                     pendingReindex?.let {
                         pendingReindex = null
                         reindex(it)
                     }
                 }
             } catch (e: CancellationException) {
+                StewardLog.i("run \"$title\" cancelled after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}")
                 _state.update { it.copy(applying = null) }
                 throw e
             } catch (e: Exception) {
+                StewardLog.w("run \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
-                refreshHistory()
+                if (!refreshed) refreshHistory()
             }
         }
+    }
+
+    /** [report] thinned out to what a person can see ([throttle]). */
+    private fun throttled(report: (Int, Int, String) -> Unit): (Int, Int, String) -> Unit = throttle({ SystemClock.uptimeMillis() }, report = report)
+
+    private fun outcomeLine(title: String, outcome: Outcome, millis: Long): String = when (outcome) {
+        is Outcome.Applied -> RunLog.applied(title, "app data", outcome.summary, millis)
+        is Outcome.RolledBack -> RunLog.rolledBack(title, outcome.summary, millis)
+        is Outcome.Report -> "run \"$title\" done in ${RunLog.seconds(millis)}: ${outcome.lines.joinToString("; ")}"
+        is Outcome.Failed -> "run \"$title\" failed after ${RunLog.seconds(millis)}: ${outcome.message}"
+        is Outcome.Purged -> "run \"$title\" done in ${RunLog.seconds(millis)}: emptied ${outcome.bytes.humanBytes()}"
     }
 
     private var pendingReindex: List<String>? = null
@@ -339,38 +518,390 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         pendingReindex = paths.filterNot { it.startsWith("$rootPath/Android/data/") || it.startsWith("$rootPath/Android/obb/") }
     }
 
-    fun applyAppFolders(items: List<AppJunkItem>) = launchRun("App folder clean-up") { progress ->
+    /**
+     * Frees space toward a goal ([GoalPlanner]): the shared-storage picks through the executor (copies first, then
+     * clutter, then packing), then the Termux ones through Termux. With [freeNow], what went to the quarantine is
+     * emptied right away instead of after the retention days.
+     */
+    /** What [reachGoal] applies in shared storage, in the order it runs them: duplicates first, then clutter. */
+    fun goalItems(plan: GoalPlan): List<PlanItem> {
+        val keepers = _state.value.keepers
+        return plan.picks.mapNotNull { it.plan }.map { effective(it, keepers) }.sortedBy {
+            when (it) {
+                is DuplicateGroup, is FolderDuplicateGroup -> 0
+                is JunkItem -> 1
+                else -> 2
+            }
+        }
+    }
+
+    fun reachGoal(plan: GoalPlan, freeNow: Boolean) = launchRun("Free up space", stoppable = plan.picks.none { it.termux != null }) { progress ->
+        val title = "Free up space"
+        val shared = goalItems(plan)
+        val inTermux = plan.picks.mapNotNull { it.termux }
+        val lines = ArrayList<String>()
+        val details = ArrayList<String>()
+        if (shared.isNotEmpty()) {
+            val s = settings.value
+            val started = SystemClock.uptimeMillis()
+            val summary = withContext(Dispatchers.IO) {
+                ActionExecutor(rootPath, app.journals, ExecutorOptions(s.quarantineDuplicates, s.protectedFolders))
+                    .execute(title, "goal", shared) { done, count, current -> progress(done, count, current) }
+            }
+            StewardLog.i(RunLog.applied(title, "goal", summary, SystemClock.uptimeMillis() - started))
+            val emptied = if (freeNow && summary.bytesQuarantined > 0) withContext(Dispatchers.IO) { quarantine().purge(summary.runId) } else 0L
+            // Emptying counts packed folders in full, and their zips stay: those bytes aren't free.
+            val packedKept = if (emptied > 0) summary.bytesPacked else 0L
+            lines += "Freed ${(summary.bytesFreed + emptied - packedKept).coerceAtLeast(0).humanBytes()} in shared storage"
+            (summary.bytesQuarantined - emptied).takeIf { it > 0 }?.let {
+                lines += "${it.humanBytes()} more once the quarantine is emptied (after ${s.quarantineRetentionDays} days, or now in History, " +
+                    "where this run can also be undone)"
+            }
+            if (summary.packed > 0) lines += "Packed ${summary.packed.plural("folder")} into zips of ${summary.bytesPacked.humanBytes()}"
+            if (summary.skipped + summary.failed > 0) {
+                lines += "${(summary.skipped + summary.failed).plural("file")} left alone" +
+                    RunLog.reasons(summary.reasons).removePrefix("; why: ").takeIf { it.isNotEmpty() }?.let { " ($it)" }.orEmpty()
+            }
+            details += summary.messages
+            _state.update {
+                it.copy(
+                    report = it.report?.without(summary.completedItemIds),
+                    selected = it.selected - summary.completedItemIds - summary.partialItemIds,
+                )
+            }
+            reindexLater(summary.changedPaths)
+        }
+        if (inTermux.isNotEmpty()) {
+            progress(0, 1, "Waiting for Termux")
+            try {
+                val (_, t) = termux.clean(inTermux)
+                lines += "Freed ${t.freed.humanBytes()} inside Termux"
+                if (t.skipped.isNotEmpty()) {
+                    lines += "${t.skipped.size.plural("Termux location")} left alone (${TermuxController.reasonTally(t)?.removePrefix("why: ")})"
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lines += "Termux: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        Outcome.Report("Space freed", lines, details)
+    }
+
+    /** Totals after each scan, oldest first, for the storage-over-time chart. */
+    suspend fun storageHistory(): List<StoragePoint> = withContext(Dispatchers.IO) { app.memory.history() }
+
+    fun applyAppFolders(items: List<AppJunkItem>) = launchRun("App folder clean-up", stoppable = false) { progress ->
         val summary = apps.applyFolders("App folder clean-up", items, progress)
         reindexLater(summary.changedPaths)
         Outcome.Applied("App folder clean-up", summary)
     }
 
-    fun clearAppCaches(packages: List<String>, stopFirst: Boolean) = launchRun("Clearing app caches") { progress ->
+    /**
+     * Removes what you picked in the app folder browser: into the quarantine ([quarantine], undoable from History) or
+     * deleted for good. The folder is listed again afterwards.
+     */
+    fun removePicked(quarantine: Boolean) {
+        val browser = apps.browser.value
+        val listing = browser.listing ?: return
+        val items = listing.itemsFor(listing.entries.filter { it.path in browser.selected }, quarantine)
+        if (items.isEmpty()) return
+        val title = (if (quarantine) "Removed from " else "Deleted from ") + apps.label(listing.packageName)
+        launchRun(title, stoppable = false) { progress ->
+            val summary = apps.applyFolders(title, items, progress)
+            reindexLater(summary.changedPaths)
+            apps.refreshBrowser()
+            Outcome.Applied(title, summary)
+        }
+    }
+
+    fun clearAppCaches(packages: List<String>, stopFirst: Boolean) = launchRun("Clearing app caches", stoppable = false) { progress ->
         val result = apps.clearCaches(packages, stopFirst, progress)
         Outcome.Report("App caches", AppsController.describe(result), result.unchanged.map { "No verified change: $it" })
     }
 
-    fun cleanTermux(items: List<TermuxItem>) = launchRun("Termux clean-up") { progress ->
+    fun clearAppData(packages: List<String>) = launchRun("Clearing app data", stoppable = false) { progress ->
+        val result = apps.clearData(packages, progress)
+        Outcome.Report(
+            "App data cleared",
+            AppsController.describe(result),
+            result.unchanged.map { "No verified change: $it" } + result.refused.map { "Refused - $it" },
+        )
+    }
+
+    fun cleanTermux(items: List<TermuxItem>) = launchRun("Termux clean-up", stoppable = false) { progress ->
         progress(0, 1, "Waiting for Termux")
         val (_, summary) = termux.clean(items)
         val lines = buildList {
             add("Freed ${summary.freed.humanBytes()} inside Termux")
             add("${summary.cleared.plural("location")} cleaned")
-            if (summary.skipped.isNotEmpty()) add("${summary.skipped.size.plural("location")} left alone for safety")
+            if (summary.skipped.isNotEmpty()) {
+                add("${summary.skipped.size.plural("location")} left alone for safety (${TermuxController.reasonTally(summary)?.removePrefix("why: ")})")
+            }
         }
         Outcome.Report("Termux cleaned", lines, summary.skipped.map { "${it.status.lowercase().replace('_', ' ')}: ${it.path.ifEmpty { it.targetId }} ${it.note}".trim() })
     }
 
-    /** Empties one run's quarantine, or all of it when [runId] is null. */
-    fun purgeQuarantine(runId: String?) {
-        scope.launch {
-            val freed = withContext(Dispatchers.IO) {
-                val q = quarantine()
-                if (runId == null) q.purgeAll() else q.purge(runId)
+    fun removeTermuxPackages(names: List<String>, autoremove: Boolean) = launchRun("Removing Termux packages", stoppable = false) { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.removePackages(names, autoremove)
+        termuxOutcome("Termux packages removed", summary, "package", "packages")
+    }
+
+    fun removeTermuxDistro(rootfs: String) = launchRun("Removing a Linux distribution", stoppable = false) { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.removeDistro(rootfs)
+        termuxOutcome("Linux distribution removed", summary, "distribution", "distributions")
+    }
+
+    fun deleteTermuxPaths(paths: List<String>) = launchRun("Deleting in Termux", stoppable = false) { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.deletePaths(paths)
+        termuxOutcome("Deleted in Termux", summary, "item", "items")
+    }
+
+    /**
+     * Removes what [appName] left behind, each place its own way: shared storage into the quarantine (undoable),
+     * Android/data|obb|media leftovers through Shizuku into the quarantine, Termux paths and the shell's through their
+     * helpers, each checked again there.
+     */
+    fun removeFootprint(appName: String, hits: List<com.galaxy.steward.core.footprint.FootprintHit>) = launchRun("Removing $appName's leftovers", stoppable = false) { progress ->
+        val title = "$appName's leftovers"
+        val byPlace = hits.filter { it.lock == null }.groupBy { it.place }
+        val lines = ArrayList<String>()
+        val details = ArrayList<String>()
+        val gone = HashSet<String>()
+        byPlace[FootprintPlace.SHARED]?.let { shared ->
+            val items = AppFootprint.toJunk(shared, appName)
+            val s = settings.value
+            val started = SystemClock.uptimeMillis()
+            val summary = withContext(Dispatchers.IO) {
+                ActionExecutor(rootPath, app.journals, ExecutorOptions(s.quarantineDuplicates, s.protectedFolders))
+                    .execute(title, "footprint", items) { done, count, current -> progress(done, count, current) }
             }
-            _state.update { it.copy(outcome = Outcome.Purged(freed), space = StorageAccess.space()) }
-            refreshHistory()
+            StewardLog.i(RunLog.applied(title, "footprint", summary, SystemClock.uptimeMillis() - started))
+            lines += "Shared storage: ${summary.quarantined.plural("item")} (${summary.bytesQuarantined.humanBytes()}) into the quarantine; History can undo it"
+            details += summary.messages
+            gone += summary.changedPaths
+            _state.update { it.copy(stale = true) }
+            reindexLater(summary.changedPaths)
         }
+        byPlace[FootprintPlace.APP_FOLDERS]?.let { folders ->
+            val wanted = folders.mapTo(HashSet()) { it.path }
+            val items = apps.state.value.folders?.items.orEmpty().filter {
+                it.kind == AppJunkKind.LEFTOVERS && "$rootPath/Android/${it.area.dir}/${it.packageName}" in wanted
+            }
+            if (items.isNotEmpty()) {
+                val summary = apps.applyFolders(title, items, progress)
+                lines += "Android/data, obb and media: ${summary.quarantined.plural("folder")} (${summary.bytesQuarantined.humanBytes()}) into the quarantine"
+                details += summary.messages
+                // Only what went leaves the list: a folder that failed or was skipped stays, to be tried again.
+                gone += items.filter { it.id in summary.completedItemIds }.map { "$rootPath/Android/${it.area.dir}/${it.packageName}" }
+            }
+            if (items.size < wanted.size) {
+                lines += "${(wanted.size - items.size).plural("app folder")} changed since the app folder scan: scan app folders again to remove it"
+            }
+        }
+        byPlace[FootprintPlace.TERMUX]?.let { inTermux ->
+            progress(0, 1, "Waiting for Termux")
+            try {
+                val t = termux.deletePaths(inTermux.map { it.path })
+                lines += "Termux: ${t.freed.humanBytes()} deleted" + (TermuxController.reasonTally(t)?.let { " ($it)" } ?: "")
+                gone += t.results.filter { it.status == "CLEARED" }.map { it.path }
+                details += TermuxController.skippedNotes(t, termux.state.value.report?.home.orEmpty(), termux.state.value.report?.prefix.orEmpty())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lines += "Termux: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        byPlace[FootprintPlace.SHELL]?.let { shell ->
+            progress(0, 1, "Asking the Shizuku helper")
+            val results = deepSpace.removeShell(shell.map { it.path })
+            lines += "Left by adb: ${results.filter { it.removed }.sumOf { it.bytes }.humanBytes()} deleted"
+            gone += results.filter { it.removed }.map { it.path }
+            details += results.filterNot { it.removed || it.status == "NO_CHANGE" }.map { "${it.path.substringAfterLast('/')}: ${it.note}" }
+        }
+        footprint.forget(gone)
+        Outcome.Report("$appName's leftovers removed", lines, details)
+    }
+
+    /** Removes what was picked in /data/local/tmp and bug reports (Shizuku). Deleted for good. */
+    fun removeShellSpace(paths: List<String>) = launchRun("Removing shell leftovers", stoppable = false) { progress ->
+        progress(0, 1, "Asking the Shizuku helper")
+        val results = deepSpace.removeShell(paths)
+        shellOutcome("Shell leftovers removed", results)
+    }
+
+    /** Removes picked parts of a debuggable app's private data, through run-as (the app is stopped first). */
+    fun removePrivateData(packageName: String, rels: List<String>) = launchRun("Removing private data", stoppable = false) { progress ->
+        progress(0, 1, "Stopping the app and removing")
+        shellOutcome("Private data removed", deepSpace.removePrivate(packageName, rels))
+    }
+
+    private fun shellOutcome(title: String, results: List<com.galaxy.steward.core.device.ShellRemoval>): Outcome.Report {
+        val removed = results.filter { it.removed }
+        val left = results.filterNot { it.removed || it.status == "NO_CHANGE" }
+        return Outcome.Report(
+            title,
+            listOfNotNull(
+                "Freed ${removed.sumOf { it.bytes }.humanBytes()}",
+                "${removed.size.plural("item")} deleted for good",
+                left.takeIf { it.isNotEmpty() }?.let { "${it.size.plural("item")} left alone" },
+            ),
+            left.map { "${it.path.substringAfterLast('/')}: ${it.note.ifEmpty { it.status.lowercase().replace('_', ' ') }}" },
+        )
+    }
+
+    /** Android's own clean-up through Shizuku: "trim-caches" or "art-cleanup". Freed space is measured, not assumed. */
+    // Once asked, Android finishes on its own: on the 10-01 phone Stop after 40 s only lost the result, 8 s before it came.
+    /** Everything known about where the phone's storage goes, for the deep space screen and the storage report. */
+    fun phoneSpace(): PhoneSpace {
+        val deep = deepSpace.state.value
+        val folders = apps.state.value
+        return PhoneSpace(
+            disk = deep.disk,
+            shared = deep.shared,
+            appFolders = folders.folders?.let { PhoneSpace.appFolders(it.usage, folders.labels) }.orEmpty(),
+            scanned = _state.value.report?.tree?.root?.totalBytes,
+        )
+    }
+
+    fun systemClean(what: String) = launchRun(if (what == "trim-caches") "Trimming app caches" else "Cleaning up compiled code", stoppable = false) { progress ->
+        progress(0, 1, "Android is working on it; this can take a few minutes")
+        val (freed, answer) = deepSpace.systemClean(what)
+        val ok = answer.startsWith("exit=0")
+        Outcome.Report(
+            if (what == "trim-caches") "App caches trimmed" else "Compiled code cleaned up",
+            listOfNotNull(
+                "Free space grew by ${freed.humanBytes()}",
+                when {
+                    !ok -> "Android refused: ${answer.lineSequence().drop(1).firstOrNull { it.isNotBlank() } ?: answer.lineSequence().first()}"
+                    freed == 0L && what == "trim-caches" -> "Nothing changed: caches were already small, or this Android version doesn't let the shell user clear them"
+                    freed == 0L -> "Nothing to clean: no compiled code was left over"
+                    else -> null
+                },
+            ),
+            emptyList(),
+        ).also { deepSpace.load() }
+    }
+
+    /** "Always keep" in the Termux browser, or "Stop keeping" on the Termux screen. */
+    fun keepTermuxPaths(paths: List<String>, keep: Boolean) = launchRun(if (keep) "Keeping in Termux" else "No longer keeping", stoppable = false) { progress ->
+        progress(0, 1, "Waiting for Termux")
+        val summary = termux.keep(paths, keep)
+        val done = summary.results.count { it.status == "KEPT" || it.status == "UNKEPT" }
+        val report = termux.state.value.report
+        Outcome.Report(
+            if (keep) "Kept in Termux" else "No longer kept",
+            listOf(
+                if (keep) "${done.plural("item")} kept: the steward never cleans, deletes, moves or suggests removing them, nor what they run with"
+                else "${done.plural("item")} can be cleaned up again",
+                "The list is ~/.config/galaxy-steward/keep in Termux: one path per line, and you can edit it there",
+            ),
+            TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty()),
+        )
+    }
+
+    fun removeTermuxPrograms(programs: List<TermuxProgram>) = launchRun("Removing programs", stoppable = false) { progress ->
+        progress(0, 1, "Waiting for Termux")
+        termuxOutcome("Programs removed", termux.removePrograms(programs), "program", "programs")
+    }
+
+    /** git gc in the repositories picked: lossless, they work as before. */
+    fun packTermuxRepos(paths: List<String>) = launchRun("Packing Git repositories", stoppable = false) { progress ->
+        progress(0, 1, "git gc in ${paths.size.plural("repository", "repositories")}")
+        val summary = termux.packRepos(paths)
+        val report = termux.state.value.report
+        val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        // git gc that finds nothing to pack says so: 1.2.9 reported "0 repositories packed" and nothing else.
+        val already = summary.results.count { it.status == "NO_CHANGE" }
+        Outcome.Report(
+            if (summary.cleared == 0 && already > 0) "Already packed" else "Repositories packed",
+            listOfNotNull(
+                "Freed ${summary.freed.humanBytes()}",
+                summary.cleared.takeIf { it > 0 }?.let { "${it.plural("repository", "repositories")} packed; they work exactly as before" },
+                already.takeIf { it > 0 }?.let { "${it.plural("repository was", "repositories were")} already as small as git gc makes them" },
+            ) + (if (skipped.isNotEmpty()) listOf("${skipped.size.plural("repository", "repositories")} left as they were") else emptyList()),
+            skipped,
+        )
+    }
+
+    /** Moves project folders from shared storage into ~/projects in Termux, one checked copy at a time. */
+    fun moveIntoTermux(folders: List<String>) = launchRun("Moving into Termux", stoppable = false) { progress ->
+        val results = ArrayList<TermuxCleanResult>()
+        folders.forEachIndexed { i, folder ->
+            progress(i, folders.size, folder.substringAfterLast('/'))
+            results += termux.moveIntoTermux(folder).results
+        }
+        _state.update { it.copy(stale = true) }
+        termuxMoveOutcome("Moved into Termux", TermuxCleanSummary(results))
+    }
+
+    private fun termuxMoveOutcome(title: String, summary: TermuxCleanSummary): Outcome.Report {
+        val moved = summary.results.filter { it.status == "MOVED" }
+        val report = termux.state.value.report
+        val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        return Outcome.Report(
+            title,
+            buildList {
+                moved.forEach { add("${it.path.substringAfterLast('/')} → ${TermuxProtocol.relative(it.note, report?.home.orEmpty(), report?.prefix.orEmpty())}") }
+                if (moved.isNotEmpty()) add("Every file was compared before the original went. History → Undo moves it back.")
+                if (skipped.isNotEmpty()) add("${skipped.size.plural("folder")} stayed where ${if (skipped.size == 1) "it was" else "they were"}")
+            },
+            skipped,
+        )
+    }
+
+    private fun termuxOutcome(title: String, summary: TermuxCleanSummary, one: String, many: String): Outcome.Report {
+        val report = termux.state.value.report
+        val skipped = TermuxController.skippedNotes(summary, report?.home.orEmpty(), report?.prefix.orEmpty())
+        val lines = buildList {
+            add("Freed ${summary.freed.humanBytes()} inside Termux")
+            add("${summary.cleared.plural(one, many)} gone")
+            if (skipped.isNotEmpty()) add("${skipped.size.plural(one, many)} left alone (${TermuxController.reasonTally(summary)?.removePrefix("why: ")})")
+        }
+        return Outcome.Report(title, lines, skipped)
+    }
+
+    /**
+     * Puts back what no journal of this install records: what runs from before a reinstall left in the quarantine, and
+     * what a run Android stopped mid-step moved there without its line. Each item goes to its own path, or beside what has
+     * its name now, checked like any undo. What came from app folders stays ([QuarantineManager.orphanEntries]).
+     */
+    fun restoreOrphans() = launchRun("Putting back what no journal records", stoppable = false) { progress ->
+        val q = quarantine()
+        val (summary, left) = withContext(Dispatchers.IO) {
+            val runs = q.orphans()
+            val interrupted = q.interruptedWithUnrecorded().associateWith { q.unrecordedEntries(it) }
+            val entries = runs.flatMap { q.orphanEntries(it) } + interrupted.values.flatten()
+            val summary = RollbackEngine(rootPath, null).rollbackEntries(entries) { d, t, c -> progress(d, t, c) }
+            runs.forEach { q.pruneEmpty(it) }
+            // Only what putting back emptied: the rest of an interrupted run's folder is still Undo's, as it went.
+            interrupted.forEach { (id, put) -> q.pruneUp(id, put.map { it.b }) }
+            summary to (runs.sumOf { q.sizeOf(it) } + interrupted.keys.sumOf { q.unrecordedBytes(it) })
+        }
+        reindexLater(summary.changedPaths)
+        _state.update { it.copy(stale = true) }
+        val note = when {
+            left <= 0 -> emptyList()
+            summary.remaining > 0 -> listOf("${left.humanBytes()} stays in the quarantine: what came from app folders, and what couldn't go back")
+            else -> listOf("${left.humanBytes()} from app folders (Android/data, obb) stays in the quarantine")
+        }
+        Outcome.RolledBack("Items no journal records", summary.copy(messages = note + summary.messages))
+    }
+
+    /**
+     * Empties one run's quarantine, or all of it when [runId] is null: as the one run of the moment, so Undo can't work on
+     * a quarantine while it is being deleted, and a failure is shown instead of ending the app.
+     */
+    fun purgeQuarantine(runId: String?) = launchRun(if (runId == null) "Emptying the quarantine" else "Emptying a run's quarantine", stoppable = false) { progress ->
+        progress(0, 1, "")
+        val freed = withContext(Dispatchers.IO) {
+            val q = quarantine()
+            if (runId == null) q.purgeAll() else q.purge(runId)
+        }
+        Outcome.Purged(freed)
     }
 
     fun dismissOutcome() = _state.update { it.copy(outcome = null) }
@@ -379,7 +910,18 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         scope.launch(Dispatchers.IO) { refreshHistoryNow() }
     }
 
+    /** On the app's scope, which has no handler: anything it throws would end the app, so a failed refresh is logged. */
     private fun refreshHistoryNow() {
+        try {
+            readHistory()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            StewardLog.w("history refresh failed", e)
+        }
+    }
+
+    private fun readHistory() {
         val journals = app.journals.list()
         val byRun = if (StorageAccess.hasAccess(app)) {
             val q = quarantine()
@@ -387,7 +929,18 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         } else {
             emptyMap()
         }
-        _state.update { it.copy(journals = journals, quarantineByRun = byRun, quarantineBytes = byRun.values.sum()) }
+        val q = if (byRun.isEmpty()) null else quarantine()
+        val orphans = q?.orphans().orEmpty()
+        // Runs Android stopped mid-step can hold something their journal doesn't record: offered with the orphans.
+        val unrecorded = q?.interruptedWithUnrecorded().orEmpty().sumOf { q!!.unrecordedBytes(it) }
+        _state.update {
+            it.copy(
+                journals = journals,
+                quarantineByRun = byRun,
+                quarantineBytes = byRun.values.sum(),
+                orphanBytes = orphans.sumOf { id -> byRun[id] ?: 0L } + unrecorded,
+            )
+        }
     }
 
     // ------------------------------------------------------------------ settings

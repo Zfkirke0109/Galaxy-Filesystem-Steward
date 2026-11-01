@@ -1,5 +1,6 @@
 package com.galaxy.steward.core.plan
 
+import com.galaxy.steward.core.RunLog
 import com.galaxy.steward.core.dedupe.KeeperRanking
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.StorageTree
@@ -22,7 +23,13 @@ data class MoveFileOp(
  * Move a directory. Renamed as one unit when the destination does not exist and [allowRename] is set;
  * otherwise merged file by file, leaving protected content (credentials, nested projects, symlinks) in place.
  */
-data class MoveDirOp(val src: String, val dst: String, val allowRename: Boolean) : Operation
+data class MoveDirOp(
+    val src: String,
+    val dst: String,
+    val allowRename: Boolean,
+    /** What the folder held at the scan, counted as moved when it goes as one unit. */
+    val bytes: Long = 0,
+) : Operation
 
 /** Remove [path] after re-verifying, byte for byte, that it matches [canonical]. */
 data class DeleteDuplicateOp(
@@ -32,11 +39,30 @@ data class DeleteDuplicateOp(
     val sha256: String,
 ) : Operation
 
-/** Move a file or folder into the steward quarantine (reversible until the quarantine is emptied). */
-data class QuarantineOp(val path: String, val isDirectory: Boolean, val size: Long, val mtime: Long) : Operation
+/**
+ * Move a file or folder into the steward quarantine (reversible until the quarantine is emptied). With [extracted],
+ * the file is a zip that is only quarantined if its unpacked copy still matches it, entry by entry.
+ */
+data class QuarantineOp(
+    val path: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val mtime: Long,
+    val extracted: ExtractedCopy? = null,
+) : Operation
+
+/** Where a zip's files are unpacked: [folder] holds each entry's name, less [stripPrefix]. */
+data class ExtractedCopy(val folder: String, val stripPrefix: String)
 
 /** Remove a directory only if it is still empty at execution time. */
 data class RemoveEmptyDirOp(val path: String) : Operation
+
+/**
+ * Pack a folder nobody has touched in months into [zip] (deflate, best compression), check every file against its copy
+ * in the zip, then move the folder to the quarantine. Lossless: undo unpacks it again. [newest] is the newest file the
+ * scan saw; anything newer at run time means the folder is in use, and it stays.
+ */
+data class PackDirOp(val path: String, val zip: String, val newest: Long) : Operation
 
 /** Anything the user can tick in the UI. */
 sealed interface PlanItem {
@@ -95,6 +121,30 @@ data class DuplicateGroup(
     fun withKeeper(index: Int): DuplicateGroup =
         if (index in copies.indices && copies[index].zone.durable) copy(keeperIndex = index, keepReason = "Chosen by you") else this
 
+    /**
+     * When a folder merge removes this group's keeper, the copy that merge keeps instead ([mergeKeeps]: removed copy to
+     * kept copy), so the group and the merge never each keep a different copy.
+     */
+    fun keepingWhatMergesKeep(mergeKeeps: Map<String, String>): DuplicateGroup {
+        val canonical = mergeKeeps[keeper.path] ?: return this
+        val index = copies.indexOfFirst { it.path == canonical }
+        if (index < 0 || !copies[index].zone.durable) return this
+        val folder = canonical.substringBeforeLast('/').substringAfterLast('/')
+        return copy(keeperIndex = index, keepReason = "Kept: in $folder, where the folder merge keeps it")
+    }
+
+    /**
+     * When [keeper] sits in a folder offered for the quarantine ([quarantinedAt]: an older near-copy, an old run), the
+     * best copy outside such folders, if there is one. Kept in that folder, it would go with it once its duplicates had.
+     */
+    fun keepingOutside(rootPath: String, quarantinedAt: (String) -> Boolean): DuplicateGroup {
+        if (!quarantinedAt(keeper.path)) return this
+        val best = copies.withIndex()
+            .filter { (_, c) -> c.zone.durable && !quarantinedAt(c.path) }
+            .minWithOrNull(compareBy(KeeperRanking.copyComparator(rootPath)) { it.value }) ?: return this
+        return copy(keeperIndex = best.index, keepReason = "Kept: the other copies are in folders offered for clean-up")
+    }
+
     /** This group without the copies matching [drop]; null when fewer than two copies remain. */
     fun excluding(rootPath: String, drop: (String) -> Boolean): DuplicateGroup? {
         if (copies.none { drop(it.path) }) return this
@@ -152,6 +202,13 @@ data class FolderDuplicateGroup(
 
     fun withKeeper(index: Int): FolderDuplicateGroup =
         if (index in copies.indices && copies[index].zone.durable) copy(keeperIndex = index, keepReason = "Chosen by you") else this
+
+    /** Like [DuplicateGroup.keepingOutside]: the best copy outside folders offered for the quarantine, if any. */
+    fun keepingOutside(quarantinedAt: (String) -> Boolean): FolderDuplicateGroup {
+        if (!quarantinedAt(keeper.path)) return this
+        val index = copies.indices.firstOrNull { copies[it].zone.durable && !quarantinedAt(copies[it].path) } ?: return this
+        return copy(keeperIndex = index, keepReason = "Kept: the other copies are in folders offered for clean-up")
+    }
 }
 
 /** Two folders that share most of their content: merge [source] into [target]. */
@@ -165,6 +222,8 @@ data class FolderMerge(
     val uniqueFiles: Int,
     val uniqueBytes: Long,
     override val operations: List<Operation>,
+    /** Two folders of one name in different places (Documents/LogcatX, Reports/Diagnostics/LogcatX): one is enough. */
+    val sameName: Boolean = false,
 ) : PlanItem {
     override val title: String get() = source.substringAfterLast('/') + " → " + target.substringAfterLast('/')
     override val reclaimBytes: Long get() = commonBytes
@@ -174,13 +233,46 @@ data class FolderMerge(
 
 enum class JunkCategory(val title: String, val description: String, val defaultSelected: Boolean) {
     STALE_DOWNLOADS("Abandoned downloads", "Partial downloads (.crdownload, .part, .tmp) untouched for weeks.", true),
-    OLD_LOGS("Old system logs", "Dumps in /log that Samsung and other OEMs leave behind.", true),
+    OLD_LOGS("Old system logs", "Wi-Fi logs, dumps and bug reports that Samsung and other makers keep writing to /log.", true),
     EMPTY_FOLDERS("Empty folders", "Folders with nothing inside - often left by uninstalled apps.", true),
+    HEAP_DUMPS(
+        "Heap dumps",
+        "Java heap dumps (.hprof) from LeakCanary and Android Studio, a few days old. A debug build writes new ones when it " +
+            "runs again.",
+        true,
+    ),
     INSTALLED_APKS("Installed APKs", "Installer files for apps that are already installed at the same or newer version.", false),
+    OLD_INSTALLERS("Older installers", "APKs of an app when a newer installer of the same app is also on the phone. The newest stays.", false),
+    EXTRACTED_ARCHIVES(
+        "Archives already extracted",
+        "Zip, tar and tar.gz files whose every file is already unpacked in the folder next to them. Each unpacked file is " +
+            "checked against its copy in the archive right before the archive moves to the quarantine. The folder stays.",
+        true,
+    ),
+    NEAR_COPIES(
+        "Older near-copies of folders",
+        "Folders whose files mostly match a newer folder by name and size: a second download, an older export, a copy " +
+            "made before an edit. The newer one stays. The match is by names and sizes only, so review what differs.",
+        false,
+    ),
+    OLD_RUNS(
+        "Old run folders",
+        "Folders named by date and time that a tool writes on every run. The newest run, and any from the last two weeks, " +
+            "stay. If these are backups, older ones may hold something the newest doesn't, so review them.",
+        false,
+    ),
     THUMBNAIL_CACHES("Thumbnail caches", "Regenerable .thumbnails caches. Galleries rebuild them on demand.", false),
     TRASHED_MEDIA("Gallery trash", "Items already in the system trash (.trashed-*). Android deletes them after 30 days.", false),
+    RECYCLE_BINS("Other apps' recycle bins", "Files you already deleted in MT Manager and similar file managers, still kept in their recycle bins.", true),
     ZERO_BYTE_FILES("Empty files", "Zero-byte files. Occasionally used as markers, so review first.", false),
     ORPHANED_APP_FOLDERS("Leftover app folders", "Top-level folders named after apps that are no longer installed.", false),
+    APP_KEEPS_A_COPY(
+        "Also kept by an app",
+        "Big files of yours with the same name and size as one an app keeps in its own folder (Android/data, obb, media), " +
+            "like an AI model you copied into Layla. The app's copy stays; yours goes to the quarantine. Keep yours if other " +
+            "apps open it from where it is.",
+        false,
+    ),
 }
 
 data class JunkItem(
@@ -193,6 +285,8 @@ data class JunkItem(
     val note: String,
     /** For empty-folder trees: every directory to remove, deepest first (including [path]). */
     val emptyDirs: List<String> = emptyList(),
+    /** For an extracted zip: where its files are unpacked. */
+    val extracted: ExtractedCopy? = null,
 ) : PlanItem {
     override val title: String get() = path.substringAfterLast('/')
     override val reclaimBytes: Long get() = bytes
@@ -201,7 +295,7 @@ data class JunkItem(
         get() = if (category == JunkCategory.EMPTY_FOLDERS) {
             emptyDirs.ifEmpty { listOf(path) }.map { RemoveEmptyDirOp(it) }
         } else {
-            listOf(QuarantineOp(path, isDirectory, bytes, mtime))
+            listOf(QuarantineOp(path, isDirectory, bytes, mtime, extracted))
         }
 }
 
@@ -225,6 +319,10 @@ data class OrganizeMove(
 enum class OptimizeKind(val title: String) {
     FLATTEN_WRAPPER("Redundant nested folder"),
     BUCKET_FLAT_DIR("Oversized flat folder"),
+    LIFT_BUILD_OUTPUTS("Installers buried in build folders"),
+    COLLAPSE_CHAIN("Chain of empty folders"),
+    REPAIR_DATE_FOLDERS("Date folders inside source code"),
+    PACK_COLD_FOLDER("Folders untouched for months, packed"),
 }
 
 data class OptimizeItem(
@@ -236,8 +334,10 @@ data class OptimizeItem(
     val fileCount: Int,
     override val defaultSelected: Boolean,
     override val operations: List<Operation>,
+    /** About how much space applying it saves (packing); 0 for layout fixes. */
+    val savesBytes: Long = 0,
 ) : PlanItem {
-    override val reclaimBytes: Long get() = 0
+    override val reclaimBytes: Long get() = savesBytes
 }
 
 enum class Severity { INFO, ADVICE, WARNING }
@@ -269,14 +369,44 @@ data class ScanReport(
     val organize: List<OrganizeMove>,
     val optimize: List<OptimizeItem>,
     val insights: List<Insight>,
+    /** Sketches of the bigger folders, to compare with Termux's ([com.galaxy.steward.core.dedupe.FolderSketch]). */
+    val sketches: List<com.galaxy.steward.core.dedupe.DirSketch> = emptyList(),
+    /** Unchanged code folders filled in from the previous scan instead of listed again. */
+    val reusedFolders: Int = 0,
+    /** What the scan itself found ([RunLog.scan]), kept once runs have taken items out; null until then. */
+    val found: String? = null,
+    /** Items applied since the scan and taken out of this report. */
+    val applied: Int = 0,
 ) {
     val duplicateBytes: Long get() = duplicates.sumOf { it.reclaimBytes } + folderDuplicates.sumOf { it.reclaimBytes }
     val junkBytes: Long get() = junk.sumOf { it.reclaimBytes }
 
     fun allItems(): List<PlanItem> = duplicates + folderDuplicates + folderMerges + junk + organize + optimize
 
+    /**
+     * This report once you chose to keep [kept] (a copy, or the folder of a folder group): clutter that would put it in
+     * the quarantine, an older near-copy holding it say, is left out, as the scan leaves it out for the copies it keeps
+     * itself. Applied after the duplicates have gone, that clutter would leave no copy outside the quarantine.
+     */
+    fun leavingInPlace(kept: String): ScanReport {
+        val holding = junk.filter { it.category != JunkCategory.EMPTY_FOLDERS && (kept == it.path || kept.startsWith(it.path + "/")) }
+        if (holding.isEmpty()) return this
+        val gone = holding.mapTo(HashSet()) { it.id }
+        val notes = holding.take(20).map { item ->
+            Insight(
+                Severity.INFO,
+                "Left in place: ${item.path.substringAfterLast('/')}",
+                "It holds the copy you chose to keep, so it isn't offered for the quarantine. The next scan looks at it again.",
+                item.path,
+            )
+        }
+        return copy(junk = junk.filterNot { it.id in gone }, insights = insights + notes)
+    }
+
     /** Copy without the items that were applied successfully. */
     fun without(appliedIds: Set<String>): ScanReport = copy(
+        found = found ?: RunLog.scan(this),
+        applied = applied + allItems().count { it.id in appliedIds },
         duplicates = duplicates.filterNot { it.id in appliedIds },
         folderDuplicates = folderDuplicates.filterNot { it.id in appliedIds },
         folderMerges = folderMerges.filterNot { it.id in appliedIds },

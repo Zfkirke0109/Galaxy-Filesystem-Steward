@@ -35,11 +35,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.ui.components.IconBadge
+import com.galaxy.steward.ui.components.noteRequest
+import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 
 @Composable
 fun PermissionScreen(onLegacyResult: () -> Unit) {
     val context = LocalContext.current
-    val legacyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { onLegacyResult() }
+    val legacyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        onLegacyResult()
+        // Android 8-10, after "Don't ask again": the button would do nothing ever again, so App info opens instead.
+        openSettingsIfDeniedForGood(context, result.keys, result.values.all { it })
+    }
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -55,13 +61,15 @@ fun PermissionScreen(onLegacyResult: () -> Unit) {
         )
         Promise(Icons.Rounded.Search, "Read-only until you approve", "Scans only look. Every change is shown to you first.")
         Promise(Icons.Rounded.VerifiedUser, "Verified byte for byte", "Duplicates are re-checked with SHA-256 immediately before removal; the kept copy is never touched.")
-        Promise(Icons.AutoMirrored.Rounded.Undo, "Everything is undoable", "Each run is journaled. Clutter goes to a quarantine first.")
+        Promise(Icons.AutoMirrored.Rounded.Undo, "Undo from History", "Each run is journaled. Clutter goes to a quarantine first; only what says so is deleted for good.")
         Promise(Icons.Rounded.Lock, "Hands off what matters", "Android/data, app media, projects, Git repositories, keys and credentials are never moved or deleted.")
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                    legacyLauncher.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+                    val legacy = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    noteRequest(context, legacy.toList())
+                    legacyLauncher.launch(legacy)
                 } else {
                     try {
                         context.startActivity(StorageAccess.allFilesAccessIntent(context))

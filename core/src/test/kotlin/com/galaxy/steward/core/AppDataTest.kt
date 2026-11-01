@@ -170,4 +170,29 @@ class AppDataTest {
             assertNull(summary.messages.firstOrNull { it.startsWith("I/O error") })
         }
     }
+    /**
+     * The app came back (installed again, it made a new folder) before its leftovers were undone: they used to come back
+     * as "Android/data/com.gone.app (restored)", a folder no app, scan or browser looks at, and the run was marked undone.
+     */
+    @Test
+    fun leftoversOfAnAppInstalledAgainStayInTheQuarantine() = runTest {
+        TestFs().use { fs ->
+            layout(fs)
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val leftovers = scan(fs).items.filter { it.kind == AppJunkKind.LEFTOVERS }
+            assertEquals(2, apply(fs, journals, leftovers).quarantined)
+            fs.text("Android/data/com.gone.app/files/new.txt", "made by the new install")
+
+            val info = journals.list().single()
+            val lines = ArrayList<String>()
+            AppDataHelper.Helper.rollback(fs.rootPath, AppDataWire.encodeEntries(journals.entries(info.id))) { lines += it }
+            val undo = AppDataHelper.Client.readRollback(lines.asSequence()) { _, _, _ -> }
+            assertEquals(1, undo.restored)
+            assertEquals(1, undo.remaining)
+            assertFalse(fs.exists("Android/data/com.gone.app (restored)"))
+            assertFalse(fs.exists("Android/data/com.gone.app/files/save.bin"))
+            assertTrue(fs.exists("Android/media/com.gone.app/Pictures/x.jpg"))
+            assertTrue(File(fs.root, "${SafetyPolicy.STEWARD_DIR}/${SafetyPolicy.QUARANTINE_DIR}/${info.id}/Android/data/com.gone.app/files/save.bin").exists())
+        }
+    }
 }

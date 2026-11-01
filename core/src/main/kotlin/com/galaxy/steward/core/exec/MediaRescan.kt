@@ -29,10 +29,15 @@ object MediaRescan {
             // Never rescan the whole volume because one file at the top level changed.
             candidates += if (folder == root) path else folder
         }
-        val kept = ArrayList<String>()
-        for (c in candidates.sortedBy { it.length }) {
-            if (kept.none { c.startsWith("$it/") }) kept += c
-        }
-        return kept.sorted()
+        // A folder is scanned recursively, so drop every candidate that has another candidate above it. Walking up
+        // each path keeps this linear in the number of paths (a run can change tens of thousands of them).
+        return candidates.filter { c ->
+            var parent = c.substringBeforeLast('/', "")
+            while (parent.length > root.length) {
+                if (parent in candidates) return@filter false
+                parent = parent.substringBeforeLast('/', "")
+            }
+            true
+        }.sorted()
     }
 }

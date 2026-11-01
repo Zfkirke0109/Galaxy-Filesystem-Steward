@@ -35,18 +35,27 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.galaxy.steward.ui.components.ApplyProgressDialog
 import com.galaxy.steward.ui.components.OutcomeDialog
+import com.galaxy.steward.ui.screens.AppFolderBrowserScreen
 import com.galaxy.steward.ui.screens.AppFoldersScreen
+import com.galaxy.steward.ui.screens.AppLeftoversScreen
 import com.galaxy.steward.ui.screens.AppStorageScreen
 import com.galaxy.steward.ui.screens.AppsScreen
+import com.galaxy.steward.ui.screens.DeepSpaceScreen
 import com.galaxy.steward.ui.screens.DuplicatesScreen
 import com.galaxy.steward.ui.screens.ExplorerScreen
+import com.galaxy.steward.ui.screens.GoalScreen
 import com.galaxy.steward.ui.screens.HistoryScreen
 import com.galaxy.steward.ui.screens.HomeScreen
 import com.galaxy.steward.ui.screens.JunkScreen
 import com.galaxy.steward.ui.screens.OptimizeScreen
 import com.galaxy.steward.ui.screens.OrganizeScreen
 import com.galaxy.steward.ui.screens.PermissionScreen
+import com.galaxy.steward.ui.screens.PrivateDataScreen
 import com.galaxy.steward.ui.screens.SettingsScreen
+import com.galaxy.steward.ui.screens.TermuxBrowserScreen
+import com.galaxy.steward.ui.screens.TermuxPackagesScreen
+import com.galaxy.steward.ui.screens.TermuxProjectsScreen
+import com.galaxy.steward.ui.screens.TermuxReposScreen
 import com.galaxy.steward.ui.screens.TermuxScreen
 import com.galaxy.steward.ui.theme.StewardTheme
 
@@ -62,7 +71,16 @@ object Routes {
     const val APPS = "apps"
     const val APP_STORAGE = "app-storage"
     const val APP_FOLDERS = "app-folders"
+    const val APP_BROWSER = "app-browser"
+    const val DEEP_SPACE = "deep-space"
+    const val APP_LEFTOVERS = "app-leftovers"
+    const val PRIVATE_DATA = "private-data"
     const val TERMUX = "termux"
+    const val TERMUX_BROWSER = "termux-browser"
+    const val TERMUX_PACKAGES = "termux-packages"
+    const val TERMUX_REPOS = "termux-repos"
+    const val TERMUX_PROJECTS = "termux-projects"
+    const val GOAL = "goal"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
@@ -145,8 +163,17 @@ private fun StewardRoot(vm: StewardViewModel) {
             composable(Routes.OPTIMIZE) { OptimizeScreen(vm, state) { nav.popBackStack() } }
             composable(Routes.APPS) { AppsScreen(vm) { nav.navigate(it) } }
             composable(Routes.APP_STORAGE) { AppStorageScreen(vm) { nav.popBackStack() } }
-            composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm) { nav.popBackStack() } }
-            composable(Routes.TERMUX) { TermuxScreen(vm) { nav.popBackStack() } }
+            composable(Routes.APP_FOLDERS) { AppFoldersScreen(vm, { nav.navigate(Routes.APP_BROWSER) }) { nav.popBackStack() } }
+            composable(Routes.APP_BROWSER) { AppFolderBrowserScreen(vm) { nav.popBackStack() } }
+            composable(Routes.DEEP_SPACE) { DeepSpaceScreen(vm, { nav.navigate(Routes.PRIVATE_DATA) }) { nav.popBackStack() } }
+            composable(Routes.PRIVATE_DATA) { PrivateDataScreen(vm) { nav.popBackStack() } }
+            composable(Routes.APP_LEFTOVERS) { AppLeftoversScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX) { TermuxScreen(vm, { nav.navigate(it) }) { nav.popBackStack() } }
+            composable(Routes.TERMUX_BROWSER) { TermuxBrowserScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX_PACKAGES) { TermuxPackagesScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX_REPOS) { TermuxReposScreen(vm) { nav.popBackStack() } }
+            composable(Routes.TERMUX_PROJECTS) { TermuxProjectsScreen(vm) { nav.popBackStack() } }
+            composable(Routes.GOAL) { GoalScreen(vm, state) { nav.popBackStack() } }
         }
     }
 

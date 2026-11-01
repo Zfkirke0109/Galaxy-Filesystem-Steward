@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.FolderSpecial
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.QueryStats
@@ -41,9 +42,9 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.apps.AppStorage
+import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
-import com.galaxy.steward.core.appdata.AppArea
 import com.galaxy.steward.shizuku.ShizukuStatus
 import com.galaxy.steward.termux.TermuxBridge
 import com.galaxy.steward.termux.TermuxStatus
@@ -54,6 +55,8 @@ import com.galaxy.steward.ui.components.InlineNotice
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.UsageBar
+import com.galaxy.steward.ui.components.noteRequest
+import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 import kotlinx.coroutines.launch
 
 /** Everything apps keep outside your own folders: per-app storage, Android/data|obb|media and Termux. */
@@ -64,7 +67,10 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
     val termux by vm.termux.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val termuxPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.termux.refresh() }
+    val termuxPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.termux.refresh()
+        openSettingsIfDeniedForGood(context, listOf(TermuxBridge.PERMISSION), granted)
+    }
 
     LifecycleResumeEffect(Unit) {
         vm.apps.refreshAccess()
@@ -94,6 +100,7 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                             action = when (shizuku) {
                                 ShizukuStatus.NOT_INSTALLED -> "Get"
                                 ShizukuStatus.NOT_RUNNING -> "Open"
+                                ShizukuStatus.CONNECTING -> "Check again"
                                 ShizukuStatus.NO_PERMISSION -> "Allow"
                                 ShizukuStatus.READY -> null
                             },
@@ -101,6 +108,7 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                             when (shizuku) {
                                 ShizukuStatus.NOT_INSTALLED -> openUrl(context, "https://shizuku.rikka.app/download/")
                                 ShizukuStatus.NOT_RUNNING -> vm.apps.shizuku.launchManager()
+                                ShizukuStatus.CONNECTING -> vm.apps.shizuku.refresh()
                                 ShizukuStatus.NO_PERMISSION -> vm.apps.shizuku.requestPermission()
                                 ShizukuStatus.READY -> Unit
                             }
@@ -135,7 +143,10 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                         ) {
                             when (termux.status) {
                                 TermuxStatus.NOT_INSTALLED -> openUrl(context, "https://f-droid.org/packages/com.termux/")
-                                TermuxStatus.NO_PERMISSION -> termuxPermission.launch(TermuxBridge.PERMISSION)
+                                TermuxStatus.NO_PERMISSION -> {
+                                    noteRequest(context, listOf(TermuxBridge.PERMISSION))
+                                    termuxPermission.launch(TermuxBridge.PERMISSION)
+                                }
                                 TermuxStatus.READY -> Unit
                             }
                         }
@@ -153,7 +164,8 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     title = "Installed apps",
                     text = when {
                         !apps.usageAccess -> "Grant usage access to see what every app stores, split into app data and cache."
-                        apps.statsLoading && apps.apps.isEmpty() -> "Measuring apps…"
+                        apps.statsLoading && !apps.everLoaded ->
+                            "Measuring apps…" + if (apps.statsTotal > 0) " ${apps.statsDone} of ${apps.statsTotal}" else ""
                         apps.statsError != null -> apps.statsError!!
                         else -> "${apps.apps.size.plural("app")} use ${total.humanBytes()}: ${data.humanBytes()} app data, ${cache.humanBytes()} cache"
                     },
@@ -190,6 +202,47 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                     if (report == null) vm.apps.scanFolders()
                     navigate(Routes.APP_FOLDERS)
                 }
+            }
+
+            item {
+                val report = apps.folders
+                OverviewCard(
+                    icon = Icons.Rounded.FolderOpen,
+                    title = "Browse app folders",
+                    text = "Open Android/data, obb and media folder by folder, like a file manager, and remove the files and " +
+                        "folders you choose - into the quarantine, or for good." +
+                        if (report != null && AppArea.DATA !in report.areas) " Connect Shizuku for Android/data and obb." else "",
+                    fraction = null,
+                    busy = false,
+                    action = "Browse",
+                ) {
+                    if (apps.folders == null && !apps.foldersScanning) vm.apps.scanFolders()
+                    navigate(Routes.APP_BROWSER)
+                }
+            }
+
+            item {
+                OverviewCard(
+                    icon = Icons.Rounded.FolderOpen,
+                    title = "What an app left behind",
+                    text = "Pick an app you removed (or one still installed), or type a name: its folders and backups in shared " +
+                        "storage, its installers, Android/data, Termux files and what adb pushed, in one list to remove in one run.",
+                    fraction = null,
+                    busy = false,
+                    action = "Find",
+                ) { navigate(Routes.APP_LEFTOVERS) }
+            }
+
+            item {
+                OverviewCard(
+                    icon = Icons.Rounded.Key,
+                    title = "Beyond app folders",
+                    text = "Through Shizuku: what Android itself counts (System, Other), its own cache and compiled-code clean-ups, what adb " +
+                        "left in /data/local/tmp, bug reports, Layla's and UserLAnd's private data, and your debuggable builds' data.",
+                    fraction = null,
+                    busy = false,
+                    action = if (shizuku == ShizukuStatus.READY) "Open" else null,
+                ) { navigate(Routes.DEEP_SPACE) }
             }
 
             item { SectionHeader("Termux") }

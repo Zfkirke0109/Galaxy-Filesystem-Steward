@@ -104,4 +104,18 @@ class PolicyAndRulesTest {
         val targets = MediaRescan.targets(root, changed) { it in dirs }
         assertEquals(listOf("$root/Documents/Archives/Presets", "$root/Download/Trip", "$root/notes.txt"), targets)
     }
+    /** Shared storage ignores case: a pin typed "documents/taxes" protects Documents/Taxes, at run time and in the scan. */
+    @Test
+    fun pinsAndTopFoldersIgnoreCase() = kotlinx.coroutines.test.runTest {
+        TestFs().use { fs ->
+            fs.text("Documents/Taxes/2024.pdf", "tax")
+            fs.ageDirectories()
+            val guard = com.galaxy.steward.core.exec.PathGuard(fs.rootPath, listOf("documents/taxes"))
+            assertEquals("pinned folder", guard.protectionReason(fs.path("Documents/Taxes/2024.pdf")))
+            assertEquals("app-owned storage", guard.protectionReason(fs.path("android/data/com.x/a")))
+            assertEquals("steward quarantine", guard.protectionReason(fs.root.path + "/.storagesteward/Quarantine/x"))
+            val tree = Steward(fs.rootPath, testSettings.copy(protectedFolders = listOf("documents/taxes")), TestEnv, null).scan().tree
+            assertEquals(com.galaxy.steward.core.model.Zone.USER_PROTECTED, tree.find("Documents/Taxes")?.zone)
+        }
+    }
 }

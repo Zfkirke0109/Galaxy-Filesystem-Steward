@@ -90,7 +90,7 @@ fun JunkScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                             }
                         }
                         if (isOpen) {
-                            items.take(300).forEach { item -> JunkRow(item, item.id in state.selected, vm.rootPath) { vm.toggle(item.id) } }
+                            items.take(300).forEach { item -> JunkRow(item, item.id in state.selected, vm.rootPath, state.learned[item.id]?.note) { vm.toggle(item.id) } }
                             if (items.size > 300) {
                                 Text(
                                     "…and ${items.size - 300} more",
@@ -121,17 +121,18 @@ fun JunkScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 vm.apply("Clutter cleanup", "junk", items)
             },
             onDismiss = { confirm = null },
+            check = { vm.preflight(items) },
         )
     }
 }
 
 @Composable
-private fun JunkRow(item: JunkItem, checked: Boolean, root: String, onToggle: () -> Unit) {
+private fun JunkRow(item: JunkItem, checked: Boolean, root: String, learned: String?, onToggle: () -> Unit) {
     SelectRow(
         checked = checked,
         onCheckedChange = { onToggle() },
         title = item.title,
-        subtitle = item.path.substringBeforeLast('/').relativeTo(root) + " · " + item.note,
+        subtitle = item.path.substringBeforeLast('/').relativeTo(root) + " · " + item.note + (learned?.let { " · Learned: $it" } ?: ""),
         trailing = { if (item.bytes > 0) Text(item.bytes.humanBytes(), style = MaterialTheme.typography.labelMedium) },
     )
 }

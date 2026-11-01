@@ -1,5 +1,6 @@
 package com.galaxy.steward.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,24 +15,32 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import com.galaxy.steward.core.exec.PreflightResult
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.ui.ApplyProgress
 import com.galaxy.steward.ui.Outcome
+import kotlinx.coroutines.CancellationException
 
 /** Confirmation "token" for any change: the Termux steward required typing one, the app requires this tap. */
 @Composable
@@ -42,7 +51,27 @@ fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     footnote: String = "Every change is verified and journaled. You can undo this run from History.",
+    /** A dry run of what is about to be applied ([com.galaxy.steward.core.exec.Preflight]), shown as it comes. */
+    check: (suspend () -> PreflightResult)? = null,
+    /** Where the dry run looks, when it doesn't cover every step (" in shared storage"). */
+    checkedWhere: String = "",
 ) {
+    var checked by remember { mutableStateOf<PreflightResult?>(null) }
+    var checking by remember { mutableStateOf(check != null) }
+    if (check != null) {
+        LaunchedEffect(Unit) {
+            // Closing the dialog cancels the check; anything else going wrong only means there is no early answer,
+            // since a run makes the same checks again right before each step.
+            checked = try {
+                check()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            checking = false
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Rounded.Shield, contentDescription = null) },
@@ -50,11 +79,67 @@ fun ConfirmDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 lines.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                if (check != null) {
+                    val r = checked
+                    val text = when {
+                        checking -> "Checking each step against your storage now…"
+                        r == null -> "Couldn't check beforehand; each step is still checked right before it runs"
+                        r.skipped == 0 -> "Checked just now: ${if (r.total == 1) "the step$checkedWhere is" else "all ${r.total} steps$checkedWhere are"} as scanned"
+                        else -> "Checked just now: ${r.skipped} of ${r.total.plural("step")}$checkedWhere will be skipped (" +
+                            r.stale.entries.joinToString("; ") { (why, n) -> "$why: $n" } + ")"
+                    }
+                    val warn = r != null && r.skipped > 0
+                    Text("• $text", style = MaterialTheme.typography.bodyMedium, color = if (warn) MaterialTheme.colorScheme.error else Color.Unspecified)
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(footnote, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
         confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/**
+ * For changes nothing can undo (deleting inside Termux, removing a distribution): names what goes and only confirms
+ * after "I understand".
+ */
+@Composable
+fun IrreversibleDialog(
+    title: String,
+    names: List<String>,
+    lines: List<String>,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var understood by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (names.isNotEmpty()) {
+                    Text(
+                        if (names.size <= 4) names.joinToString() else names.take(3).joinToString() + " and ${names.size - 3} more",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                }
+                lines.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                Row(Modifier.fillMaxWidth().clickable { understood = !understood }, verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = understood, onCheckedChange = { understood = it })
+                    Text("I understand this can't be undone", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = understood,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(confirmLabel) }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
@@ -73,13 +158,15 @@ fun ApplyProgressDialog(progress: ApplyProgress, onCancel: () -> Unit) {
                     Text(progress.current, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                 }
                 Text(
-                    "Stopping is safe: completed steps stay journaled and can be undone.",
+                    if (progress.stoppable) "Stopping is safe: completed steps stay journaled and can be undone."
+                    else "Android, Termux or the Shizuku helper does this outside the app, so it can't be stopped halfway. You can leave " +
+                        "the app; the result waits here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onCancel) { Text("Stop") } },
+        confirmButton = { if (progress.stoppable) TextButton(onClick = onCancel) { Text("Stop") } },
     )
 }
 
@@ -91,16 +178,27 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
             val s = outcome.summary
             val lines = buildList {
                 if (s.bytesFreed > 0) add("Freed ${s.bytesFreed.humanBytes()}")
-                if (s.cleared > 0) add("${s.cleared.plural("cache, log or temp file", "cache, log and temp files")} removed for good")
-                if (s.deduped > 0) add("${s.deduped.plural("verified duplicate", "verified duplicates")} removed")
-                if (s.quarantined > 0) add("${s.quarantined.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
+                if (s.cleared > 0) add("${s.cleared.plural("file")} removed for good")
+                if (s.deduped > 0) {
+                    add(
+                        "${s.deduped.plural("verified duplicate", "verified duplicates")} " +
+                            (if (s.dedupedQuarantined > 0) "moved to the quarantine" else "removed") +
+                            if (s.alreadyFiled > 0) " (${s.alreadyFiled} of them already filed where they were going)" else "",
+                    )
+                }
+                // The quarantined bytes include duplicates moved there, so they are counted with the items.
+                val inQuarantine = s.quarantined + s.dedupedQuarantined
+                if (inQuarantine > 0) add("${inQuarantine.plural("item", "items")} quarantined (${s.bytesQuarantined.humanBytes()} - freed when the quarantine is emptied)")
+                if (s.packed > 0) add("${s.packed.plural("folder", "folders")} packed into zips (${s.bytesPacked.humanBytes()}); the folders are in the quarantine")
                 if (s.moved > 0) add("${s.moved.plural("item", "items")} organised")
                 if (s.removedDirs > 0) add("${s.removedDirs.plural("empty folder", "empty folders")} removed")
                 if (s.skipped > 0) add("${s.skipped.plural("step", "steps")} skipped safely")
                 if (s.failed > 0) add("${s.failed.plural("step", "steps")} failed")
                 if (isEmpty()) add("Nothing needed changing.")
             }
-            Outcome5(outcome.title, lines, s.messages, s.runId.takeIf { s.changedAnything }, outcome.title)
+            // The counts by reason first: a long list of paths hides that they were all skipped for one reason.
+            val reasons = s.reasons.entries.sortedByDescending { it.value }.map { "${it.key}: ${it.value.plural("file")}" }
+            Outcome5(outcome.title, lines, reasons + s.messages, s.runId.takeIf { s.changedAnything }, outcome.title)
         }
         is Outcome.RolledBack -> {
             val s = outcome.summary
@@ -108,7 +206,8 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
                 "Undone",
                 listOf("${s.restored.plural("change", "changes")} reverted") +
                     (if (s.skipped > 0) listOf("${s.skipped} left as they are (already changed)") else emptyList()) +
-                    (if (s.failed > 0) listOf("${s.failed} could not be reverted") else emptyList()),
+                    (if (s.failed > 0) listOf("${s.failed} could not be reverted") else emptyList()) +
+                    (if (s.remaining > 0) listOf("${s.remaining} still in the quarantine: undo this run again from History") else emptyList()),
                 s.messages, null, "",
             )
         }

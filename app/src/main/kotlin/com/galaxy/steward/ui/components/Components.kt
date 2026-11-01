@@ -189,6 +189,8 @@ fun SelectRow(
     leading: @Composable (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
     enabled: Boolean = true,
+    /** Rows that explain themselves over several lines (dates, status) ask for more. */
+    subtitleLines: Int = 2,
 ) {
     Row(
         modifier.fillMaxWidth().clickable(enabled = enabled) { onCheckedChange(!checked) }.padding(start = 4.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
@@ -202,7 +204,7 @@ fun SelectRow(
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
             if (!subtitle.isNullOrEmpty()) {
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = subtitleLines, overflow = TextOverflow.Ellipsis)
             }
         }
         if (trailing != null) {

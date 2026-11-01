@@ -34,6 +34,8 @@ junit = { module = "junit:junit", version.ref = "junit" }
 shizuku-api = { module = "dev.rikka.shizuku:api", version.ref = "shizuku" }
 shizuku-provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizuku" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
+# The Android jar Robolectric runs the tests' SDK 35 on, for this Robolectric version (app/build.gradle.kts).
+robolectric-android-all = { module = "org.robolectric:android-all-instrumented", version = "15-robolectric-13954326-i7" }
 roborazzi = { module = "io.github.takahirom.roborazzi:roborazzi", version.ref = "roborazzi" }
 roborazzi-compose = { module = "io.github.takahirom.roborazzi:roborazzi-compose", version.ref = "roborazzi" }
 androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExt" }

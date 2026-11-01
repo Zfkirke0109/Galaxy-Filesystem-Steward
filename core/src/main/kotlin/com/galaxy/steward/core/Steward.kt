@@ -1,22 +1,37 @@
 package com.galaxy.steward.core
 
+import com.galaxy.steward.core.dedupe.DirSketch
 import com.galaxy.steward.core.dedupe.DuplicateFinder
 import com.galaxy.steward.core.dedupe.FolderAnalyzer
+import com.galaxy.steward.core.dedupe.FolderSketch
 import com.galaxy.steward.core.dedupe.HashListener
 import com.galaxy.steward.core.dedupe.HashStage
+import com.galaxy.steward.core.dedupe.NearCopy
+import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.hash.HashCache
 import com.galaxy.steward.core.junk.JunkPlanner
+import com.galaxy.steward.core.learn.ScanMemory
+import com.galaxy.steward.core.learn.YourMoves
 import com.galaxy.steward.core.model.FileKind
+import com.galaxy.steward.core.model.NodeFlags
 import com.galaxy.steward.core.model.StorageTree
 import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.optimize.OptimizePlanner
 import com.galaxy.steward.core.optimize.VolumeSpace
 import com.galaxy.steward.core.organize.OrganizePlanner
+import com.galaxy.steward.core.plan.DeleteDuplicateOp
+import com.galaxy.steward.core.plan.Insight
+import com.galaxy.steward.core.plan.JunkCategory
+import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.KindStat
 import com.galaxy.steward.core.plan.LargeFile
+import com.galaxy.steward.core.plan.PlanHygiene
 import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.plan.Severity
 import com.galaxy.steward.core.plan.StorageSummary
 import com.galaxy.steward.core.scan.TreeScanner
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.util.PriorityQueue
 
@@ -60,18 +75,23 @@ class Steward(
     private val settings: StewardSettings,
     private val environment: DeviceEnvironment,
     private val hashCacheFile: File?,
+    /** Where your files were at the last scan and how full storage was: for learning your moves and storage growth. */
+    private val memory: ScanMemory? = null,
 ) {
-    suspend fun scan(space: VolumeSpace? = null, onProgress: (ScanProgress) -> Unit = {}): ScanReport {
+    /** [previous]: the last scan's tree, so unchanged code folders needn't be listed again ([TreeScanner]). */
+    suspend fun scan(space: VolumeSpace? = null, previous: StorageTree? = null, onProgress: (ScanProgress) -> Unit = {}): ScanReport {
         val started = environment.nowMillis()
         onProgress(ScanProgress(ScanPhase.MAPPING))
-        val tree = TreeScanner(rootPath, settings).scan { dirs, files, bytes, current ->
+        val scanner = TreeScanner(rootPath, settings, previous = previous)
+        val tree = scanner.scan { dirs, files, bytes, current ->
             onProgress(ScanProgress(ScanPhase.MAPPING, dirs.toLong(), 0, current, files, bytes))
         }
         val filesSeen = tree.root.totalFiles.toLong()
         val bytesSeen = tree.root.totalBytes
 
         onProgress(ScanProgress(ScanPhase.JUNK, filesSeen = filesSeen, bytesSeen = bytesSeen))
-        val junk = JunkPlanner(settings, environment).plan(tree)
+        val junkPlanner = JunkPlanner(settings, environment)
+        val junk = junkPlanner.plan(tree)
 
         val cache = HashCache(hashCacheFile)
         val hashListener = HashListener { stage, done, total, _, _ ->
@@ -79,40 +99,101 @@ class Steward(
             onProgress(ScanProgress(phase, done, total, "", filesSeen, bytesSeen))
         }
         onProgress(ScanProgress(ScanPhase.FINGERPRINT, filesSeen = filesSeen, bytesSeen = bytesSeen))
-        val duplicates = DuplicateFinder(settings, cache, hashListener).find(tree)
-
-        onProgress(ScanProgress(ScanPhase.FOLDERS, filesSeen = filesSeen, bytesSeen = bytesSeen))
         val folderListener = HashListener { _, done, total, _, _ ->
             onProgress(ScanProgress(ScanPhase.FOLDERS, done, total, "", filesSeen, bytesSeen))
         }
-        val folders = FolderAnalyzer(settings, cache, duplicates, folderListener).analyze(tree)
-        cache.save()
+        // Saved however hashing ends: a scan stopped by you, or the weekly upkeep stopped by Android, keeps what it worked
+        // out, and the next one starts from there instead of from nothing.
+        val (duplicates, folders) = try {
+            val duplicates = DuplicateFinder(settings, cache, hashListener).find(tree)
+            onProgress(ScanProgress(ScanPhase.FOLDERS, filesSeen = filesSeen, bytesSeen = bytesSeen))
+            duplicates to FolderAnalyzer(settings, cache, duplicates, folderListener, environment.deviceLabel).analyze(tree)
+        } finally {
+            cache.save()
+        }
+        currentCoroutineContext().ensureActive()
+        onProgress(ScanProgress(ScanPhase.PLANNING, filesSeen = filesSeen, bytesSeen = bytesSeen))
+        val sketches = FolderSketch.sketches(tree.root, minBytes = settings.nearCopyMinBytes)
+        val exactPaths = folders.exact.flatMap { g -> g.copies.map { it.path } } + folders.merges.flatMap { listOf(it.source, it.target) }
+        val nearCopies = FolderSketch.nearCopies(sketches).filterNot { pair ->
+            exactPaths.any { p -> pair.a == p || pair.b == p || pair.a.startsWith("$p/") || pair.b.startsWith("$p/") }
+        }
+        val (nearJunk, nearInsights) = nearCopyItems(tree, sketches, nearCopies, junk)
+        currentCoroutineContext().ensureActive()
+
+        // The copy a duplicate group keeps must not sit in a folder offered for the quarantine (an older near-copy, an old
+        // run): after the duplicates went, in this run or a later one from the same scan, quarantining that folder would
+        // leave no copy outside the quarantine, and none at all once it is emptied. Such a group keeps a copy outside
+        // instead, where it has one; clutter that would still take a kept copy, or a folder a merge fills, is left out.
+        val quarantined = (junk + nearJunk).filter { it.category != JunkCategory.EMPTY_FOLDERS }.map { it.path }
+        fun quarantinedAt(path: String) = quarantined.any { path == it || path.startsWith("$it/") }
+        val exactGroups = if (quarantined.isEmpty()) folders.exact else folders.exact.map { it.keepingOutside(::quarantinedAt) }
+
         // Copies inside a folder that is itself a removable duplicate are covered by that folder group;
         // listing them again would double-count the reclaimable space.
-        val folderRemovals = folders.exact.flatMap { g -> g.removals.map { it.path + "/" } }
-        val fileGroups = if (folderRemovals.isEmpty()) {
+        val folderRemovals = exactGroups.flatMap { g -> g.removals.map { it.path + "/" } }
+        val unmerged = if (folderRemovals.isEmpty()) {
             duplicates.groups
         } else {
             duplicates.groups.mapNotNull { g -> g.excluding(rootPath) { path -> folderRemovals.any { path.startsWith(it) } } }
         }
+        // A copy a folder merge removes keeps, in its duplicate group too, the copy the merge keeps: each would otherwise
+        // keep its own pick, and whichever ran second would find its kept copy gone and stop.
+        val mergeKeeps = HashMap<String, String>()
+        folders.merges.forEach { m -> m.operations.forEach { op -> if (op is DeleteDuplicateOp) mergeKeeps[op.path] = op.canonical } }
+        val merged = if (mergeKeeps.isEmpty()) unmerged else unmerged.map { it.keepingWhatMergesKeep(mergeKeeps) }
+        // The copy a merge keeps stays kept, even offered for the quarantine: that offer is left out instead (keptPaths),
+        // since another copy outside would be one the merge removes.
+        val mergeKept = mergeKeeps.values.toHashSet()
+        val fileGroups = if (quarantined.isEmpty()) {
+            merged
+        } else {
+            merged.map { g -> if (g.keeper.path in mergeKept) g else g.keepingOutside(rootPath, ::quarantinedAt) }
+        }
 
-        onProgress(ScanProgress(ScanPhase.PLANNING, filesSeen = filesSeen, bytesSeen = bytesSeen))
-        val organize = OrganizePlanner(settings, environment).plan(tree)
+        val keptPaths = fileGroups.map { it.keeper.path } + exactGroups.map { it.keeper.path } + folders.merges.map { it.target } + mergeKept
+        fun holdsKept(item: JunkItem) = item.category != JunkCategory.EMPTY_FOLDERS &&
+            keptPaths.any { it == item.path || it.startsWith(item.path + "/") }
+        val (keptJunk, freeJunk) = (junk + nearJunk).partition(::holdsKept)
+        val keptNotes = keptJunk.take(20).map { item ->
+            Insight(
+                Severity.INFO,
+                "Left in place: ${item.path.substringAfterLast('/')}",
+                "It holds the copy a duplicate or a folder merge keeps, so it isn't offered for the quarantine with them. " +
+                    "Once the duplicates are gone, the next scan looks at it again.",
+                item.path,
+            )
+        }
+
+        val yours = if (settings.learnFromFolders) memory?.movesSince(tree) ?: YourMoves.NONE else YourMoves.NONE
+        val organize = OrganizePlanner(settings, environment).plan(tree, yours)
+        currentCoroutineContext().ensureActive()
         val optimize = OptimizePlanner(settings, environment).plan(tree, space)
+        currentCoroutineContext().ensureActive()
+        val hygiene = PlanHygiene(PathGuard(rootPath, settings.protectedFolders))
 
-        // Something already proposed for dedupe or cleanup should not also be filed: drop conflicting moves.
+        // Something already proposed for dedupe, a merge or cleanup should not also be filed: drop conflicting moves, and
+        // moves into a folder a merge empties.
         val claimed = HashSet<String>()
         fileGroups.forEach { g -> g.removals.forEach { claimed += it.path } }
-        folders.exact.forEach { g -> g.removals.forEach { claimed += it.path } }
-        junk.forEach { claimed += it.path }
-        val moves = organize.moves.filterNot { move ->
+        exactGroups.forEach { g -> g.removals.forEach { claimed += it.path } }
+        folders.merges.forEach { claimed += it.source }
+        freeJunk.forEach { claimed += it.path }
+        val mergedAway = folders.merges.map { it.source + "/" }
+        val moves = hygiene.organize(organize.moves).filterNot { move ->
             var path = move.source
             var hit = false
             while (!hit && path.length > rootPath.length) {
                 hit = path in claimed
                 path = path.substringBeforeLast('/')
             }
-            hit
+            hit || mergedAway.any { move.destination.startsWith(it) }
+        }
+
+        val growth = memory?.let { m ->
+            m.rememberPlaces(tree)
+            val point = ScanMemory.pointOf(tree, environment.nowMillis(), space?.freeBytes ?: -1, space?.totalBytes ?: -1)
+            ScanMemory.growthInsight(m.history(), point).also { m.record(point) }
         }
 
         val report = ScanReport(
@@ -121,15 +202,70 @@ class Steward(
             finishedAt = environment.nowMillis(),
             summary = summarize(tree),
             duplicates = fileGroups,
-            folderDuplicates = folders.exact,
+            folderDuplicates = exactGroups,
             folderMerges = folders.merges,
-            junk = junk,
+            junk = hygiene.junk(freeJunk),
             organize = moves,
-            optimize = optimize.items,
-            insights = optimize.insights + organize.insights.take(50),
+            optimize = hygiene.optimize(optimize.items),
+            insights = listOfNotNull(growth) + junkPlanner.notes + keptNotes + optimize.insights + nearInsights + organize.insights.take(50),
+            sketches = sketches,
+            reusedFolders = scanner.reusedFolders,
         )
         onProgress(ScanProgress(ScanPhase.DONE, 1, 1, "", filesSeen, bytesSeen))
         return report
+    }
+
+    /**
+     * The older folder of each near-copy pair, for review, when it may go as a unit; projects, source trees and anything
+     * holding keys are only named.
+     */
+    private fun nearCopyItems(
+        tree: StorageTree,
+        sketches: List<DirSketch>,
+        pairs: List<NearCopy>,
+        junk: List<JunkItem>,
+    ): Pair<List<JunkItem>, List<Insight>> {
+        val byPath = sketches.associateBy { it.path }
+        val claimed = junk.map { it.path }
+        val items = ArrayList<JunkItem>()
+        val insights = ArrayList<Insight>()
+        fun near(a: String, b: String) = a == b || a.startsWith("$b/") || b.startsWith("$a/")
+        // Pairs offered so far: the older folders that go and the newer ones that stay. A folder that stays for one pair
+        // never goes for another, nor with a folder around it: nested pairs (Proj/vids a newer copy of an export, Proj an
+        // older copy of Proj-v2) would otherwise put every copy in the quarantine.
+        val going = ArrayList<String>()
+        val staying = ArrayList<String>()
+        for (pair in pairs) {
+            val (older, newer) = listOf(pair.a, pair.b).sortedBy { byPath[it]?.newest ?: 0L }
+            if (claimed.any { older == it || older.startsWith("$it/") || it.startsWith("$older/") }) continue
+            if (staying.any { near(older, it) } || going.any { near(older, it) || near(newer, it) }) continue
+            val node = tree.find(older.removePrefix(tree.rootPath + "/")) ?: continue
+            val rel = { p: String -> p.removePrefix(tree.rootPath + "/") }
+            val movable = node.zone.removable && !node.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)
+            if (movable) {
+                going += older
+                staying += newer
+                items += JunkItem(
+                    id = "junk:NEAR_COPIES:${older.hashCode().toString(16)}:${older.length}",
+                    category = JunkCategory.NEAR_COPIES,
+                    path = older,
+                    isDirectory = true,
+                    bytes = node.totalBytes,
+                    mtime = byPath[older]?.newest ?: node.mtime,
+                    note = "${pair.percent}% the same files as ${rel(newer)}, which is newer and stays",
+                )
+            } else {
+                insights += Insight(
+                    Severity.ADVICE,
+                    "Near-copies: ${older.substringAfterLast('/')} and ${newer.substringAfterLast('/')}",
+                    "${rel(older)} and ${rel(newer)} share about ${pair.percent}% of their files by name and size; " +
+                        "${rel(newer)} is the newer. The steward doesn't remove projects, source trees or folders with keys; " +
+                        "if one is an old copy, delete it yourself.",
+                    older,
+                )
+            }
+        }
+        return items to insights
     }
 
     companion object {
