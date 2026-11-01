@@ -75,10 +75,13 @@ object JournalAction {
                 out += e
             }
         }
-        // Lines still open are changes without their own line: kept where they stand if they happened.
+        // Lines still open are changes without their own line: kept where they stand if they happened. One whose new
+        // place a later line put something inside never happened: that place was made for the later one (a folder whose
+        // move failed in a journal from before abandoned lines were written, then a file of it quarantined).
         for (index in open.values.flatten()) {
             val e = out[index] ?: continue
-            if (e.action !in AHEAD || !happened(e)) out[index] = null
+            val madeForLater = e.b.isNotEmpty() && (index + 1 until out.size).any { out[it]?.b?.startsWith(e.b + "/") == true }
+            if (e.action !in AHEAD || madeForLater || !happened(e)) out[index] = null
         }
         return out.filterNotNull()
     }

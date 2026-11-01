@@ -73,6 +73,126 @@ class QuarantinePurgeTest {
         }
     }
 
+    /**
+     * Emptying by age deletes what the journal records, and only inside the quarantine: a folder of the run replaced by a
+     * link to DCIM must not lead it to the photo the journal's path names there.
+     */
+    @Test
+    fun emptyingByAgeNeverDeletesThroughALinkedFolder() = runTest {
+        TestFs().use { fs ->
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val q = QuarantineManager(PathGuard(fs.rootPath), journals)
+            val run = quarantineRun(fs, journals, "DCIM/Camera/IMG_1.jpg", finishedDaysAgo = 10)
+            // Undone by hand, and the run's DCIM folder swapped for a link to the real one.
+            val inQuarantine = q.dirFor(run).resolve("DCIM/Camera/IMG_1.jpg").toFile()
+            val photo = File(fs.path("DCIM/Camera/IMG_1.jpg"))
+            inQuarantine.copyTo(photo)
+            q.dirFor(run).resolve("DCIM").toFile().deleteRecursively()
+            Files.createSymbolicLink(q.dirFor(run).resolve("DCIM"), File(fs.path("DCIM")).toPath())
+
+            q.purgeExpired(retentionDays = 7)
+            assertTrue(photo.exists())
+        }
+    }
+
+    /**
+     * A debug build installed beside the app has its own quarantine: emptying it, or putting back what no journal of its
+     * own records, leaves the app's runs alone. They shared one, so each took the other's runs for runs without a journal.
+     */
+    @Test
+    fun aDebugBuildNeverEmptiesTheAppsQuarantine() = runTest {
+        TestFs().use { fs ->
+            val appJournals = JournalStore(File(fs.stateDir, "journals"))
+            val run = quarantineRun(fs, appJournals, "Download/a.apk", finishedDaysAgo = 1)
+            val inAppQuarantine = QuarantineManager(PathGuard(fs.rootPath), appJournals).dirFor(run).resolve("Download/a.apk").toFile()
+            assertTrue(inAppQuarantine.exists())
+            try {
+                SafetyPolicy.forBuild("com.galaxy.steward.debug")
+                val debug = QuarantineManager(PathGuard(fs.rootPath), JournalStore(File(fs.stateDir, "debug-journals")))
+                assertTrue(debug.orphans().isEmpty())
+                debug.purgeAll()
+                assertTrue(inAppQuarantine.exists())
+            } finally {
+                SafetyPolicy.forBuild("com.galaxy.steward")
+            }
+            assertEquals(SafetyPolicy.QUARANTINE_DIR, SafetyPolicy.quarantineDir)
+        }
+    }
+
+    /**
+     * History counts what an interrupted run left in the quarantine without a journal line while Put back may be moving
+     * it: a file gone in between counts as nothing instead of ending the app. Here a link to nothing stands in for it.
+     */
+    @Test
+    fun countingWhatNoJournalRecordsSurvivesFilesGoingMeanwhile() = runTest {
+        TestFs().use { fs ->
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val q = QuarantineManager(PathGuard(fs.rootPath), journals)
+            val run = journals.newId()
+            com.galaxy.steward.core.exec.JournalWriter(journals.fileFor(run)).use { it.meta("started", "1") }
+            journals.fileFor(run).setLastModified(System.currentTimeMillis() - 3_600_000)
+            // Listed on its own, as a file beside a recorded one would be, and gone before it is measured.
+            val dir = q.dirFor(run).also { Files.createDirectories(it) }
+            val link = Files.createSymbolicLink(dir.resolve("gone.jpg"), dir.resolve("nowhere.jpg"))
+            assertEquals(listOf(run), q.interruptedWithUnrecorded())
+            // Counted as what is there (the link itself, never what it names), where it used to throw.
+            val own = Files.readAttributes(link, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS).size()
+            assertEquals(own, q.unrecordedBytes(run))
+        }
+    }
+
+    /**
+     * A run still going (the weekly upkeep, say, while you open History) has items in the quarantine whose lines are
+     * about to come: it isn't offered as interrupted, so Put back can't take back what it is recording.
+     */
+    @Test
+    fun aRunStillGoingIsNotTakenForAnInterruptedOne() = runTest {
+        TestFs().use { fs ->
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val q = QuarantineManager(PathGuard(fs.rootPath), journals)
+            val run = journals.newId()
+            com.galaxy.steward.core.exec.JournalWriter(journals.fileFor(run)).use { it.meta("started", "1") }
+            File(q.dirFor(run).toFile(), "Download/moving.jpg").apply { parentFile.mkdirs() }.writeText("its line comes next")
+            assertEquals(emptyList<String>(), q.interruptedWithUnrecorded())
+            // Quiet for longer than a run takes between two lines: stopped.
+            assertEquals(listOf(run), q.interruptedWithUnrecorded(now = System.currentTimeMillis() + QuarantineManager.ACTIVE_MS))
+        }
+    }
+
+    /**
+     * Put back takes only what no journal records, and tidies only the folders it emptied: a folder the journal records,
+     * with an empty sub-folder, comes back with Undo as it went. Tidying the whole run's folder took its empty folders.
+     */
+    @Test
+    fun puttingBackLeavesARecordedFolderAsItWent() = runTest {
+        TestFs().use { fs ->
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val q = QuarantineManager(PathGuard(fs.rootPath), journals)
+            fs.text("Download/Old/a.txt", "a")
+            fs.dir("Download/Old/empty")
+            fs.ageDirectories()
+            val folder = File(fs.path("Download/Old"))
+            val item = JunkItem("junk:old", JunkCategory.NEAR_COPIES, folder.path, true, 1, folder.lastModified(), "test")
+            val run = ActionExecutor(fs.rootPath, journals).execute("Cleanup", "junk", listOf(item))
+            assertEquals(1, run.quarantined)
+            // Stopped just after a second move, before its line, a while ago.
+            File(q.dirFor(run.runId).toFile(), "Download/Later/lost.jpg").apply { parentFile.mkdirs() }.writeText("not recorded")
+            val file = journals.fileFor(run.runId)
+            file.writeText(file.readLines().filterNot { it.startsWith("#finished") }.joinToString("\n", postfix = "\n"))
+            file.setLastModified(System.currentTimeMillis() - 3_600_000)
+
+            val put = q.unrecordedEntries(run.runId)
+            assertEquals(1, RollbackEngine(fs.rootPath, null).rollbackEntries(put).restored)
+            q.pruneUp(run.runId, put.map { it.b })
+            assertFalse(q.dirFor(run.runId).resolve("Download/Later").toFile().exists())
+
+            val undo = RollbackEngine(fs.rootPath, journals).rollback(run.runId)
+            assertEquals(undo.messages.joinToString("\n"), 1, undo.restored)
+            assertTrue(File(fs.path("Download/Old/empty")).isDirectory)
+            assertEquals("a", File(fs.path("Download/Old/a.txt")).readText())
+        }
+    }
+
     /** A quarantine folder that is a link (to the storage root, say) is not the quarantine: emptying it does nothing. */
     @Test
     fun aLinkedQuarantineIsNeverEmptied() = runTest {
@@ -99,6 +219,8 @@ class QuarantinePurgeTest {
             // The app was stopped just after a second move, before its line: an interrupted run.
             File(q.dirFor(run.runId).toFile(), "Download/lost.jpg").writeText("not recorded")
             journals.fileFor(run.runId).writeText(journals.fileFor(run.runId).readLines().filterNot { it.startsWith("#finished") }.joinToString("\n", postfix = "\n"))
+            // Stopped a while ago: a journal written in the last minutes may belong to a run still going.
+            journals.fileFor(run.runId).setLastModified(System.currentTimeMillis() - 3_600_000)
 
             val undo = RollbackEngine(fs.rootPath, journals).rollback(run.runId)
             assertEquals(1, undo.restored)

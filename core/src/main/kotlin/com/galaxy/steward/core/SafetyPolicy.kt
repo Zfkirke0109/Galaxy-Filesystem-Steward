@@ -12,6 +12,23 @@ object SafetyPolicy {
     const val STEWARD_DIR = ".StorageSteward"
     const val QUARANTINE_DIR = "Quarantine"
 
+    /** The quarantine of a debug build, which installs beside the app (`.debug`) and must never touch the app's runs. */
+    const val DEBUG_QUARANTINE_DIR = "Quarantine-debug"
+
+    /**
+     * This build's quarantine folder in [STEWARD_DIR], set once at start ([forBuild]). Each build lists the runs in its
+     * own: in a shared one, each would take the other's runs for runs without a journal, and emptying or putting back
+     * those would empty or undo the other's runs from under its History.
+     */
+    @Volatile
+    var quarantineDir: String = QUARANTINE_DIR
+        private set
+
+    /** Sets [quarantineDir] for the build with [applicationId]. */
+    fun forBuild(applicationId: String) {
+        quarantineDir = if (applicationId.endsWith(".debug")) DEBUG_QUARANTINE_DIR else QUARANTINE_DIR
+    }
+
     /** Where the app saves logcat exports. Treated like a pinned folder: never moved, deduplicated or cleaned. */
     const val LOGCAT_DIR = "Documents/Galaxy Steward LogCat"
 

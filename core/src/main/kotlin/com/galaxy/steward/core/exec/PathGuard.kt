@@ -22,7 +22,7 @@ class PathGuard(rootPath: String, protectedFolders: List<String> = emptyList()) 
     }
     private val protectedPrefixes = protectedFolders.map { it.trim().trim('/') }.filter { it.isNotEmpty() }
     val stewardDir: Path = root.resolve(SafetyPolicy.STEWARD_DIR)
-    val quarantineRoot: Path = stewardDir.resolve(SafetyPolicy.QUARANTINE_DIR)
+    val quarantineRoot: Path = stewardDir.resolve(SafetyPolicy.quarantineDir)
 
     /** Syntactic check: absolute, strictly beneath the root, no `.`/`..`/`//` segments or control characters. */
     fun wellFormed(path: String): Boolean {

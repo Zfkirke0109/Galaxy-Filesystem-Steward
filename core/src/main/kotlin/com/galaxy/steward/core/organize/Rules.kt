@@ -69,9 +69,11 @@ data class KeywordRule(
 }
 
 object Text {
-    private val nonWord = Regex("""[^\p{L}\p{N}]+""")
+    private val nonWord = Regex("""[^\p{L}\p{M}\p{N}]+""")
     private val asciiNonWord = Regex("[^a-z0-9]+")
-    private val marks = Regex("""\p{Mn}+""")
+
+    /** Scripts whose accents fold away: é is e, ά is α. In the others a mark is part of the letter. */
+    private val FOLDED = setOf(Character.UnicodeScript.LATIN, Character.UnicodeScript.GREEK, Character.UnicodeScript.CYRILLIC)
 
     /** Scripts written without spaces between words, where a keyword can't be told apart as a whole word. */
     private val UNSPACED = setOf(
@@ -82,12 +84,27 @@ object Text {
 
     /**
      * Lower-case words separated by single spaces, padded so " word " matches whole words. Letters and digits of every
-     * script are words; accents fold away (Résumé, resume and RESUME are one word). It used to keep only a-z and 0-9, so a
-     * keyword like "налог" or "請求書" was nothing at all, and "résumé" was "r sum".
+     * script are words; accents of Latin, Greek and Cyrillic letters fold away (Résumé, resume and RESUME are one word).
+     * Marks of other scripts stay part of their letter: a dakuten (ガス, gas, is not カス), a Thai tone mark (ข้าว, rice,
+     * is not ขาว, white), a Devanagari vowel sign (बिल, bill, is not बाल, hair). Full-width and half-width forms read as
+     * their ordinary letters. It used to keep only a-z and 0-9, so "налог" or "請求書" was nothing at all.
      */
     fun normalize(s: String): String {
         if (s.all { it.code < 0x80 }) return " " + s.lowercase().replace(asciiNonWord, " ").trim() + " "
-        val folded = Normalizer.normalize(s.lowercase(), Normalizer.Form.NFKD).replace(marks, "")
+        val decomposed = Normalizer.normalize(s.lowercase(), Normalizer.Form.NFKD)
+        val kept = StringBuilder(decomposed.length)
+        var base: Character.UnicodeScript? = null
+        var i = 0
+        while (i < decomposed.length) {
+            val cp = decomposed.codePointAt(i)
+            val type = Character.getType(cp).toByte()
+            val mark = type == Character.NON_SPACING_MARK || type == Character.COMBINING_SPACING_MARK || type == Character.ENCLOSING_MARK
+            if (!mark) base = Character.UnicodeScript.of(cp)
+            if (!mark || base !in FOLDED) kept.appendCodePoint(cp)
+            i += Character.charCount(cp)
+        }
+        // Recomposed, so a letter and the mark it kept are one letter again, as they are typed.
+        val folded = Normalizer.normalize(kept, Normalizer.Form.NFC)
         return " " + folded.replace(nonWord, " ").trim() + " "
     }
 

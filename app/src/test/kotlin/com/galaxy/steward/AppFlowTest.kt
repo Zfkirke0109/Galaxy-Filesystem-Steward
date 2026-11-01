@@ -279,6 +279,10 @@ class AppFlowTest {
 
         val outcome = vm.state.value.outcome
         assertTrue("expected an applied outcome, got $outcome", outcome is Outcome.Applied)
+        // History lists the run, with its Undo, while the media rescan still runs (here it never ends: Robolectric's media
+        // scanner doesn't call back). It used to be refreshed only after that rescan, which can take minutes on a phone.
+        val runId = (outcome as Outcome.Applied).summary.runId
+        awaitState("history lists the run", vm) { vm.state.value.journals.any { it.id == runId } }
         assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("run \"Autopilot\" (autopilot) done in ") })
         // Verified duplicate removed, camera original kept.
         assertFalse(File(root, "Download/IMG_20240612_101500 (1).jpg").exists())
@@ -419,7 +423,7 @@ class AppFlowTest {
         awaitState("removing a picked folder", vm) { vm.state.value.applying == null && vm.state.value.outcome is Outcome.Applied }
         assertFalse(File(media, "WhatsApp Images").exists())
         assertTrue(File(media, ".Thumbs/t1.jpg").exists())
-        assertTrue(File(root, ".StorageSteward/Quarantine").walk().any { it.name == "IMG-1.jpg" })
+        assertTrue(File(root, "${SafetyPolicy.STEWARD_DIR}/${SafetyPolicy.quarantineDir}").walk().any { it.name == "IMG-1.jpg" })
         awaitState("the folder listed again", vm) { vm.apps.browser.value.listing?.entries?.map { it.name } == listOf(".Thumbs") }
         // It went to the quarantine, so the result offers Undo, which puts it back.
         compose.onNodeWithText("Undo").performClick()

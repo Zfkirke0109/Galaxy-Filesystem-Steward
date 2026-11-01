@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 
 data class RollbackSummary(
@@ -80,7 +81,8 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
                 when (e.action) {
                     JournalAction.MOVED -> restoreMovedFile(e)
                     JournalAction.MOVED_DIR -> restoreMove(e.b, e.a, directory = true)
-                    JournalAction.QUARANTINED, JournalAction.DEDUPED_QUARANTINED -> restoreMove(e.b, e.a, directory = null, beside = true)
+                    JournalAction.QUARANTINED, JournalAction.DEDUPED_QUARANTINED ->
+                        changedInQuarantine(e) ?: restoreMove(e.b, e.a, directory = null, beside = true)
                     JournalAction.DEDUPED -> recreateDuplicate(e)
                     JournalAction.RMDIR -> recreateDir(e.a)
                     JournalAction.MKDIR -> removeCreatedDir(e.a)
@@ -158,6 +160,33 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         return null
     }
 
+    /**
+     * Why [e] must not go back, when it goes into an app's private folder: `Android/data` or `obb`, which only that app
+     * and the shell can write, and where Undo of an app-folder run writes with the shell's rights. The quarantine is in
+     * shared storage, where any app with All-files access can add to it or change it; what goes back must be what the
+     * run moved. A file must have its journaled size and date, a folder the digest of what it held ([TreeDigest]).
+     * Lines written before 1.2.14, or by a run stopped between a folder's move and its line, have no digest: those
+     * folders go back as before.
+     */
+    private fun changedInQuarantine(e: JournalEntry): String? {
+        val parts = guard.relative(e.a).split('/')
+        val private = parts.size >= 3 && parts[0].equals("Android", ignoreCase = true) &&
+            (parts[1].equals("data", ignoreCase = true) || parts[1].equals("obb", ignoreCase = true))
+        if (!private || !guard.wellFormed(e.b)) return null
+        val src = Paths.get(e.b)
+        val a = try {
+            Files.readAttributes(src, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (_: IOException) {
+            return null // Gone: restoreMove says so.
+        }
+        return when {
+            a.isSymbolicLink || a.isOther -> "Unsafe path"
+            a.isRegularFile -> if (a.size() != e.size || (e.mtime > 0 && a.lastModifiedTime().toMillis() != e.mtime)) CHANGED_IN_QUARANTINE else null
+            e.sha256?.startsWith(TreeDigest.PREFIX) == true -> if (TreeDigest.of(src) != e.sha256) CHANGED_IN_QUARANTINE else null
+            else -> null
+        }
+    }
+
     /** Android/data, obb or media's folder for one app: `Android/data/com.app`. */
     private fun isAppFolder(path: String): Boolean {
         val parts = guard.relative(path).split('/')
@@ -210,5 +239,10 @@ class RollbackEngine(rootPath: String, private val journals: JournalStore?) {
         if (!empty) return ""
         Files.delete(p)
         return null
+    }
+
+    companion object {
+        /** Why Undo leaves something in the quarantine that changed there since the run ([changedInQuarantine]). */
+        const val CHANGED_IN_QUARANTINE = "Changed in the quarantine since the run, so it stays there"
     }
 }

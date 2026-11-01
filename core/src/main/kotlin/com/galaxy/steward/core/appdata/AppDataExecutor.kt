@@ -10,6 +10,7 @@ import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalSink
 import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.QuarantineManager
+import com.galaxy.steward.core.exec.TreeDigest
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.IOException
@@ -285,6 +286,16 @@ class AppDataExecutor(
         }
     }
 
+    /** Closes the intent of a change that threw, as ActionExecutor's `attempt` does. */
+    private fun abandon(entry: JournalEntry) {
+        try {
+            sink.entry(entry.copy(action = JournalAction.abandoned(entry.action)))
+        } catch (e: IOException) {
+            journalBroken = true
+            throw JournalBroken(e)
+        }
+    }
+
     private fun journalMove(from: Path, to: Path, entry: JournalEntry) {
         try {
             sink.entry(entry)
@@ -305,7 +316,12 @@ class AppDataExecutor(
         val q = quarantineTarget(path) ?: return skip("Quarantine unavailable")
         val entry = JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null)
         intend(entry)
-        Files.move(path, q)
+        try {
+            Files.move(path, q)
+        } catch (e: IOException) {
+            abandon(entry)
+            throw e
+        }
         if (!Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
             failed++
             return "Post-quarantine verification failed"
@@ -351,7 +367,8 @@ class AppDataExecutor(
                 failed++
                 return "Post-quarantine verification failed"
             }
-            journalMove(dir, q, entry)
+            // What it holds, for Undo to check before it puts the folder back with the shell's rights (TreeDigest).
+            journalMove(dir, q, entry.copy(sha256 = TreeDigest.of(q)))
             quarantined++
             bytesQuarantined += bytes
             changed += dir.toString()
@@ -391,6 +408,7 @@ class AppDataExecutor(
                         try {
                             Files.move(entry, q)
                         } catch (_: IOException) {
+                            abandon(line)
                             left++
                             continue
                         }

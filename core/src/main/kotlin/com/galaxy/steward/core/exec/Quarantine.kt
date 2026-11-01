@@ -105,12 +105,15 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
 
     /**
      * Runs of this install that Android stopped mid-way and whose quarantine holds something their journal doesn't record.
-     * Like [orphans], History offers to put that back; it is never emptied on its own.
+     * Like [orphans], History offers to put that back; it is never emptied on its own. A run whose journal changed in the
+     * last [ACTIVE_MS] may still be going (the weekly upkeep runs by itself, and its moves get their lines just after):
+     * it isn't taken for one Android stopped, and Put back leaves it alone.
      */
-    fun interruptedWithUnrecorded(): List<String> {
+    fun interruptedWithUnrecorded(now: Long = System.currentTimeMillis()): List<String> {
         val store = journals ?: return emptyList()
         return runsWithContent().filter { id ->
             val info = store.info(id) ?: return@filter false
+            if (now - store.fileFor(id).lastModified() < ACTIVE_MS) return@filter false
             info.finishedAt == null && unrecorded(id, store.readEntries(id) ?: return@filter false).isNotEmpty()
         }
     }
@@ -118,7 +121,14 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
     /** Bytes of what [unrecorded] finds in [runId]'s quarantine. */
     fun unrecordedBytes(runId: String): Long {
         val store = journals ?: return 0
-        return unrecorded(runId, store.readEntries(id = runId) ?: return 0).sumOf { if (guard.isRealDirectory(it)) treeSize(it) else Files.size(it) }
+        return unrecorded(runId, store.readEntries(id = runId) ?: return 0).sumOf { if (guard.isRealDirectory(it)) treeSize(it) else sizeOrZero(it) }
+    }
+
+    /** The size of [path] itself (a link's own), or 0 when it went in the meantime: Put back may be moving it right now. */
+    private fun sizeOrZero(path: Path): Long = try {
+        Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java, java.nio.file.LinkOption.NOFOLLOW_LINKS).size()
+    } catch (_: IOException) {
+        0L
     }
 
     /**
@@ -134,6 +144,9 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         if (recordedOnly) {
             val store = journals ?: return 0
             for (p in recorded(runId, store.readEntries(runId) ?: return 0)) {
+                // Only through real folders: a link on the way (DCIM in place of a folder of the run) would lead the
+                // delete out of the quarantine. runDir checks only the run's own folder.
+                if (!guard.resolvesBeneath(p)) continue
                 if (guard.isRealDirectory(p)) {
                     deleteTree(p)
                 } else {
@@ -233,6 +246,33 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
         return entries
     }
 
+    /**
+     * Removes the folders of [runId]'s quarantine that putting back [putBack] (quarantine paths) emptied: from each one's
+     * folder up, while empty. Not the whole run's folder, as [pruneEmpty] does: a folder its journal records goes back
+     * with Undo as it went, empty sub-folders and all.
+     */
+    fun pruneUp(runId: String, putBack: Collection<String>) {
+        val dir = runDir(runId) ?: return
+        val recorded = journals?.readEntries(runId)?.let { recorded(runId, it).toHashSet() }.orEmpty()
+        for (p in putBack) {
+            var d: Path? = Paths.get(p).parent
+            while (d != null && d != dir && d.startsWith(dir) && d !in recorded && guard.isRealDirectory(d)) {
+                val empty = try {
+                    Files.newDirectoryStream(d).use { !it.iterator().hasNext() }
+                } catch (_: IOException) {
+                    false
+                }
+                if (!empty) break
+                try {
+                    Files.delete(d)
+                } catch (_: IOException) {
+                    break
+                }
+                d = d.parent
+            }
+        }
+    }
+
     /** Removes the folders [runId]'s quarantine is left with once everything in them went back. */
     fun pruneEmpty(runId: String) {
         val dir = runDir(runId) ?: return
@@ -294,5 +334,10 @@ class QuarantineManager(private val guard: PathGuard, private val journals: Jour
             })
         } catch (_: IOException) {
         }
+    }
+
+    companion object {
+        /** How recently a run's journal changed for the run to count as possibly still going. */
+        const val ACTIVE_MS = 10 * 60_000L
     }
 }

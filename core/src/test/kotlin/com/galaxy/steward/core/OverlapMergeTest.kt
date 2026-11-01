@@ -157,4 +157,52 @@ class OverlapMergeTest {
             assertTrue(fs.exists("Download/Lisbon-2024/raw/r1.dng"))
         }
     }
+
+    /**
+     * The copy a merge keeps stays the kept copy everywhere. Here the old phone's zip, which the merge keeps, is unpacked
+     * next to it, so it is offered as clutter, while its copy in Download/Trip isn't. The duplicate group used to switch
+     * its keeper back to the backup's copy, which the merge removes, and the zip the merge keeps stayed offered: run one
+     * after another, the suggestions left no copy of it outside the quarantine.
+     */
+    @Test
+    fun theCopyAMergeKeepsIsKeptByItsGroupAndNotOfferedAsClutter() = runTest {
+        TestFs().use { fs ->
+            sharedPhotos(fs, listOf("Download/Trip", "Documents/Old phone/Trip"))
+            val zipBytes = java.io.ByteArrayOutputStream().also { buf ->
+                java.util.zip.ZipOutputStream(buf).use { out ->
+                    for ((name, seed) in listOf("a.txt" to 1, "b.txt" to 2)) {
+                        out.putNextEntry(java.util.zip.ZipEntry(name))
+                        out.write(Random(seed).nextBytes(3000))
+                        out.closeEntry()
+                    }
+                }
+            }.toByteArray()
+            fs.file("Download/Trip/trip.zip", zipBytes)
+            fs.file("Documents/Old phone/Trip/trip.zip", zipBytes)
+            // Unpacked only next to the old phone's zip: that one is clutter, its copy in Download/Trip isn't.
+            fs.file("Documents/Old phone/Trip/trip/a.txt", Random(1).nextBytes(3000))
+            fs.file("Documents/Old phone/Trip/trip/b.txt", Random(2).nextBytes(3000))
+            fs.ageDirectories()
+            val report = scan(fs)
+            val merge = report.folderMerges.single { !it.sameName }
+            assertEquals(fs.path("Documents/Old phone/Trip"), merge.target)
+            val kept = merge.operations.filterIsInstance<DeleteDuplicateOp>().associate { it.path to it.canonical }
+            assertTrue(kept[fs.path("Download/Trip/trip.zip")] == fs.path("Documents/Old phone/Trip/trip.zip"))
+
+            // The group keeps what the merge keeps, and the clutter list leaves that copy alone.
+            val zipGroup = report.duplicates.single { g -> g.copies.any { it.path.endsWith("/trip.zip") } }
+            assertEquals(fs.path("Documents/Old phone/Trip/trip.zip"), zipGroup.keeper.path)
+            assertTrue(report.junk.none { it.path == fs.path("Documents/Old phone/Trip/trip.zip") })
+            for (g in report.duplicates) {
+                g.copies.mapNotNull { kept[it.path] }.forEach { canonical -> assertEquals(canonical, g.keeper.path) }
+            }
+
+            // Everything offered, one run after another: a copy of the zip is still outside the quarantine.
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            for (items in listOf(listOf(merge), report.junk.filter { it.defaultSelected }, report.duplicates)) {
+                ActionExecutor(fs.rootPath, journals).execute("Run", "test", items)
+            }
+            assertTrue(File(fs.path("Download/Trip/trip.zip")).exists() || File(fs.path("Documents/Old phone/Trip/trip.zip")).exists())
+        }
+    }
 }

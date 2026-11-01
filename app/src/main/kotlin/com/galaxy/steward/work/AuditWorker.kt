@@ -17,6 +17,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.R
 import com.galaxy.steward.StewardApp
 import com.galaxy.steward.core.MIB
@@ -140,7 +141,9 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         val items = Upkeep.select(report, model, root, now)
         if (items.isEmpty()) return null
         val started = SystemClock.uptimeMillis()
-        val summary = withContext(Dispatchers.IO) {
+        // Finished even if Android stops the worker meanwhile (the phone was picked up): it is only what loses nothing,
+        // a few moves into the quarantine, and stopped part-way it skipped the media rescan and the log line below.
+        val summary = withContext(NonCancellable + Dispatchers.IO) {
             ActionExecutor(root, app.journals, ExecutorOptions(settings.quarantineDuplicates, settings.protectedFolders))
                 .execute("Weekly upkeep", "upkeep", items)
         }
@@ -211,6 +214,7 @@ class AuditWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
                 .build()
             // UPDATE keeps an existing schedule's timing but gives it these constraints.
             wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+            (context.applicationContext as? StewardApp)?.settings?.auditScheduledFor = BuildConfig.VERSION_CODE
         }
     }
 }

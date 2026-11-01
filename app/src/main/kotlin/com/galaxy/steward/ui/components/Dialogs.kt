@@ -53,6 +53,8 @@ fun ConfirmDialog(
     footnote: String = "Every change is verified and journaled. You can undo this run from History.",
     /** A dry run of what is about to be applied ([com.galaxy.steward.core.exec.Preflight]), shown as it comes. */
     check: (suspend () -> PreflightResult)? = null,
+    /** Where the dry run looks, when it doesn't cover every step (" in shared storage"). */
+    checkedWhere: String = "",
 ) {
     var checked by remember { mutableStateOf<PreflightResult?>(null) }
     var checking by remember { mutableStateOf(check != null) }
@@ -82,8 +84,8 @@ fun ConfirmDialog(
                     val text = when {
                         checking -> "Checking each step against your storage now…"
                         r == null -> "Couldn't check beforehand; each step is still checked right before it runs"
-                        r.skipped == 0 -> "Checked just now: ${if (r.total == 1) "the step is" else "all ${r.total} steps are"} as scanned"
-                        else -> "Checked just now: ${r.skipped} of ${r.total.plural("step")} will be skipped (" +
+                        r.skipped == 0 -> "Checked just now: ${if (r.total == 1) "the step$checkedWhere is" else "all ${r.total} steps$checkedWhere are"} as scanned"
+                        else -> "Checked just now: ${r.skipped} of ${r.total.plural("step")}$checkedWhere will be skipped (" +
                             r.stale.entries.joinToString("; ") { (why, n) -> "$why: $n" } + ")"
                     }
                     val warn = r != null && r.skipped > 0

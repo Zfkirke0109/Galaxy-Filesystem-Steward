@@ -158,7 +158,13 @@ object AppPolicy {
     fun isPackageName(name: String): Boolean = PACKAGE.matches(name)
 
     fun isProtected(packageName: String, ownPackage: String?): Boolean =
-        packageName in STRICT_NO_TOUCH || packageName == ownPackage
+        packageName in STRICT_NO_TOUCH || isSteward(packageName, ownPackage)
+
+    /** The steward itself in either of its builds: the app, and the debug build that installs beside it (`.debug`). */
+    fun isSteward(packageName: String, ownPackage: String?): Boolean {
+        val base = ownPackage?.removeSuffix(".debug") ?: return false
+        return packageName == base || packageName == "$base.debug"
+    }
 
     /**
      * Why an app's data may not be cleared ("Clear all data", which is Android's Clear storage), as a short label, or
@@ -167,7 +173,7 @@ object AppPolicy {
      * steward itself depends on. [system] is the app's system flag when the caller knows it.
      */
     fun clearDataBlock(packageName: String, ownPackage: String?, system: Boolean = false): String? = when {
-        packageName in STRICT_NO_TOUCH || packageName == ownPackage || packageName == SHIZUKU -> "Protected"
+        packageName in STRICT_NO_TOUCH || isSteward(packageName, ownPackage) || packageName == SHIZUKU -> "Protected"
         packageName == "com.termux" || packageName.startsWith("com.termux.") -> "Termux"
         system || packageName == "android" || PLATFORM_PREFIXES.any { packageName.startsWith(it) } -> "System app"
         packageName in MESSAGES -> "Messages"

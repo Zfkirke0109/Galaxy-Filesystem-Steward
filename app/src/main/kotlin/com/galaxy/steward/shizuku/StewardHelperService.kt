@@ -5,6 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import androidx.annotation.Keep
 import com.galaxy.steward.BuildConfig
+import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.appdata.AppDataHelper
 import com.galaxy.steward.core.appdata.AppDataWire
 import com.galaxy.steward.core.appdata.AppPolicy
@@ -28,6 +29,11 @@ import kotlin.system.exitProcess
  */
 @Keep
 class StewardHelperService : IStewardHelper.Stub {
+    init {
+        // Its own process, started by Shizuku without the app's Application: the same quarantine as the app's build.
+        SafetyPolicy.forBuild(BuildConfig.APPLICATION_ID)
+    }
+
     constructor() : super()
 
     @Suppress("unused")

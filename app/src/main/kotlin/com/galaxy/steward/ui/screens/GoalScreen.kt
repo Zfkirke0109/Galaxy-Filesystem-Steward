@@ -220,6 +220,7 @@ fun GoalScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
             onDismiss = { confirm = false },
             // Termux's steps aren't in shared storage and can't be checked from here: only what the run applies there is.
             check = vm.goalItems(plan).takeIf { it.isNotEmpty() }?.let { items -> { vm.preflight(items) } },
+            checkedWhere = if (termux > 0) " in shared storage" else "",
             footnote = "Every change in shared storage is checked and journaled" +
                 if (freeNow) "." else "; History can undo it until the quarantine is emptied.",
         )

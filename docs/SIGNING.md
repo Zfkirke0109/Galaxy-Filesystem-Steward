@@ -93,8 +93,9 @@ gh release edit v1.2.<n> --prerelease=false --latest
 - **Automatic updates:** add `https://github.com/Zfkirke0109/Galaxy-Filesystem-Steward` to
   [Obtainium](https://github.com/ImranR98/Obtainium) or GitHub Store. Each promoted release then shows up as an update.
 - **Debug builds** (`assembleDebug`) are `com.galaxy.steward.debug`: they install beside the real app, never over it,
-  so trying one never costs the real app's History. Both share the quarantine folder in shared storage, so each sees
-  the other's quarantine runs as having no journal.
+  so trying one never costs the real app's History. A debug build keeps its own quarantine
+  (`.StorageSteward/Quarantine-debug`), so neither build empties, or puts back, the other's runs, and neither can clear
+  the other's data.
 
 **Switching from a build made before signing was set up:** each of those builds was signed with a different
 throwaway key, so uninstall it once before installing the first release. The uninstall removes what the app keeps

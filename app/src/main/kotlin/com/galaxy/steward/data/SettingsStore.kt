@@ -45,6 +45,15 @@ class SettingsStore(context: Context) {
         get() = prefs.getLong("lastScanAt", 0L)
         set(value) = prefs.edit { putLong("lastScanAt", value) }
 
+    /**
+     * The version code whose weekly-audit schedule is in WorkManager. A schedule made by an older version keeps that
+     * version's constraints until it is enqueued again (AuditWorker.schedule), which used to happen only when the switch
+     * was flipped.
+     */
+    var auditScheduledFor: Int
+        get() = prefs.getInt("auditScheduledFor", 0)
+        set(value) = prefs.edit { putInt("auditScheduledFor", value) }
+
     /** Android 13+: the notification permission is asked for once, with the first scan. */
     var askedForNotifications: Boolean
         get() = prefs.getBoolean("askedForNotifications", false)

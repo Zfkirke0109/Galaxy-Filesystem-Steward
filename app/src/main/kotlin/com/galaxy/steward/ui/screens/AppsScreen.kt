@@ -55,6 +55,7 @@ import com.galaxy.steward.ui.components.InlineNotice
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.UsageBar
+import com.galaxy.steward.ui.components.noteRequest
 import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 import kotlinx.coroutines.launch
 
@@ -142,7 +143,10 @@ fun AppsScreen(vm: StewardViewModel, navigate: (String) -> Unit) {
                         ) {
                             when (termux.status) {
                                 TermuxStatus.NOT_INSTALLED -> openUrl(context, "https://f-droid.org/packages/com.termux/")
-                                TermuxStatus.NO_PERMISSION -> termuxPermission.launch(TermuxBridge.PERMISSION)
+                                TermuxStatus.NO_PERMISSION -> {
+                                    noteRequest(context, listOf(TermuxBridge.PERMISSION))
+                                    termuxPermission.launch(TermuxBridge.PERMISSION)
+                                }
                                 TermuxStatus.READY -> Unit
                             }
                         }

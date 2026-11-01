@@ -43,6 +43,17 @@ class AppStoragePolicyTest {
         assertEquals("Protected", AppPolicy.clearDataBlock(AppPolicy.SHIZUKU, null))
     }
 
+    /** A debug build installs beside the app (`.debug`): neither may clear or touch the other's data. */
+    @Test
+    fun theAppAndItsDebugBuildProtectEachOther() {
+        for ((pkg, own) in listOf("com.galaxy.steward" to "com.galaxy.steward.debug", "com.galaxy.steward.debug" to "com.galaxy.steward")) {
+            assertEquals(pkg, "Protected", AppPolicy.clearDataBlock(pkg, own))
+            assertTrue(pkg, AppPolicy.isProtected(pkg, own))
+            assertEquals(pkg, "Protected", AppPolicy.privateDataBlock(pkg, own))
+        }
+        assertNull(AppPolicy.clearDataBlock("com.galaxy.stewardx", "com.galaxy.steward"))
+    }
+
     @Test
     fun messengersAreStillNeverStopped() {
         listOf("com.whatsapp", "com.google.android.apps.messaging", "com.termux", AppPolicy.SHIZUKU, "com.android.providers.telephony")

@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.galaxy.steward.apps.AppsController
 import com.galaxy.steward.apps.DeepSpaceController
+import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.core.learn.DecisionLog
 import com.galaxy.steward.core.learn.ScanMemory
@@ -63,6 +64,8 @@ class StewardApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Before anything opens the quarantine: a debug build keeps its own (SafetyPolicy.quarantineDir).
+        SafetyPolicy.forBuild(BuildConfig.APPLICATION_ID)
         StewardLog.init(File(filesDir, "steward-history.log"))
         settings = SettingsStore(this)
         environment = AndroidEnvironment(this)

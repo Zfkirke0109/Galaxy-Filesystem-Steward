@@ -198,4 +198,63 @@ class InterruptedRunTest {
             assertEquals(JunkCategory.STALE_DOWNLOADS, partial.single().category)
         }
     }
+
+    /**
+     * A folder's move into the quarantine fails (its place there was taken in between), then a file of that folder goes
+     * to the quarantine in the same run, which makes the folder's place there. The folder's line written ahead used to
+     * read as done: Undo then put an empty "Old (restored)" next to the folder, and emptying took what it found there for
+     * the run's own. The failed move now closes its line.
+     */
+    @Test
+    fun aFolderMoveThatFailedNeverReadsAsDone() = runTest {
+        TestFs().use { fs ->
+            fs.text("Download/Old/keep.txt", "stays")
+            fs.text("Download/Old/stale.crdownload", "partial")
+            fs.ageDirectories()
+            val folder = File(fs.path("Download/Old"))
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            val q = QuarantineManager(PathGuard(fs.rootPath), journals)
+            var runId = ""
+            val executor = ActionExecutor(fs.rootPath, journals) { file ->
+                runId = file.nameWithoutExtension
+                object : com.galaxy.steward.core.exec.JournalOutput {
+                    private val real = JournalWriter(file)
+                    override fun meta(key: String, value: String) = real.meta(key, value)
+                    override fun entry(entry: JournalEntry) {
+                        real.entry(entry)
+                        // Something takes the folder's place in the quarantine between the line and the move.
+                        if (entry.action == JournalAction.pending(JournalAction.QUARANTINED) && entry.a == folder.path) {
+                            File(entry.b, "other.txt").apply { parentFile.mkdirs() }.writeText("not this run's")
+                        }
+                    }
+                    override fun close() = real.close()
+                }
+            }
+            val items = listOf(
+                JunkItem("junk:old", JunkCategory.NEAR_COPIES, folder.path, true, 12, folder.lastModified(), "test"),
+                junk(fs, "Download/Old/stale.crdownload"),
+            )
+            val run = executor.execute("Cleanup", "junk", items)
+            assertEquals(run.messages.joinToString("\n"), 1, run.failed)
+            assertEquals(1, run.quarantined)
+            assertTrue(journals.fileFor(run.runId).readLines().any { it.startsWith(JournalAction.abandoned(JournalAction.QUARANTINED) + "\t") })
+            assertEquals(runId, run.runId)
+
+            val undo = RollbackEngine(fs.rootPath, journals).rollback(run.runId)
+            assertEquals(undo.messages.joinToString("\n"), 0, undo.failed + undo.skipped)
+            assertTrue(fs.exists("Download/Old/stale.crdownload"))
+            assertFalse(fs.exists("Download/Old (restored)"))
+            // What took the folder's place in the quarantine isn't the run's: it is reported, not emptied with the run.
+            assertTrue(q.unrecorded(run.runId, journals.readEntries(run.runId)!!).isNotEmpty())
+        }
+    }
+
+    /** The same journal from an older version, without the closing line: the folder's line still doesn't read as done. */
+    @Test
+    fun aLineWhosePlaceALaterLineFilledIsNotDone() {
+        val f = JournalEntry(JournalAction.pending(JournalAction.QUARANTINED), "/s/Download/Old", "/s/Q/run/Download/Old", 12, -1, null)
+        val child = JournalEntry(JournalAction.QUARANTINED, "/s/Download/Old/a.part", "/s/Q/run/Download/Old/a.part", 7, 1, null)
+        val settled = JournalAction.settle(listOf(f, child.copy(action = JournalAction.pending(child.action)), child)) { true }
+        assertEquals(listOf(child), settled)
+    }
 }

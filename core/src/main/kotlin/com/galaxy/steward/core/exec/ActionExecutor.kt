@@ -105,7 +105,8 @@ class ActionExecutor(
 
     private enum class Status { DONE, NOOP, SKIPPED, FAILED }
 
-    private class Outcome(val status: Status, val message: String? = null)
+    /** [moved]: the item did go where the step takes it, even when the step is reported as skipped ([REAPPEARED]). */
+    private class Outcome(val status: Status, val message: String? = null, val moved: Boolean = status == Status.DONE)
 
     private lateinit var runId: String
     private lateinit var journal: JournalOutput
@@ -233,6 +234,7 @@ class ActionExecutor(
     }
 
     private fun skip(message: String) = Outcome(Status.SKIPPED, message).also { tally(message) }
+    private fun movedButSkipped(message: String) = Outcome(Status.SKIPPED, message, moved = true).also { tally(message) }
     private fun fail(message: String) = Outcome(Status.FAILED, message).also { tally(message) }
 
     /** Counted by reason, so a run that skips thousands of files says why in one line of the log. */
@@ -259,6 +261,18 @@ class ActionExecutor(
      */
     private fun intend(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) =
         record(JournalAction.pending(action), a, b, size, mtime, sha)
+
+    /**
+     * Makes the change [intend]ed just before. When it throws, the intent is closed with a line of its own
+     * ([JournalAction.abandoned]): left open, a later step could make it read as done ([JournalAction.settle]). A folder
+     * whose move into the quarantine failed gets its place there anyway once a file of it goes to the quarantine.
+     */
+    private inline fun <T> attempt(action: String, a: String, b: String, change: () -> T): T = try {
+        change()
+    } catch (e: IOException) {
+        record(JournalAction.abandoned(action), a, b)
+        throw e
+    }
 
     /** Journals a move just made; when that fails, the move is put back first, since nothing could undo it. */
     private fun recordMove(from: Path, to: Path, journal: () -> Unit) {
@@ -305,7 +319,7 @@ class ActionExecutor(
         if (!mkdirs(dstPath.parent)) return fail("Cannot create destination folder")
         if (guard.exists(dstPath)) return skip("Destination appeared during the move")
         intend(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha)
-        Files.move(srcPath, dstPath)
+        attempt(JournalAction.MOVED, src, dst) { Files.move(srcPath, dstPath) }
         val after = FileIdentity.of(dst)
         if (after == null || after.size != id.size) {
             if (!guard.exists(srcPath) && after != null) {
@@ -443,14 +457,14 @@ class ActionExecutor(
         if (options.quarantineDuplicates) {
             val q = quarantineTarget(path) ?: return fail("Quarantine unavailable")
             intend(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha)
-            Files.move(p, q)
+            attempt(JournalAction.DEDUPED_QUARANTINED, path, q.toString()) { Files.move(p, q) }
             if (!guard.exists(q)) return fail("Post-quarantine verification failed")
             recordMove(p, q) { record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha) }
             bytesQuarantined += id.size
             dedupedQuarantined++
         } else {
             intend(JournalAction.DEDUPED, path, canonical, id.size, id.mtime, sha)
-            Files.delete(p)
+            attempt(JournalAction.DEDUPED, path, canonical) { Files.delete(p) }
             if (guard.exists(p)) return fail("Delete verification failed")
             record(JournalAction.DEDUPED, path, canonical, id.size, id.mtime, sha)
             bytesFreed += id.size
@@ -497,7 +511,7 @@ class ActionExecutor(
         }
         val q = quarantineTarget(op.path) ?: return fail("Quarantine unavailable")
         intend(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime)
-        Files.move(p, q)
+        attempt(JournalAction.QUARANTINED, op.path, q.toString()) { Files.move(p, q) }
         if (!guard.exists(q)) return fail("Post-quarantine verification failed")
         // Journaled even if something new took its place at once (an app writing there again): it is in the quarantine,
         // and only its journal line lets Undo bring it back, or keeps emptying the quarantine from losing track of it.
@@ -506,7 +520,7 @@ class ActionExecutor(
         bytesQuarantined += op.size
         changed += op.path
         touchedParents.add(p.parent)
-        return if (guard.exists(p)) skip(REAPPEARED) else Outcome(Status.DONE)
+        return if (guard.exists(p)) movedButSkipped(REAPPEARED) else Outcome(Status.DONE)
     }
 
     // ------------------------------------------------------------------ packing
@@ -585,7 +599,7 @@ class ActionExecutor(
         val zipSha = Hashing.sha256(partial.toString())
         try {
             intend(JournalAction.PACKED, op.zip, op.path, zipSize, zipTime, zipSha)
-            Files.move(partial, zip)
+            attempt(JournalAction.PACKED, op.zip, op.path) { Files.move(partial, zip) }
         } catch (e: IOException) {
             Files.deleteIfExists(partial)
             throw e
@@ -603,8 +617,10 @@ class ActionExecutor(
         bytesPacked += zipSize
         changed += op.zip
         val moved = quarantineOp(QuarantineOp(op.path, isDirectory = true, size = bytes, mtime = -1))
-        if (moved.status != Status.DONE) {
+        if (!moved.moved) {
             // The folder stays, so its zip would only be a second copy: remove it (undo finds nothing to remove).
+            // A folder that did go to the quarantine keeps its zip, even when something new took its old place at once:
+            // without the zip, what it held would only be in the quarantine, and go when that is emptied.
             Files.deleteIfExists(zip)
             packed--
             bytesPacked -= zipSize

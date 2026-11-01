@@ -154,6 +154,42 @@ class ExecutorJournalFailureTest {
         }
     }
 
+    /**
+     * An app makes the folder again the moment it went to the quarantine. The folder's files are then only in the
+     * quarantine and in the zip: the zip stays (it used to be deleted, leaving them to go when the quarantine is emptied).
+     */
+    @Test
+    fun aPackedFolderWhoseNameIsTakenAtOnceKeepsItsZip() = runTest {
+        TestFs().use { fs ->
+            val pack = coldFolder(fs)
+            val folder = File(fs.path("Documents/Old project"))
+            val names = folder.listFiles()!!.map { it.name }.sorted()
+            val executor = ActionExecutor(fs.rootPath, JournalStore(fs.stateDir), ExecutorOptions()) { file ->
+                object : JournalOutput {
+                    private val real = JournalWriter(file)
+                    override fun meta(key: String, value: String) = real.meta(key, value)
+                    override fun entry(entry: JournalEntry) {
+                        real.entry(entry)
+                        if (entry.action == JournalAction.QUARANTINED) folder.mkdirs()
+                    }
+                    override fun close() = real.close()
+                }
+            }
+            val run = executor.execute("Pack", "optimize", listOf(pack))
+            assertEquals(run.messages.joinToString("\n"), 1, run.skipped)
+            assertTrue(run.messages.single().contains(ActionExecutor.REAPPEARED))
+            assertTrue(fs.exists("Documents/Old project.zip"))
+            assertEquals(1, run.packed)
+            assertTrue(folder.listFiles()!!.isEmpty())
+
+            // Undo brings the folder back beside the new one, then removes the zip.
+            val undo = RollbackEngine(fs.rootPath, JournalStore(fs.stateDir)).rollback(run.runId)
+            assertEquals(undo.messages.joinToString("\n"), 0, undo.failed)
+            assertEquals(names, File(fs.path("Documents/Old project (restored)")).listFiles()!!.map { it.name }.sorted())
+            assertFalse(fs.exists("Documents/Old project.zip"))
+        }
+    }
+
     /** The zip is journaled, the folder's move into the quarantine is not: the folder comes back, and Undo removes the zip. */
     @Test
     fun aPackStoppedBeforeItsFolderMovedLeavesTheFolderAndAnUndoableZip() = runTest {

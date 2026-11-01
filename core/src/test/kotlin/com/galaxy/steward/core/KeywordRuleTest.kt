@@ -50,6 +50,21 @@ class KeywordRuleTest {
         rule("e*ticket").missesAll("eticket.pdf", "ticket.pdf")
     }
 
+    /** Marks that make another letter in their script stay: only Latin, Greek and Cyrillic accents fold away. */
+    @Test
+    fun marksThatMakeAnotherLetterAreKept() {
+        rule("ガス").matches("ガス代 2024.pdf", "ｶﾞｽ料金.pdf")
+        rule("ガス").missesAll("カスタム設定.pdf")
+        rule("ข้าว").matches("ข้าว.pdf")
+        rule("ข้าว").missesAll("ขาว.pdf")
+        rule("बिल").matches("बिल 2024.pdf")
+        rule("बिल").missesAll("बाल 2024.pdf")
+        // Accents of Latin, Greek and Cyrillic letters still fold away.
+        rule("résumé").matches("Resume.pdf")
+        rule("ταξίδι").matches("Ταξιδι Λισαβόνα.pdf")
+        rule("счёт").matches("Счет 2024.pdf")
+    }
+
     @Test
     fun accentsFoldAway() {
         rule("résumé").matches("Resume 2024.pdf", "RÉSUMÉ.pdf", "résumé.pdf")

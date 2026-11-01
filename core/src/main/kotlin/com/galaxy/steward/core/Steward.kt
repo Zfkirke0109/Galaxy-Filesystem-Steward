@@ -142,9 +142,16 @@ class Steward(
         val mergeKeeps = HashMap<String, String>()
         folders.merges.forEach { m -> m.operations.forEach { op -> if (op is DeleteDuplicateOp) mergeKeeps[op.path] = op.canonical } }
         val merged = if (mergeKeeps.isEmpty()) unmerged else unmerged.map { it.keepingWhatMergesKeep(mergeKeeps) }
-        val fileGroups = if (quarantined.isEmpty()) merged else merged.map { it.keepingOutside(rootPath, ::quarantinedAt) }
+        // The copy a merge keeps stays kept, even offered for the quarantine: that offer is left out instead (keptPaths),
+        // since another copy outside would be one the merge removes.
+        val mergeKept = mergeKeeps.values.toHashSet()
+        val fileGroups = if (quarantined.isEmpty()) {
+            merged
+        } else {
+            merged.map { g -> if (g.keeper.path in mergeKept) g else g.keepingOutside(rootPath, ::quarantinedAt) }
+        }
 
-        val keptPaths = fileGroups.map { it.keeper.path } + exactGroups.map { it.keeper.path } + folders.merges.map { it.target }
+        val keptPaths = fileGroups.map { it.keeper.path } + exactGroups.map { it.keeper.path } + folders.merges.map { it.target } + mergeKept
         fun holdsKept(item: JunkItem) = item.category != JunkCategory.EMPTY_FOLDERS &&
             keptPaths.any { it == item.path || it.startsWith(item.path + "/") }
         val (keptJunk, freeJunk) = (junk + nearJunk).partition(::holdsKept)

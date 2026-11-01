@@ -383,6 +383,26 @@ data class ScanReport(
 
     fun allItems(): List<PlanItem> = duplicates + folderDuplicates + folderMerges + junk + organize + optimize
 
+    /**
+     * This report once you chose to keep [kept] (a copy, or the folder of a folder group): clutter that would put it in
+     * the quarantine, an older near-copy holding it say, is left out, as the scan leaves it out for the copies it keeps
+     * itself. Applied after the duplicates have gone, that clutter would leave no copy outside the quarantine.
+     */
+    fun leavingInPlace(kept: String): ScanReport {
+        val holding = junk.filter { it.category != JunkCategory.EMPTY_FOLDERS && (kept == it.path || kept.startsWith(it.path + "/")) }
+        if (holding.isEmpty()) return this
+        val gone = holding.mapTo(HashSet()) { it.id }
+        val notes = holding.take(20).map { item ->
+            Insight(
+                Severity.INFO,
+                "Left in place: ${item.path.substringAfterLast('/')}",
+                "It holds the copy you chose to keep, so it isn't offered for the quarantine. The next scan looks at it again.",
+                item.path,
+            )
+        }
+        return copy(junk = junk.filterNot { it.id in gone }, insights = insights + notes)
+    }
+
     /** Copy without the items that were applied successfully. */
     fun without(appliedIds: Set<String>): ScanReport = copy(
         found = found ?: RunLog.scan(this),

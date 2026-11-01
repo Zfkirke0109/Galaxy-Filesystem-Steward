@@ -111,6 +111,39 @@ class KeptCopyTest {
         }
     }
 
+    /**
+     * The same, with a copy you chose to keep in the older folder: the near-copy offer for that folder goes, as it does
+     * for the copies the scan keeps itself. Before, it stayed, and the second run left that chapter only in the quarantine.
+     */
+    @Test
+    fun aCopyYouChoseToKeepTakesItsFolderOutOfTheClutterList() = runTest {
+        TestFs().use { fs ->
+            val now = System.currentTimeMillis()
+            val chapters = (0 until 24).map { Random(300 + it).nextBytes(2_000 + it) }
+            chapters.forEachIndexed { i, bytes ->
+                fs.file("Download/Thesis/ch$i.pdf", bytes, mtime = now - 120 * DAY_MS)
+                fs.file("Download/Thesis-2/ch$i.pdf", bytes, mtime = now - 30 * DAY_MS)
+            }
+            fs.random("Download/Thesis-2/ch24.pdf", 2_500, 999, mtime = now - 30 * DAY_MS)
+            fs.ageDirectories()
+            val scanned = Steward(fs.rootPath, testSettings.copy(nearCopyMinBytes = 1), TestEnv, null).scan()
+            val group = scanned.duplicates.single { g -> g.copies.any { it.path == fs.path("Download/Thesis/ch0.pdf") } }
+            val mine = group.withKeeper(group.copies.indexOfFirst { it.path == fs.path("Download/Thesis/ch0.pdf") })
+            assertEquals("Chosen by you", mine.keepReason)
+
+            val report = scanned.leavingInPlace(mine.keeper.path)
+            assertTrue(report.junk.none { it.category == JunkCategory.NEAR_COPIES })
+            assertTrue(report.insights.any { it.title == "Left in place: Thesis" })
+            assertEquals(scanned, scanned.leavingInPlace(fs.path("Download/Thesis-2/ch0.pdf")))
+
+            val journals = JournalStore(File(fs.stateDir, "journals"))
+            ActionExecutor(fs.rootPath, journals).execute("Duplicates", "dedupe", report.duplicates.map { if (it.id == mine.id) mine else it })
+            // Everything left on the clutter list, ticked by you (near copies aren't ticked by default).
+            ActionExecutor(fs.rootPath, journals).execute("Clutter", "junk", report.junk)
+            assertTrue(File(fs.path("Download/Thesis/ch0.pdf")).readBytes().contentEquals(chapters[0]))
+        }
+    }
+
     /** Clutter that holds the copy a duplicate group keeps, with no other copy to keep instead, isn't offered. */
     @Test
     fun clutterHoldingTheOnlyKeptCopyIsLeftInPlace() = runTest {

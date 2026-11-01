@@ -3,6 +3,7 @@ package com.galaxy.steward.ui
 import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
+import com.galaxy.steward.BuildConfig
 import com.galaxy.steward.StewardApp
 import com.galaxy.steward.apps.AppFootprintController
 import com.galaxy.steward.apps.AppsController
@@ -141,6 +142,11 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             scope.launch(Dispatchers.IO) {
                 if (StorageAccess.hasAccess(app)) quarantine().purgeExpired(settings.value.quarantineRetentionDays)
                 refreshHistoryNow()
+            }
+            // Once per version: a weekly audit scheduled by an older one gets this one's constraints (only when idle).
+            // Not in Application.onCreate, where replacing the schedule could stop the very run that started the process.
+            if (app.settings.app.value.weeklyAudit && app.settings.auditScheduledFor != BuildConfig.VERSION_CODE) {
+                AuditWorker.schedule(app, true)
             }
         }
     }
@@ -294,7 +300,18 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         it.copy(selected = if (selected) it.selected + ids else it.selected - ids.toSet())
     }
 
-    fun setKeeper(groupId: String, index: Int) = _state.update { it.copy(keepers = it.keepers + (groupId to index)) }
+    /**
+     * Keeps copy [index] of group [groupId]. Clutter holding that copy leaves the report ([ScanReport.leavingInPlace]):
+     * applied after the duplicates, it would have taken the only copy left into the quarantine.
+     */
+    fun setKeeper(groupId: String, index: Int) = _state.update { s ->
+        val report = s.report
+        val kept = report?.duplicates?.firstOrNull { it.id == groupId }?.withKeeper(index)?.keeper?.path
+            ?: report?.folderDuplicates?.firstOrNull { it.id == groupId }?.withKeeper(index)?.keeper?.path
+        val updated = if (report != null && kept != null) report.leavingInPlace(kept) else report
+        val dropped = if (updated === report || report == null || updated == null) emptySet() else (report.junk - updated.junk.toSet()).mapTo(HashSet()) { it.id }
+        s.copy(keepers = s.keepers + (groupId to index), report = updated, selected = s.selected - dropped)
+    }
 
     /** Plan item with the user's keeper choice applied. */
     fun effective(item: PlanItem, keepers: Map<String, Int> = _state.value.keepers): PlanItem = when (item) {
@@ -330,6 +347,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(applying = ApplyProgress(title, 0, total, ""), outcome = null) }
             val started = SystemClock.uptimeMillis()
             StewardLog.i("run \"$title\" ($kind) started: ${items.size} items, $total operations")
+            var refreshed = false
             try {
                 keepAlive(title) {
                     val s = settings.value
@@ -358,6 +376,10 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                             space = StorageAccess.space(),
                         )
                     }
+                    // History lists the run, with its Undo and its share of the quarantine, as the outcome shows: the
+                    // media rescan below can take minutes.
+                    refreshHistory()
+                    refreshed = true
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
@@ -368,7 +390,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 StewardLog.w("run \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, stale = true, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
-                refreshHistory()
+                if (!refreshed) refreshHistory()
             }
         }
     }
@@ -401,6 +423,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(applying = ApplyProgress(label, 0, 1, ""), outcome = null) }
             val started = SystemClock.uptimeMillis()
             StewardLog.i("undo \"$title\" started")
+            var refreshed = false
             try {
                 keepAlive(label) {
                     val report = throttled { done, total, current ->
@@ -414,6 +437,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     // Undoing a run says its suggestions were wrong for you.
                     withContext(Dispatchers.IO) { app.decisions.undone(runId, System.currentTimeMillis()) }
                     _state.update { it.copy(applying = null, stale = true, outcome = Outcome.RolledBack(title, summary), space = StorageAccess.space()) }
+                    refreshHistory()
+                    refreshed = true
                     reindex(summary.changedPaths)
                 }
             } catch (e: CancellationException) {
@@ -423,7 +448,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 StewardLog.w("undo \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, stale = true, outcome = Outcome.Failed(e.message ?: "Undo failed")) }
             } finally {
-                refreshHistory()
+                if (!refreshed) refreshHistory()
             }
         }
     }
@@ -444,6 +469,7 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(applying = ApplyProgress(title, 0, 1, "", stoppable), outcome = null) }
             val started = SystemClock.uptimeMillis()
             StewardLog.i("run \"$title\" started")
+            var refreshed = false
             try {
                 keepAlive(title) {
                     val outcome = block(
@@ -454,6 +480,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                     )
                     StewardLog.i(outcomeLine(title, outcome, SystemClock.uptimeMillis() - started))
                     _state.update { it.copy(applying = null, outcome = outcome, space = StorageAccess.space()) }
+                    refreshHistory()
+                    refreshed = true
                     pendingReindex?.let {
                         pendingReindex = null
                         reindex(it)
@@ -467,25 +495,13 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                 StewardLog.w("run \"$title\" failed after ${RunLog.seconds(SystemClock.uptimeMillis() - started)}", e)
                 _state.update { it.copy(applying = null, outcome = Outcome.Failed(e.message ?: e.javaClass.simpleName)) }
             } finally {
-                refreshHistory()
+                if (!refreshed) refreshHistory()
             }
         }
     }
 
-    /**
-     * [report] at most every 80 ms, and always for the last step: a big undo or app-folder run redrew the progress dialog
-     * and the notification for every file.
-     */
-    private fun throttled(report: (Int, Int, String) -> Unit): (Int, Int, String) -> Unit {
-        var last = 0L
-        return { done, total, current ->
-            val now = SystemClock.uptimeMillis()
-            if (now - last >= 80 || done >= total) {
-                last = now
-                report(done, total, current)
-            }
-        }
-    }
+    /** [report] thinned out to what a person can see ([throttle]). */
+    private fun throttled(report: (Int, Int, String) -> Unit): (Int, Int, String) -> Unit = throttle({ SystemClock.uptimeMillis() }, report = report)
 
     private fun outcomeLine(title: String, outcome: Outcome, millis: Long): String = when (outcome) {
         is Outcome.Applied -> RunLog.applied(title, "app data", outcome.summary, millis)
@@ -857,11 +873,13 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         val q = quarantine()
         val (summary, left) = withContext(Dispatchers.IO) {
             val runs = q.orphans()
-            val interrupted = q.interruptedWithUnrecorded()
-            val entries = runs.flatMap { q.orphanEntries(it) } + interrupted.flatMap { q.unrecordedEntries(it) }
+            val interrupted = q.interruptedWithUnrecorded().associateWith { q.unrecordedEntries(it) }
+            val entries = runs.flatMap { q.orphanEntries(it) } + interrupted.values.flatten()
             val summary = RollbackEngine(rootPath, null).rollbackEntries(entries) { d, t, c -> progress(d, t, c) }
-            (runs + interrupted).forEach { q.pruneEmpty(it) }
-            summary to (runs.sumOf { q.sizeOf(it) } + interrupted.sumOf { q.unrecordedBytes(it) })
+            runs.forEach { q.pruneEmpty(it) }
+            // Only what putting back emptied: the rest of an interrupted run's folder is still Undo's, as it went.
+            interrupted.forEach { (id, put) -> q.pruneUp(id, put.map { it.b }) }
+            summary to (runs.sumOf { q.sizeOf(it) } + interrupted.keys.sumOf { q.unrecordedBytes(it) })
         }
         reindexLater(summary.changedPaths)
         _state.update { it.copy(stale = true) }
@@ -892,7 +910,18 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         scope.launch(Dispatchers.IO) { refreshHistoryNow() }
     }
 
+    /** On the app's scope, which has no handler: anything it throws would end the app, so a failed refresh is logged. */
     private fun refreshHistoryNow() {
+        try {
+            readHistory()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            StewardLog.w("history refresh failed", e)
+        }
+    }
+
+    private fun readHistory() {
         val journals = app.journals.list()
         val byRun = if (StorageAccess.hasAccess(app)) {
             val q = quarantine()

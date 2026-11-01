@@ -21,6 +21,8 @@ import com.galaxy.steward.core.exec.JournalAction
 import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalStore
 import com.galaxy.steward.core.exec.JournalWriter
+import com.galaxy.steward.core.exec.PathGuard
+import com.galaxy.steward.core.exec.QuarantineManager
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.exec.RollbackSummary
 import com.galaxy.steward.core.humanBytes
@@ -44,6 +46,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.io.IOException
 
 data class AppsState(
     val usageAccess: Boolean = false,
@@ -535,10 +538,17 @@ class AppsController(
 
     /** Undo for an app-folder run: quarantined OBBs and leftovers go back (through Shizuku when needed). */
     suspend fun rollback(runId: String, progress: (Int, Int, String) -> Unit): RollbackSummary {
-        val summary = rollbackEntries(journals.entries(runId), progress)
-        // Undone once nothing is left in the quarantine, like any other run (RollbackEngine.rollback).
-        if (summary.remaining == 0) journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
-        return summary
+        // As in RollbackEngine.rollback: an unreadable journal says nothing about the run, so it isn't "undone".
+        val journal = withContext(Dispatchers.IO) { journals.readEntries(runId) }
+            ?: throw IOException("This run's journal couldn't be read, so nothing was undone")
+        val summary = rollbackEntries(journal, progress)
+        // Undone once nothing is left in the quarantine, recorded or not: a run marked undone loses its Undo button, and
+        // what stayed behind would go when the quarantine is emptied.
+        val left = summary.remaining + withContext(Dispatchers.IO) {
+            QuarantineManager(PathGuard(StorageAccess.rootPath, emptyList()), journals).unrecorded(runId, journal).size
+        }
+        if (left == 0) journals.appendMeta(runId, "rolledback", System.currentTimeMillis().toString())
+        return summary.copy(remaining = left)
     }
 
     /** Reverts [entries], through Shizuku when they reach into Android/data or obb. */

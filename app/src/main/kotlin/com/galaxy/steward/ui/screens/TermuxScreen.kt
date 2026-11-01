@@ -64,6 +64,7 @@ import com.galaxy.steward.ui.components.IrreversibleDialog
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.SectionHeader
 import com.galaxy.steward.ui.components.SelectRow
+import com.galaxy.steward.ui.components.noteRequest
 import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 import com.galaxy.steward.ui.components.toggleState
 
@@ -115,7 +116,16 @@ fun TermuxScreen(vm: StewardViewModel, navigate: (String) -> Unit, onBack: () ->
                 )
             }
             if (state.status != TermuxStatus.READY || state.needsExternalApps) {
-                item { SetupCard(state.status, state.needsExternalApps, context, onAllow = { permission.launch(TermuxBridge.PERMISSION) }, onOpen = { vm.termux.bridge.openTermux() }) }
+                item {
+                    SetupCard(
+                        state.status, state.needsExternalApps, context,
+                        onAllow = {
+                            noteRequest(context, listOf(TermuxBridge.PERMISSION))
+                            permission.launch(TermuxBridge.PERMISSION)
+                        },
+                        onOpen = { vm.termux.bridge.openTermux() },
+                    )
+                }
             }
             state.error?.takeIf { !state.needsExternalApps }?.let { item { InlineNotice(it, error = true) } }
             if (state.status == TermuxStatus.READY) {

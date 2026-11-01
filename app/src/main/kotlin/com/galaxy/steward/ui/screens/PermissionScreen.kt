@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.galaxy.steward.data.StorageAccess
 import com.galaxy.steward.ui.components.IconBadge
+import com.galaxy.steward.ui.components.noteRequest
 import com.galaxy.steward.ui.components.openSettingsIfDeniedForGood
 
 @Composable
@@ -66,7 +67,9 @@ fun PermissionScreen(onLegacyResult: () -> Unit) {
         Button(
             onClick = {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                    legacyLauncher.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+                    val legacy = arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    noteRequest(context, legacy.toList())
+                    legacyLauncher.launch(legacy)
                 } else {
                     try {
                         context.startActivity(StorageAccess.allFilesAccessIntent(context))
