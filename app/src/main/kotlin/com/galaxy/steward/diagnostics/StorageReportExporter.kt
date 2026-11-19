@@ -92,10 +92,10 @@ class StorageReportExporter(private val context: Context, private val scope: Cor
 }
 
 /** A share sheet for a text file in the logcat folder, through this app's FileProvider (which serves only that folder). */
-fun shareTextFile(context: Context, file: File, title: String): Intent {
+fun shareTextFile(context: Context, file: File, title: String, type: String = "text/plain"): Intent {
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
     val send = Intent(Intent.ACTION_SEND)
-        .setType("text/plain")
+        .setType(type)
         .putExtra(Intent.EXTRA_STREAM, uri)
         .putExtra(Intent.EXTRA_SUBJECT, file.name)
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

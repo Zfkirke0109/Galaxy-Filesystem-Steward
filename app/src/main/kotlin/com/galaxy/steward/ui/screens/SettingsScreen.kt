@@ -283,12 +283,13 @@ private fun LogcatExportRow(exporter: LogcatExporter, wholeDevice: Boolean) {
             FilledTonalButton(onClick = exporter::export, enabled = !state.running) { Text(if (state.running) "Saving…" else "Export") }
         }
         if (state.running) {
-            Text(if (state.bytesWritten > 0) "${state.bytesWritten.humanBytes()} saved so far…" else "Reading the log…", style = small, color = muted)
+            Text(if (state.bytesWritten > 0) "${state.bytesWritten.humanBytes()} read so far…" else "Reading the log…", style = small, color = muted)
         }
         state.saved?.let { saved ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Saved ${saved.file.name} (${saved.bytes.humanBytes()}, ${if (saved.wholeDevice) "whole device" else "own log only"})",
+                    "Saved ${saved.file.name} (${saved.bytes.humanBytes()} zipped from ${saved.textBytes.humanBytes()}, " +
+                        "${if (saved.wholeDevice) "whole device" else "own log only"})",
                     Modifier.weight(1f),
                     style = small,
                 )

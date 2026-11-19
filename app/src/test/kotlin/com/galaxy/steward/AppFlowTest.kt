@@ -322,20 +322,41 @@ class AppFlowTest {
         shot("13-settings")
 
         // Settings > Diagnostics: without Shizuku the export holds the app's own log, saved under Documents.
+        // Four plain-text exports from before 1.2.15: they count toward the three kept, so the two oldest go.
+        val logFolder = File(root, SafetyPolicy.LOGCAT_DIR).apply { mkdirs() }
+        val olderExports = (1..4).map { i ->
+            File(logFolder, "logcat-2026-11-0${i}_10-00-00.txt").apply {
+                writeText("old export $i")
+                setLastModified(System.currentTimeMillis() - (10 - i) * 86_400_000L)
+            }
+        }
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Export logcat"))
         compose.onNodeWithText("Export").performClick()
         awaitState("logcat export", vm) { vm.logcat.state.value.let { !it.running && (it.saved != null || it.error != null) } }
         val saved = vm.logcat.state.value.saved ?: error("logcat export failed: ${vm.logcat.state.value.error}")
         assertEquals(File(root, SafetyPolicy.LOGCAT_DIR).path, saved.file.parent)
-        assertTrue(saved.file.name.matches(Regex("""logcat-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.txt""")))
+        assertTrue(saved.file.name.matches(Regex("""logcat-\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.zip""")))
         assertFalse(saved.wholeDevice)
-        val log = saved.file.readText()
+        // A zip of one text file of the same name, smaller than the text.
+        val log = java.util.zip.ZipFile(saved.file).use { zip ->
+            val entries = zip.entries().toList()
+            assertEquals(listOf(saved.file.name.removeSuffix(".zip") + ".txt"), entries.map { it.name })
+            zip.getInputStream(entries.single()).readBytes().decodeToString()
+        }
+        assertEquals(log.toByteArray().size.toLong(), saved.textBytes)
+        assertEquals(
+            setOf(saved.file.name, olderExports[3].name, olderExports[2].name),
+            logFolder.listFiles { f -> f.name.startsWith("logcat-") }!!.map { it.name }.toSet(),
+        )
         assertTrue(log.startsWith("Galaxy Steward "))
         assertTrue(log.contains("Contents: Galaxy Steward's own log lines only"))
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Share"))
         shot("13b-logcat-export")
         assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("undo \"Autopilot\" done in ") })
-        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("logcat saved in ") && it.endsWith("own lines only") })
+        assertTrue(
+            stewardLog().toString(),
+            stewardLog().any { it.startsWith("logcat saved in ") && it.contains(" of text), own lines only; 2 older exports removed") },
+        )
         // Share hands the file to other apps through the FileProvider, which serves exactly this folder.
         compose.onNodeWithText("Share").performClick()
         val chooser = shadowOf(ApplicationProvider.getApplicationContext<Application>()).nextStartedActivity
@@ -344,7 +365,8 @@ class AppFlowTest {
         val uri = IntentCompat.getParcelableExtra(send, Intent.EXTRA_STREAM, Uri::class.java)!!
         val context = ApplicationProvider.getApplicationContext<Context>()
         assertEquals("${context.packageName}.files", uri.authority)
-        context.contentResolver.openInputStream(uri)!!.use { assertEquals(log, it.readBytes().decodeToString()) }
+        assertEquals("application/zip", send.type)
+        context.contentResolver.openInputStream(uri)!!.use { assertTrue(it.readBytes().contentEquals(saved.file.readBytes())) }
 
         // The storage report maps the last scan's folders and says how each is treated; it is saved beside the logcat.
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Storage report"))

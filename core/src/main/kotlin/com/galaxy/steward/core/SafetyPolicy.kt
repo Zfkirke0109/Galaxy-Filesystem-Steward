@@ -29,6 +29,30 @@ object SafetyPolicy {
         quarantineDir = if (applicationId.endsWith(".debug")) DEBUG_QUARANTINE_DIR else QUARANTINE_DIR
     }
 
+    /**
+     * Samsung's recycle bins: My Files (and Gallery on some versions) keep what you delete in `Android/.Trash/<app>`, My
+     * Files in a folder per storage volume inside that. 242 MiB of deleted files sat there on the 11-19 phone, where no
+     * clean-up looked, since everything under Android/ is app-owned.
+     */
+    const val SYSTEM_TRASH_DIR = ".Trash"
+
+    /** Names for the apps whose bins are in [SYSTEM_TRASH_DIR]. */
+    val SYSTEM_TRASH_OWNERS = mapOf(
+        "com.sec.android.app.myfiles" to "My Files",
+        "com.sec.android.gallery3d" to "Gallery",
+    )
+
+    /**
+     * True for something inside an app's bin in `Android/.Trash` ([rel] relative to the storage root): what you deleted,
+     * which may go to the quarantine like any other recycle bin's items. `Android/.Trash` and the app folders in it are
+     * not inside, and nothing else under Android/ ever is.
+     */
+    fun isInSystemTrash(rel: String): Boolean {
+        val parts = rel.split('/')
+        return parts.size >= 4 && parts[0].equals("Android", ignoreCase = true) &&
+            parts[1].equals(SYSTEM_TRASH_DIR, ignoreCase = true) && parts.none { it.isEmpty() || it == "." || it == ".." }
+    }
+
     /** Where the app saves logcat exports. Treated like a pinned folder: never moved, deduplicated or cleaned. */
     const val LOGCAT_DIR = "Documents/Galaxy Steward LogCat"
 

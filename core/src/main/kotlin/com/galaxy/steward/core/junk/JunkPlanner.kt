@@ -32,6 +32,7 @@ class JunkPlanner(
     private val items = ArrayList<JunkItem>()
     private val installers = ArrayList<Pair<FileNode, ApkInfo>>()
     private var archiveBudget = ARCHIVE_BUDGET
+    private var verifyBudget = VERIFY_BUDGET
 
     /**
      * Big files apps keep, by lower-case name and size: a file of yours matching one is a copy of it. Not those of
@@ -50,6 +51,7 @@ class JunkPlanner(
         installers.clear()
         notes.clear()
         archiveBudget = ARCHIVE_BUDGET
+        verifyBudget = VERIFY_BUDGET
         walk(tree.root, insideHidden = false)
         planOlderInstallers()
         planEmptyFolders(tree.root)
@@ -58,6 +60,11 @@ class JunkPlanner(
     }
 
     private fun walk(dir: DirNode, insideHidden: Boolean) {
+        // Android/ is app-owned and never walked; only Samsung's recycle bins in it are looked at.
+        if (dir.depth == 1 && dir.name.equals("Android", ignoreCase = true)) {
+            dir.dirs.firstOrNull { it.name.equals(SafetyPolicy.SYSTEM_TRASH_DIR, ignoreCase = true) }?.let(::systemTrash)
+            return
+        }
         if (!dir.zone.removable) return
         val hidden = insideHidden || dir.hidden
         if (dir.name == ".thumbnails" && dir.totalBytes > 0 && !dir.subtreeHas(NodeFlags.SUBTREE_BLOCKERS)) {
@@ -158,11 +165,44 @@ class JunkPlanner(
         }
         val entries = ExtractedArchives.entries(f.path) ?: return
         val copy = ExtractedArchives.extractedCopy(f, entries) ?: return
+        // Names and sizes match. Whether the contents do takes reading the unpacked files, done here while the scan's
+        // budget lasts: a file edited in place since (same size) left the zip offered at every scan and skipped at every
+        // run (11-19 phone). Past the budget, the run's own check before the move still catches it.
+        val unpacked = entries.sumOf { it.size }
+        if (unpacked <= verifyBudget) {
+            verifyBudget -= unpacked
+            if (!ExtractedArchives.verify(f.path, copy)) {
+                notes += Insight(
+                    Severity.INFO,
+                    "Left in place: ${f.name}",
+                    "Something unpacked from it in ${copy.folder.substringAfterLast('/')} was changed since, so the archive " +
+                        "still holds the only copy of the original.",
+                    f.path,
+                )
+                return
+            }
+        }
         add(
             JunkCategory.EXTRACTED_ARCHIVES, f.path, false, f.size, f.mtime,
             "All ${entries.size} files are unpacked in ${copy.folder.substringAfterLast('/')}",
             extracted = copy,
         )
+    }
+
+    /**
+     * Samsung's recycle bins in `Android/.Trash`: one folder per app, and in My Files' one folder per storage volume
+     * (named by a UUID) holding what was deleted. Each item goes on its own, like any other bin's.
+     */
+    private fun systemTrash(trash: DirNode) {
+        for (app in trash.dirs) {
+            val owner = SafetyPolicy.SYSTEM_TRASH_OWNERS[app.name] ?: app.name
+            val volumes = app.dirs.filter { UUID_NAME.matches(it.name) }
+            if (app.files.isEmpty() && volumes.isNotEmpty() && volumes.size == app.dirs.size) {
+                volumes.forEach { recycleBin(it, owner) }
+            } else {
+                recycleBin(app, owner)
+            }
+        }
     }
 
     /** File managers that keep deleted files in shared storage, by bin folder. */
@@ -240,6 +280,9 @@ class JunkPlanner(
     }
 
     companion object {
+        /** A storage volume's folder in My Files' bin: `2909f2b1-f2f2-4eb9-9c40-69e6a6577202`. */
+        private val UUID_NAME = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
         /** Files smaller than this aren't compared with what apps keep: the app folder scan lists only big ones. */
         const val APP_COPY_MIN_BYTES = 50L * 1024 * 1024
 
@@ -255,6 +298,9 @@ class JunkPlanner(
 
         /** Bytes of tar archives read per scan to see whether they were unpacked. */
         const val ARCHIVE_BUDGET = 1024L * 1024 * 1024
+
+        /** Unpacked bytes a scan reads to check archives against their unpacked copies (well under a second on a phone). */
+        const val VERIFY_BUDGET = 256L * 1024 * 1024
 
         /** `20260903-122520-14326`, `run_20260903T1225`, `2026-09-03_12-25-20`, `backup-2026-09-03 12.25`. */
         val RUN_NAME = listOf(

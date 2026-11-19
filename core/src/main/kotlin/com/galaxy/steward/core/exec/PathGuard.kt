@@ -40,7 +40,8 @@ class PathGuard(rootPath: String, protectedFolders: List<String> = emptyList()) 
         val rel = relative(path)
         val top = rel.substringBefore('/')
         // Shared storage ignores case: "android/data" is Android/data, and a pin of "documents/taxes" is Documents/Taxes.
-        if (top.equals("Android", ignoreCase = true)) return "app-owned storage"
+        // Except what you deleted, in Samsung's recycle bins there (SafetyPolicy.isInSystemTrash).
+        if (top.equals("Android", ignoreCase = true) && !SafetyPolicy.isInSystemTrash(rel)) return "app-owned storage"
         if (top.equals(SafetyPolicy.STEWARD_DIR, ignoreCase = true)) return "steward quarantine"
         if (protectedPrefixes.any { rel.equals(it, ignoreCase = true) || rel.startsWith("$it/", ignoreCase = true) }) return "pinned folder"
         if (SafetyPolicy.isCredentialName(rel.substringAfterLast('/'))) return "credential-like name"

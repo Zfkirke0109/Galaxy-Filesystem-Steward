@@ -263,9 +263,21 @@ enum class JunkCategory(val title: String, val description: String, val defaultS
     ),
     THUMBNAIL_CACHES("Thumbnail caches", "Regenerable .thumbnails caches. Galleries rebuild them on demand.", false),
     TRASHED_MEDIA("Gallery trash", "Items already in the system trash (.trashed-*). Android deletes them after 30 days.", false),
-    RECYCLE_BINS("Other apps' recycle bins", "Files you already deleted in MT Manager and similar file managers, still kept in their recycle bins.", true),
+    RECYCLE_BINS(
+        "Other apps' recycle bins",
+        "Files you already deleted in My Files, MT Manager and similar file managers, still kept in their recycle bins. " +
+            "They go to the quarantine: until it is emptied, Undo puts them back in the bin. Meanwhile the app's own " +
+            "restore can't find them.",
+        true,
+    ),
     ZERO_BYTE_FILES("Empty files", "Zero-byte files. Occasionally used as markers, so review first.", false),
     ORPHANED_APP_FOLDERS("Leftover app folders", "Top-level folders named after apps that are no longer installed.", false),
+    PICKED_FILES(
+        "Picked by you",
+        "Files you picked yourself on the storage map, among the largest. They go to the quarantine, where Undo can bring " +
+            "them back until it is emptied.",
+        false,
+    ),
     APP_KEEPS_A_COPY(
         "Also kept by an app",
         "Big files of yours with the same name and size as one an app keeps in its own folder (Android/data, obb, media), " +
@@ -403,6 +415,14 @@ data class ScanReport(
         return copy(junk = junk.filterNot { it.id in gone }, insights = insights + notes)
     }
 
+    /** Copy whose largest files leave out [paths]: ones a run moved, removed or put in the quarantine. */
+    fun withoutFiles(paths: Collection<String>): ScanReport {
+        if (paths.isEmpty()) return this
+        val gone = paths.toHashSet()
+        if (summary.largestFiles.none { it.path in gone }) return this
+        return copy(summary = summary.copy(largestFiles = summary.largestFiles.filterNot { it.path in gone }))
+    }
+
     /** Copy without the items that were applied successfully. */
     fun without(appliedIds: Set<String>): ScanReport = copy(
         found = found ?: RunLog.scan(this),
@@ -414,4 +434,13 @@ data class ScanReport(
         organize = organize.filterNot { it.id in appliedIds },
         optimize = optimize.filterNot { it.id in appliedIds },
     )
+}
+
+/**
+ * Files you picked among the largest (the storage map): each goes to the quarantine like clutter, so Undo can bring it
+ * back until the quarantine is emptied. The run checks each one first: still there, the size and date the scan saw, not
+ * pinned since.
+ */
+fun pickedFiles(files: List<LargeFile>): List<JunkItem> = files.map { f ->
+    JunkItem("pick:${f.path}", JunkCategory.PICKED_FILES, f.path, false, f.size, f.mtime, "Picked by you on the storage map")
 }

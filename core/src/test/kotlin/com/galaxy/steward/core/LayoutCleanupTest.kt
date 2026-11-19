@@ -59,7 +59,8 @@ class LayoutCleanupTest {
             // One file never unpacked: the zip is still the only copy of it.
             zip(fs, "Download/partial.zip", mapOf("x.txt" to bytes(5), "y.txt" to bytes(6)))
             fs.file("Download/partial/x.txt", bytes(5))
-            // Unpacked, then edited in place (same size): planning can't tell, the CRC check before the move can.
+            // Unpacked, then edited in place (same size): the scan reads the copy, so the zip isn't offered at all. It used
+            // to be offered at every scan and skipped at every run (11-19 phone).
             zip(fs, "Download/edited.zip", mapOf("save.dat" to bytes(7)))
             fs.file("Download/edited/save.dat", bytes(8))
             fs.ageDirectories()
@@ -67,27 +68,29 @@ class LayoutCleanupTest {
             val report = scan(fs)
             val zips = report.junk.filter { it.category == JunkCategory.EXTRACTED_ARCHIVES }
             assertEquals(
-                setOf("Download/tool-main.zip", "Documents/Trip.zip", "Download/edited.zip"),
+                setOf("Download/tool-main.zip", "Documents/Trip.zip"),
                 zips.map { it.path.removePrefix(fs.rootPath + "/") }.toSet(),
             )
+            assertTrue(report.insights.any { it.title == "Left in place: edited.zip" })
             assertTrue(zips.all { it.defaultSelected })
             // A zip claimed as clutter is not also filed into Documents/Archives.
             assertTrue(report.organize.none { it.source.endsWith(".zip") && zips.any { z -> z.path == it.source } })
 
             val journals = JournalStore(File(fs.stateDir, "journals"))
+            // Edited after the scan, before the run (same size): the run's own check before the move catches it.
+            fs.file("Documents/Trip/b.jpg", bytes(10, 3000))
             val summary = ActionExecutor(fs.rootPath, journals).execute("Clutter", "junk", zips)
-            assertEquals(2, summary.quarantined)
+            assertEquals(1, summary.quarantined)
             assertEquals(1, summary.skipped)
             assertFalse(fs.exists("Download/tool-main.zip"))
-            assertFalse(fs.exists("Documents/Trip.zip"))
-            assertTrue(fs.exists("Download/edited.zip")) // the only copy of the original save
+            assertTrue(fs.exists("Documents/Trip.zip")) // the only copy of the original b.jpg
+            assertTrue(fs.exists("Download/edited.zip"))
             assertTrue(fs.exists("Download/partial.zip"))
             assertTrue(fs.exists("Download/tool-main/docs/guide.txt")) // the unpacked folder stays
             assertTrue(summary.messages.any { it.startsWith("The unpacked copy no longer matches the zip") })
 
             RollbackEngine(fs.rootPath, journals).rollback(summary.runId)
             assertTrue(fs.exists("Download/tool-main.zip"))
-            assertTrue(fs.exists("Documents/Trip.zip"))
         }
     }
 
@@ -162,8 +165,14 @@ class LayoutCleanupTest {
             assertEquals("Pictures/Imported/MangaScans", moves["MangaScans"])
             for (stays in listOf("Telegram", "Poweramp", "Recent Stuff", "log", ".hidden")) assertFalse(stays, stays in moves)
             assertTrue(report.organize.filter { !it.source.startsWith(fs.path("Download")) }.none { it.defaultSelected })
-            val owned = report.insights.single { it.title.endsWith("belong to installed apps") }
-            assertEquals("They stay where the apps expect them: Poweramp, Telegram.", owned.detail)
+            // Largest first, with sizes and where to free the space: only the app can.
+            val owned = report.insights.single { it.title.startsWith("2 top-level folders of installed apps") }
+            assertEquals("2 top-level folders of installed apps, 902 B", owned.title)
+            assertEquals(
+                "They stay where the apps expect them: Telegram 900 B, Poweramp 2 B. To get that space back, clear downloaded " +
+                    "media or the cache inside the app (in Telegram: Settings → Data and Storage → Storage Usage); the steward leaves them alone.",
+                owned.detail,
+            )
             assertTrue(report.insights.any { it.title == "Left in place: Recent Stuff" })
 
             val summary = ActionExecutor(fs.rootPath, JournalStore(File(fs.stateDir, "journals")))

@@ -4,6 +4,7 @@ import com.galaxy.steward.core.DAY_MS
 import com.galaxy.steward.core.DeviceEnvironment
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.StewardSettings
+import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.learn.YourMoves
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileKind
@@ -249,14 +250,16 @@ class OrganizePlanner(
      * content points to. They are only suggested: something may still write to them, and they are yours to decide on.
      */
     private fun planTopLevel(root: DirNode) {
-        val owned = ArrayList<String>()
+        val owned = ArrayList<DirNode>()
+        val ownerOf = HashMap<DirNode, String>()
         for (d in root.dirs) {
             if (d.zone != Zone.OTHER_SHARED || d.hidden || d.totalFiles == 0 || SafetyPolicy.isPackageLikeName(d.name)) continue
             // Samsung writes its dumpstate logs to /log; the clutter check looks after old ones.
             if (SafetyPolicy.isKeptTopDir(d.name)) continue
             val owner = appFolders.owner(d.name)
             if (owner != null) {
-                owned += if (owner.equals(d.name, ignoreCase = true)) d.name else "${d.name} ($owner)"
+                owned += d
+                ownerOf[d] = owner
                 continue
             }
             var newest = d.mtime
@@ -282,15 +285,29 @@ class OrganizePlanner(
         }
         if (owned.isNotEmpty()) {
             // First: the report keeps only the first few dozen of these notes.
-            insights.add(
-                0,
-                Insight(
-                    Severity.INFO,
-                    "${owned.size} top-level ${if (owned.size == 1) "folder belongs" else "folders belong"} to installed apps",
-                    "They stay where the apps expect them: ${owned.sorted().joinToString(", ")}.",
-                ),
-            )
+            insights.add(0, appFoldersNote(owned, ownerOf))
         }
+    }
+
+    /**
+     * Installed apps' own top-level folders, largest first, with their sizes: 466 MiB of Telegram's on the 11-19 phone.
+     * Only the app can free that space (it keeps an index of what it downloaded), so the note says where to do it.
+     */
+    private fun appFoldersNote(owned: List<DirNode>, ownerOf: Map<DirNode, String>): Insight {
+        val largestFirst = owned.sortedWith(compareByDescending<DirNode> { it.totalBytes }.thenBy { it.name.lowercase() })
+        val names = largestFirst.joinToString(", ") { d ->
+            val owner = ownerOf.getValue(d)
+            val label = if (owner.equals(d.name, ignoreCase = true)) d.name else "${d.name} ($owner)"
+            "$label ${d.totalBytes.humanBytes()}"
+        }
+        val total = owned.sumOf { it.totalBytes }
+        val telegram = owned.any { it.name.contains("telegram", ignoreCase = true) }
+        val where = if (telegram) " (in Telegram: Settings → Data and Storage → Storage Usage)" else ""
+        return Insight(
+            Severity.INFO,
+            "${owned.size} top-level ${if (owned.size == 1) "folder" else "folders"} of installed apps, ${total.humanBytes()}",
+            "They stay where the apps expect them: $names. To get that space back, clear downloaded media or the cache inside the app$where; the steward leaves them alone.",
+        )
     }
 
     /**

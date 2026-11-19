@@ -28,9 +28,14 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
-/** A saved log. [wholeDevice] is false when only the app's own lines could be read. */
-data class LogcatFile(val file: File, val bytes: Long, val wholeDevice: Boolean, val note: String?)
+/**
+ * A saved log: a zip of one text file, [textBytes] long ([bytes] on disk). [wholeDevice] is false when only the app's own
+ * lines could be read.
+ */
+data class LogcatFile(val file: File, val bytes: Long, val wholeDevice: Boolean, val note: String?, val textBytes: Long = bytes)
 
 data class LogcatExportState(
     val running: Boolean = false,
@@ -73,7 +78,8 @@ class LogcatExporter(
             }
             val pruned = withContext(Dispatchers.IO) { prune(saved.file.parentFile) }
             StewardLog.i(
-                "logcat saved in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${saved.bytes.humanBytes()}, " +
+                "logcat saved in ${RunLog.seconds(SystemClock.uptimeMillis() - started)}: ${saved.bytes.humanBytes()} " +
+                    "(${saved.textBytes.humanBytes()} of text), " +
                     (if (saved.wholeDevice) "whole device" else "own lines only") +
                     if (pruned > 0) "; $pruned older exports removed" else "",
             )
@@ -84,27 +90,36 @@ class LogcatExporter(
     }
 
     /**
-     * Exports pile up in a folder no clean-up touches (102 MiB in five on the 9-30 phone): the newest [KEEP_EXPORTS]
-     * stay, older logcat exports go. Storage reports are small and stay.
+     * Exports pile up in a folder no clean-up touches (102 MiB in five on the 9-30 phone, 121 MiB on the 11-19 one): the
+     * newest [KEEP_EXPORTS] stay, older logcat exports go, the plain-text ones from before 1.2.15 too. Storage reports
+     * are small and stay.
      */
     private fun prune(folder: File?): Int {
-        val exports = folder?.listFiles { f -> f.isFile && f.name.startsWith("logcat-") && f.name.endsWith(".txt") } ?: return 0
+        val exports = folder?.listFiles { f ->
+            f.isFile && f.name.startsWith("logcat-") && (f.name.endsWith(".zip") || f.name.endsWith(".txt"))
+        } ?: return 0
         return exports.sortedByDescending { it.lastModified() }.drop(KEEP_EXPORTS).count { it.delete() }
     }
 
     /** A share sheet for [file], through this app's FileProvider (which only serves the logcat folder). */
-    fun shareIntent(file: File): Intent = shareTextFile(context, file, "Share logcat")
+    fun shareIntent(file: File): Intent = shareTextFile(context, file, "Share logcat", type = "application/zip")
 
     private suspend fun write(): LogcatFile {
         val folder = File(StorageAccess.rootPath, SafetyPolicy.LOGCAT_DIR)
         if (!folder.isDirectory && !folder.mkdirs()) throw IOException("can't create ${SafetyPolicy.LOGCAT_DIR}")
         val now = ZonedDateTime.now()
-        val file = File(folder, "logcat-${now.format(FILE_TIME)}.txt")
+        val name = "logcat-${now.format(FILE_TIME)}"
+        // Zipped: the 11-19 whole-device log is 36.7 MiB of text and 5.2 MiB zipped (14%), and it is shared as a zip
+        // anyway. Three plain-text exports took 121 MiB on that phone.
+        val file = File(folder, "$name.zip")
         val source = open()
+        var text = 0L
         try {
             // The source is closed whatever happens, so logcat or the helper never blocks on a pipe nobody reads.
             source.stream.use { input ->
-                file.outputStream().buffered(BUFFER_BYTES).use { out ->
+                ZipOutputStream(file.outputStream().buffered(BUFFER_BYTES)).use { out ->
+                    val entry = ZipEntry("$name.txt").apply { time = now.toInstant().toEpochMilli() }
+                    out.putNextEntry(entry)
                     out.write(header(now, source).toByteArray())
                     // The whole device's log also holds other Android users': Secure Folder, a work profile.
                     val others = if (source.wholeDevice) OtherProfiles(Process.myUid() / 100_000, ownPackage = context.packageName) else null
@@ -115,13 +130,16 @@ class LogcatExporter(
                                 "(Secure Folder, a work profile, Dual Messenger)\n").toByteArray(),
                         )
                     }
+                    out.closeEntry()
+                    // Set when the entry closes: the exact length of the text, in bytes.
+                    text = entry.size
                 }
             }
         } catch (e: Exception) {
             file.delete()
             throw e
         }
-        return LogcatFile(file, file.length(), source.wholeDevice, source.note)
+        return LogcatFile(file, file.length(), source.wholeDevice, source.note, textBytes = text)
     }
 
     private suspend fun open(): Source {
@@ -173,6 +191,7 @@ class LogcatExporter(
 
     private fun yesNo(b: Boolean) = if (b) "yes" else "no"
 
+    /** Copies the log into [out], leaving out [others]' lines. */
     private fun copy(input: InputStream, out: OutputStream, others: OtherProfiles?) {
         var total = 0L
         var reported = 0L

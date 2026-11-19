@@ -39,6 +39,7 @@ import com.galaxy.steward.core.plan.FolderDuplicateGroup
 import com.galaxy.steward.core.plan.JunkItem
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.ScanReport
+import com.galaxy.steward.core.plan.pickedFiles
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.termux.TermuxCleanResult
 import com.galaxy.steward.core.termux.TermuxCleanSummary
@@ -112,6 +113,9 @@ class StewardSession {
     /** A scan or a run (clean-up, undo, app data, Termux) is in progress. */
     fun busy(): Boolean = state.value.let { it.scanning || it.applying != null }
 }
+
+/** The kind of run for files you picked on the storage map. */
+const val PICKED = "picked"
 
 class StewardViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as StewardApp
@@ -258,6 +262,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
     /** Remembers what was offered and what you ran, once a run has finished. */
     private fun recordDecisions(runId: String, kind: String, report: ScanReport?, items: List<PlanItem>) {
         if (!settings.value.learnFromChoices || report == null) return
+        // What you pick yourself on the storage map was never offered: nothing to learn from.
+        if (kind == PICKED) return
         val offered = when (kind) {
             "autopilot" -> report.allItems()
             "junk" -> report.junk
@@ -325,6 +331,12 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         return items.filter { it.id in s.selected }.map { effective(it, s.keepers) }
     }
 
+    /** Quarantine steps for the largest files at [paths] (the storage map), as the last scan saw them. */
+    fun pickedItems(paths: Collection<String>): List<PlanItem> {
+        val wanted = paths.toHashSet()
+        return pickedFiles(_state.value.report?.summary?.largestFiles.orEmpty().filter { it.path in wanted })
+    }
+
     /** Everything currently selected, in the safest order: dedupe, clean, restructure, then file. */
     fun autopilotItems(): List<PlanItem> {
         val r = _state.value.report ?: return emptyList()
@@ -369,7 +381,8 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
                         it.copy(
                             applying = null,
                             outcome = Outcome.Applied(title, summary),
-                            report = it.report?.without(summary.completedItemIds),
+                            // The largest files leave out what the run moved or put away, so none is offered twice.
+                            report = it.report?.without(summary.completedItemIds)?.withoutFiles(summary.changedPaths),
                             // Items that were only partly done stay listed but unticked: running them again before a
                             // new scan only skips the same files again.
                             selected = it.selected - summary.completedItemIds - summary.partialItemIds,

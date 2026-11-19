@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,11 +19,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -39,19 +42,26 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.galaxy.steward.core.humanBytes
 import com.galaxy.steward.core.model.DirNode
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.NodeFlags
+import com.galaxy.steward.core.plan.JunkItem
+import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.report.isEmptyStandardFolder
 import com.galaxy.steward.core.report.stewardNote
+import com.galaxy.steward.ui.PICKED
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.UiState
+import com.galaxy.steward.ui.components.ActionBar
+import com.galaxy.steward.ui.components.ConfirmDialog
 import com.galaxy.steward.ui.components.EmptyState
 import com.galaxy.steward.ui.components.IconBadge
+import com.galaxy.steward.ui.components.InlineNotice
 import com.galaxy.steward.ui.components.ReviewCard
 import com.galaxy.steward.ui.components.UsageBar
 import com.galaxy.steward.ui.components.ZonePill
@@ -68,11 +78,27 @@ fun ExplorerScreen(vm: StewardViewModel, state: UiState) {
     val report = state.report
     var relPath by rememberSaveable { mutableStateOf("") }
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    // Largest files you ticked; ones a run or a new scan took off the list drop out by themselves.
+    var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var confirmPicked by remember { mutableStateOf<List<PlanItem>?>(null) }
     val goUp = { relPath = relPath.substringBeforeLast('/', "") }
     BackHandler(enabled = relPath.isNotEmpty()) { goUp() }
     val startScan = rememberScanStarter(vm)
+    val pickedFiles = report?.summary?.largestFiles.orEmpty().filter { it.path in picked }
 
-    Scaffold(topBar = { ReviewTopBar("Storage map", if (relPath.isNotEmpty()) goUp else null) }) { padding ->
+    Scaffold(
+        topBar = { ReviewTopBar("Storage map", if (relPath.isNotEmpty()) goUp else null) },
+        bottomBar = {
+            if (report != null && tab == 1) {
+                ActionBar(
+                    summary = "Frees ${pickedFiles.sumOf { it.size }.humanBytes()}",
+                    detail = "${pickedFiles.size.plural("file", "files")} picked",
+                    action = "Move to quarantine",
+                    enabled = pickedFiles.isNotEmpty() && !state.scanning && state.applying == null,
+                ) { confirmPicked = vm.pickedItems(picked) }
+            }
+        },
+    ) { padding ->
         if (report == null) {
             Column(Modifier.padding(padding).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 EmptyState(Icons.Rounded.Explore, "No map yet", "Run a smart scan to see which folders and files use your space.")
@@ -91,13 +117,49 @@ fun ExplorerScreen(vm: StewardViewModel, state: UiState) {
                 FolderList(dir, onOpen = { relPath = it.relPath })
             } else {
                 LazyColumn(contentPadding = PaddingValues(vertical = 6.dp)) {
+                    item {
+                        InlineNotice(
+                            "Tick what you no longer need. It goes to the quarantine first: Undo in History brings it back " +
+                                "until the quarantine is emptied.",
+                        )
+                    }
                     items(report.summary.largestFiles, key = { it.path }) { f ->
                         val kind = FileKind.of(f.path.substringAfterLast('/'))
-                        FileRow(f.path.substringAfterLast('/'), f.path.substringBeforeLast('/').relativeTo(vm.rootPath), f.size, kind)
+                        val checked = f.path in picked
+                        Row(
+                            Modifier.fillMaxWidth().toggleable(checked, role = Role.Checkbox) { on -> picked = if (on) picked + f.path else picked - f.path }
+                                .padding(start = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = checked, onCheckedChange = null)
+                            Box(Modifier.weight(1f)) {
+                                FileRow(f.path.substringAfterLast('/'), f.path.substringBeforeLast('/').relativeTo(vm.rootPath), f.size, kind)
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+    confirmPicked?.let { items ->
+        val files = items.filterIsInstance<JunkItem>()
+        val camera = files.count { "/DCIM/" in it.path }
+        ConfirmDialog(
+            title = "Move ${files.size.plural("file", "files")} to the quarantine?",
+            lines = listOfNotNull(
+                "${files.sumOf { it.bytes }.humanBytes()} in all, picked by you",
+                camera.takeIf { it > 0 }?.let { "${it.plural("is", "are")} from DCIM: your camera's own ${if (it == 1) "original" else "originals"}" },
+                "Kept in the quarantine for ${vm.settings.value.quarantineRetentionDays} days, then the space is freed",
+            ),
+            confirmLabel = "Move",
+            onConfirm = {
+                confirmPicked = null
+                picked = emptyList()
+                vm.apply("Files you picked", PICKED, items)
+            },
+            onDismiss = { confirmPicked = null },
+            check = { vm.preflight(items) },
+        )
     }
 }
 

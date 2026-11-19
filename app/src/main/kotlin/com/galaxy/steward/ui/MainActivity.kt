@@ -186,6 +186,10 @@ private fun StewardRoot(vm: StewardViewModel) {
                 vm.rollback(runId, title)
             },
             onDismiss = vm::dismissOutcome,
+            onFreeNow = { runId ->
+                vm.dismissOutcome()
+                vm.purgeQuarantine(runId)
+            },
         )
     }
 }

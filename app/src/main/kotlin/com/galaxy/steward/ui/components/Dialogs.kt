@@ -17,8 +17,10 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -170,9 +172,23 @@ fun ApplyProgressDialog(progress: ApplyProgress, onCancel: () -> Unit) {
     )
 }
 
+/**
+ * What a run did. With [onFreeNow], a run that left something in the quarantine offers to empty it at once, after one
+ * more question, since that ends Undo for it: duplicates and clutter waited there (2.2 GiB on the 11-19 phone, "freed
+ * 0 B"), and History was the only place to free them.
+ */
 @Composable
-fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> Unit)?, onDismiss: () -> Unit) {
+fun OutcomeDialog(
+    outcome: Outcome,
+    onUndo: ((runId: String, title: String) -> Unit)?,
+    onDismiss: () -> Unit,
+    onFreeNow: ((runId: String) -> Unit)? = null,
+) {
     var showDetails by remember { mutableStateOf(false) }
+    var confirmFree by remember { mutableStateOf(false) }
+    // What emptying this run's quarantine deletes and frees, as the quarantined line below says. Zips a pack run made
+    // stay where they are, and Undo leaves them once their folders can't come back.
+    val freeable = (outcome as? Outcome.Applied)?.summary?.bytesQuarantined?.coerceAtLeast(0) ?: 0L
     val (title, lines, details, runId, runTitle) = when (outcome) {
         is Outcome.Applied -> {
             val s = outcome.summary
@@ -228,6 +244,26 @@ fun OutcomeDialog(outcome: Outcome, onUndo: ((runId: String, title: String) -> U
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 lines.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                if (onFreeNow != null && runId != null && freeable > 0) {
+                    if (!confirmFree) {
+                        FilledTonalButton(onClick = { confirmFree = true }) { Text("Free ${freeable.humanBytes()} now") }
+                    } else {
+                        Text(
+                            "This deletes for good what this run put in the quarantine, and Undo can't bring it back. A " +
+                                "duplicate's kept copy stays where it is, but files you picked and what a recycle bin held " +
+                                "have no other copy. The rest of the run can still be undone.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onFreeNow(runId) },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            ) { Text("Delete ${freeable.humanBytes()}") }
+                            TextButton(onClick = { confirmFree = false }) { Text("Keep for now") }
+                        }
+                    }
+                }
                 if (details.isNotEmpty()) {
                     TextButton(onClick = { showDetails = !showDetails }) { Text(if (showDetails) "Hide details" else "Why were steps skipped?") }
                     if (showDetails) {

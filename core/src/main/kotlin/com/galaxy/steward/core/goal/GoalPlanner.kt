@@ -52,7 +52,8 @@ object GoalPlanner {
             JunkCategory.EXTRACTED_ARCHIVES -> RiskTier.COPIES
             JunkCategory.INSTALLED_APKS, JunkCategory.OLD_INSTALLERS, JunkCategory.TRASHED_MEDIA, JunkCategory.RECYCLE_BINS -> RiskTier.RECOVERABLE
             JunkCategory.NEAR_COPIES, JunkCategory.OLD_RUNS, JunkCategory.ORPHANED_APP_FOLDERS, JunkCategory.APP_KEEPS_A_COPY -> RiskTier.REVIEW
-            JunkCategory.ZERO_BYTE_FILES -> null
+            // Never part of a goal: only what you pick yourself.
+            JunkCategory.ZERO_BYTE_FILES, JunkCategory.PICKED_FILES -> null
         }
         is DuplicateGroup -> RiskTier.COPIES.takeIf { item.removals.isNotEmpty() }
         is FolderDuplicateGroup -> RiskTier.COPIES.takeIf { item.removals.isNotEmpty() }
