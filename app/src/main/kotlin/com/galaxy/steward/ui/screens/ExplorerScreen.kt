@@ -34,6 +34,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -84,7 +85,10 @@ fun ExplorerScreen(vm: StewardViewModel, state: UiState) {
     val goUp = { relPath = relPath.substringBeforeLast('/', "") }
     BackHandler(enabled = relPath.isNotEmpty()) { goUp() }
     val startScan = rememberScanStarter(vm)
-    val pickedFiles = report?.summary?.largestFiles.orEmpty().filter { it.path in picked }
+    // What the run would leave alone anyway (pinned, keys, app-owned) and Git data shows as protected, without a box.
+    val pins = vm.settings.collectAsState().value.protectedFolders
+    val blocked = remember(report, pins) { vm.pickBlocks(report?.summary?.largestFiles.orEmpty().map { it.path }, pins) }
+    val pickedFiles = report?.summary?.largestFiles.orEmpty().filter { it.path in picked && it.path !in blocked }
 
     Scaffold(
         topBar = { ReviewTopBar("Storage map", if (relPath.isNotEmpty()) goUp else null) },
@@ -125,15 +129,26 @@ fun ExplorerScreen(vm: StewardViewModel, state: UiState) {
                     }
                     items(report.summary.largestFiles, key = { it.path }) { f ->
                         val kind = FileKind.of(f.path.substringAfterLast('/'))
-                        val checked = f.path in picked
+                        val why = blocked[f.path]
+                        val checked = why == null && f.path in picked
                         Row(
-                            Modifier.fillMaxWidth().toggleable(checked, role = Role.Checkbox) { on -> picked = if (on) picked + f.path else picked - f.path }
+                            Modifier.fillMaxWidth()
+                                .then(
+                                    if (why == null) {
+                                        Modifier.toggleable(checked, role = Role.Checkbox) { on -> picked = if (on) picked + f.path else picked - f.path }
+                                    } else {
+                                        Modifier
+                                    },
+                                )
                                 .padding(start = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Checkbox(checked = checked, onCheckedChange = null)
+                            Checkbox(checked = checked, onCheckedChange = null, enabled = why == null)
                             Box(Modifier.weight(1f)) {
-                                FileRow(f.path.substringAfterLast('/'), f.path.substringBeforeLast('/').relativeTo(vm.rootPath), f.size, kind)
+                                FileRow(
+                                    f.path.substringAfterLast('/'), f.path.substringBeforeLast('/').relativeTo(vm.rootPath), f.size, kind,
+                                    note = why?.let { "Protected: $it" },
+                                )
                             }
                         }
                     }
@@ -251,13 +266,16 @@ private fun FolderList(dir: DirNode, onOpen: (DirNode) -> Unit) {
 }
 
 @Composable
-private fun FileRow(name: String, subtitle: String, size: Long, kind: FileKind) {
+private fun FileRow(name: String, subtitle: String, size: Long, kind: FileKind, note: String? = null) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         IconBadge(kindIcon(kind), kindColor(kind), size = 36)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
+            if (note != null) {
+                Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
         Spacer(Modifier.width(8.dp))
         Text(size.humanBytes(), style = MaterialTheme.typography.labelLarge)

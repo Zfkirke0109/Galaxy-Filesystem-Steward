@@ -331,10 +331,20 @@ class StewardViewModel(application: Application) : AndroidViewModel(application)
         return items.filter { it.id in s.selected }.map { effective(it, s.keepers) }
     }
 
-    /** Quarantine steps for the largest files at [paths] (the storage map), as the last scan saw them. */
+    /**
+     * Quarantine steps for the largest files at [paths] (the storage map), as the last scan saw them. Ones that can't be
+     * picked ([pickBlocks]) are left out, even if they were ticked before a folder was pinned.
+     */
     fun pickedItems(paths: Collection<String>): List<PlanItem> {
         val wanted = paths.toHashSet()
-        return pickedFiles(_state.value.report?.summary?.largestFiles.orEmpty().filter { it.path in wanted })
+        val guard = PathGuard(rootPath, settings.value.protectedFolders)
+        return pickedFiles(_state.value.report?.summary?.largestFiles.orEmpty().filter { it.path in wanted && guard.pickBlock(it.path) == null })
+    }
+
+    /** Why each of [paths] can't be picked on the storage map ([PathGuard.pickBlock]), for those that can't. */
+    fun pickBlocks(paths: List<String>, protectedFolders: List<String>): Map<String, String> {
+        val guard = PathGuard(rootPath, protectedFolders)
+        return buildMap { for (p in paths) guard.pickBlock(p)?.let { put(p, it) } }
     }
 
     /** Everything currently selected, in the safest order: dedupe, clean, restructure, then file. */

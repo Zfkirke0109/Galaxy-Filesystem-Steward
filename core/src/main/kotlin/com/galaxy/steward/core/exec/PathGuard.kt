@@ -48,6 +48,13 @@ class PathGuard(rootPath: String, protectedFolders: List<String> = emptyList()) 
         return null
     }
 
+    /**
+     * Why a file can't be picked by hand on the storage map, or null: what [protectionReason] keeps, and a Git
+     * repository's own data, which only makes sense whole (a pack file moved on its own breaks the repository).
+     */
+    fun pickBlock(path: String): String? =
+        protectionReason(path) ?: "Git repository data".takeIf { relative(path).split('/').dropLast(1).any { it.equals(".git", ignoreCase = true) } }
+
     /** True when every existing component resolves to itself (no symlink anywhere between root and path). */
     fun resolvesBeneath(path: Path): Boolean {
         val base = realRoot ?: return false

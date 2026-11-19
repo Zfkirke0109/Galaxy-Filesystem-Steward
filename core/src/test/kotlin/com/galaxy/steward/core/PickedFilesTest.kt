@@ -3,6 +3,7 @@ package com.galaxy.steward.core
 import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutorOptions
 import com.galaxy.steward.core.exec.JournalStore
+import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.Preflight
 import com.galaxy.steward.core.exec.RollbackEngine
 import com.galaxy.steward.core.plan.JunkCategory
@@ -10,6 +11,7 @@ import com.galaxy.steward.core.plan.pickedFiles
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -48,6 +50,24 @@ class PickedFilesTest {
             assertEquals(undo.messages.joinToString("\n"), 0, undo.failed + undo.skipped)
             assertTrue(video.readBytes().contentEquals(videoBytes))
         }
+    }
+
+    /**
+     * The storage map shows these as protected, with no box to tick: the run would leave them alone anyway, or (a Git
+     * repository's own files) moving one on its own would break the repository.
+     */
+    @Test
+    fun keysPinsAppDataAndGitDataCantBePicked() {
+        val guard = PathGuard("/storage/emulated/0", listOf("Movies/keep"))
+        fun block(rel: String) = guard.pickBlock("/storage/emulated/0/$rel")
+        assertNull(block("Movies/long.mp4"))
+        assertNull(block("Download/LSPatch-master/build/app-release.apk")) // a project's own build output can go
+        assertNull(block("Download/notes.git")) // only a folder named .git counts
+        assertEquals("credential-like name", block("Documents/keys/release.jks"))
+        assertEquals("pinned folder", block("Movies/keep/long.mp4"))
+        assertEquals("app-owned storage", block("Android/data/com.amazon.mp3/files/song.mp3"))
+        assertEquals("Git repository data", block("Download/LSPatch-master/.git/objects/pack/pack-1.pack"))
+        assertEquals("Git repository data", block("Download/tool/.GIT/index"))
     }
 
     /** A pick in a folder you pinned since stays where it is: the run checks pins again before each step. */

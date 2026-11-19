@@ -19,6 +19,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
@@ -318,6 +319,39 @@ class AppFlowTest {
         compose.onNodeWithText("Map").performClick()
         compose.onNodeWithText("Download").performClick()
         shot("12-storage-map")
+
+        // The largest files can be ticked and moved to the quarantine, after the dry run; Undo brings them back. The
+        // camera original is still listed: the duplicate run removed its copies, not it.
+        compose.onNodeWithText("Largest files").performClick()
+        compose.onNodeWithText("Move to quarantine").assertIsNotEnabled()
+        // What the run would leave alone, or what would break a repository, shows as protected and can't be ticked.
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("release.jks"))
+        compose.onNodeWithText("Protected: credential-like name").assertExists()
+        compose.onNodeWithText("Protected: Git repository data").assertExists()
+        compose.onNodeWithText("release.jks").performClick()
+        compose.onNodeWithText("0 files picked").assertExists()
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("IMG_20240612_101500.jpg"))
+        compose.onNodeWithText("IMG_20240612_101500.jpg").performClick()
+        compose.onNodeWithText("1 file picked").assertExists()
+        shot("12b-largest-files-picked")
+        compose.onNodeWithText("Move to quarantine").assertIsEnabled().performClick()
+        compose.onNodeWithText("Move 1 file to the quarantine?").assertExists()
+        compose.onNodeWithText("1 is from DCIM: your camera's own original", substring = true).assertExists()
+        compose.onNodeWithText("Move").performClick()
+        awaitState("picked files", vm) {
+            vm.state.value.applying == null && (vm.state.value.outcome as? Outcome.Applied)?.title == "Files you picked"
+        }
+        assertFalse(File(root, "DCIM/Camera/IMG_20240612_101500.jpg").exists())
+        assertTrue(stewardLog().toString(), stewardLog().any { it.startsWith("run \"Files you picked\" (picked) done in ") })
+        // The result offers to free the space at once; Undo is still there.
+        compose.onNodeWithText("Free 684 KiB now").assertExists()
+        shot("12c-picked-result")
+        compose.onNodeWithText("Undo").performClick()
+        awaitState("undo picks", vm) { vm.state.value.outcome is Outcome.RolledBack }
+        assertTrue(File(root, "DCIM/Camera/IMG_20240612_101500.jpg").readBytes().contentEquals(photo))
+        compose.onNodeWithText("Done").performClick()
+        compose.onNodeWithText("Folders").performClick()
+
         compose.onNodeWithText("Settings").performClick()
         shot("13-settings")
 
