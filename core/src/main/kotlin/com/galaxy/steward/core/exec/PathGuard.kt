@@ -22,7 +22,7 @@ class PathGuard(rootPath: String, protectedFolders: List<String> = emptyList()) 
     }
     private val protectedPrefixes = protectedFolders.map { it.trim().trim('/') }.filter { it.isNotEmpty() }
     val stewardDir: Path = root.resolve(SafetyPolicy.STEWARD_DIR)
-    val quarantineRoot: Path = stewardDir.resolve(SafetyPolicy.QUARANTINE_DIR)
+    val quarantineRoot: Path = stewardDir.resolve(SafetyPolicy.quarantineDir)
 
     /** Syntactic check: absolute, strictly beneath the root, no `.`/`..`/`//` segments or control characters. */
     fun wellFormed(path: String): Boolean {
@@ -39,12 +39,21 @@ class PathGuard(rootPath: String, protectedFolders: List<String> = emptyList()) 
         if (!wellFormed(path)) return "unsafe or out-of-root path"
         val rel = relative(path)
         val top = rel.substringBefore('/')
-        if (top == "Android") return "app-owned storage"
-        if (top == SafetyPolicy.STEWARD_DIR) return "steward quarantine"
-        if (protectedPrefixes.any { rel == it || rel.startsWith("$it/") }) return "pinned folder"
+        // Shared storage ignores case: "android/data" is Android/data, and a pin of "documents/taxes" is Documents/Taxes.
+        // Except what you deleted, in Samsung's recycle bins there (SafetyPolicy.isInSystemTrash).
+        if (top.equals("Android", ignoreCase = true) && !SafetyPolicy.isInSystemTrash(rel)) return "app-owned storage"
+        if (top.equals(SafetyPolicy.STEWARD_DIR, ignoreCase = true)) return "steward quarantine"
+        if (protectedPrefixes.any { rel.equals(it, ignoreCase = true) || rel.startsWith("$it/", ignoreCase = true) }) return "pinned folder"
         if (SafetyPolicy.isCredentialName(rel.substringAfterLast('/'))) return "credential-like name"
         return null
     }
+
+    /**
+     * Why a file can't be picked by hand on the storage map, or null: what [protectionReason] keeps, and a Git
+     * repository's own data, which only makes sense whole (a pack file moved on its own breaks the repository).
+     */
+    fun pickBlock(path: String): String? =
+        protectionReason(path) ?: "Git repository data".takeIf { relative(path).split('/').dropLast(1).any { it.equals(".git", ignoreCase = true) } }
 
     /** True when every existing component resolves to itself (no symlink anywhere between root and path). */
     fun resolvesBeneath(path: Path): Boolean {

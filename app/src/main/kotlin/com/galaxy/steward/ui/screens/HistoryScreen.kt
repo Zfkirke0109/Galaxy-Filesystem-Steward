@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.core.exec.JournalInfo
 import com.galaxy.steward.core.humanBytes
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.UiState
 import com.galaxy.steward.ui.components.ConfirmDialog
@@ -76,6 +77,27 @@ fun HistoryScreen(vm: StewardViewModel, state: UiState) {
                         }
                         if (state.quarantineBytes > 0) {
                             FilledTonalButton(onClick = { confirm = HistoryConfirm.Purge(null, state.quarantineBytes) }) { Text("Empty") }
+                        }
+                    }
+                }
+            }
+            if (state.orphanBytes > 0) {
+                item {
+                    ReviewCard {
+                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Not in any journal", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "${state.orphanBytes.humanBytes()} in the quarantine that no journal of this install records: from " +
+                                        "before a reinstall, or a run Android stopped mid-step. Undo can't reach them, but your files can " +
+                                        "still go back where they were, beside anything that has their name now; what came from app " +
+                                        "folders stays. They are never emptied on their own.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            FilledTonalButton(onClick = { vm.restoreOrphans() }) { Text("Put back") }
                         }
                     }
                 }
@@ -155,6 +177,7 @@ private fun RunCard(info: JournalInfo, quarantined: Long, onUndo: () -> Unit, on
             val facts = buildList {
                 if (info.stat("freed") > 0) add("freed ${info.stat("freed").humanBytes()}")
                 if (info.stat("apps") > 0) add("${info.stat("apps")} app caches cleared")
+                if (info.stat("reset") > 0) add("${info.stat("reset").plural("app")} cleared of all data")
                 if (info.stat("cleared") > 0) add("${info.stat("cleared")} ${if (info.kind == "termux") "locations" else "files"} cleared")
                 if (info.stat("deduped") > 0) add("${info.stat("deduped")} deduped")
                 if (info.stat("moved") > 0) add("${info.stat("moved")} moved")

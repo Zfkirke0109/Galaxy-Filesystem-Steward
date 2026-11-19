@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -65,8 +66,31 @@ object KeepAlive {
     @Volatile
     private var lastUpdate = 0L
 
+    /** Keeps the CPU running while a run lasts, screen off or not: a foreground service alone doesn't, and a long run
+     *  started just before the phone was locked stalled until it woke. Capped at two hours, released when the last ends. */
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    @Synchronized
+    private fun stayAwake(context: Context) {
+        if (wakeLock?.isHeld == true) return
+        wakeLock = runCatching {
+            context.getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GalaxySteward:run").apply {
+                setReferenceCounted(false)
+                acquire(WAKE_LIMIT_MS)
+            }
+        }.getOrNull()
+    }
+
+    @Synchronized
+    private fun sleepAgain() {
+        runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
+        wakeLock = null
+    }
+
+    private const val WAKE_LIMIT_MS = 2 * 60 * 60 * 1000L
+
     fun begin(context: Context, title: String) {
-        holders.incrementAndGet()
+        if (holders.incrementAndGet() == 1) stayAwake(context.applicationContext)
         val intent = Intent(context, KeepAliveService::class.java).putExtra(KeepAliveService.EXTRA_TITLE, title)
         try {
             ContextCompat.startForegroundService(context, intent)
@@ -75,11 +99,14 @@ object KeepAlive {
         }
     }
 
-    /** Refreshes the notification text at most once a second. */
+    /**
+     * Refreshes the notification text at most every few seconds: each update makes System UI re-inflate the row, and
+     * once a second for a 20-minute run was over a thousand re-inflations on a real phone.
+     */
     fun update(context: Context, title: String, text: String?, done: Int, total: Int) {
         if (holders.get() <= 0) return
         val now = SystemClock.uptimeMillis()
-        if (now - lastUpdate < 1000 && done < total) return
+        if (now - lastUpdate < UPDATE_INTERVAL_MS && done < total) return
         lastUpdate = now
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -89,11 +116,14 @@ object KeepAlive {
         NotificationManagerCompat.from(context).notify(KeepAliveService.NOTIFICATION_ID, notification(context, title, text, done, total))
     }
 
+    private const val UPDATE_INTERVAL_MS = 5_000L
+
     val active: Boolean get() = holders.get() > 0
 
     fun end(context: Context) {
         if (holders.decrementAndGet() > 0) return
         holders.set(0)
+        sleepAgain()
         // Routed through onStartCommand so the service is always in the foreground before it stops.
         val stop = Intent(context, KeepAliveService::class.java).setAction(KeepAliveService.ACTION_STOP)
         try {

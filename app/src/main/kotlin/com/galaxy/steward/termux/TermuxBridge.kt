@@ -5,12 +5,15 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.core.content.ContextCompat
 import com.galaxy.steward.core.termux.TermuxScript
+import com.galaxy.steward.diagnostics.StewardLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -61,9 +64,11 @@ class TermuxBridge(private val context: Context) {
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or
                 // Termux fills in the result extras, so the intent has to stay mutable.
                 (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0)
+            // The data names this process: PendingIntents outlive it, and their extras don't tell them apart, so after a
+            // restart call 1 would otherwise get the answer meant for the old process's call 1.
             val callback = PendingIntent.getBroadcast(
                 context, id,
-                Intent(context, TermuxResultReceiver::class.java).putExtra(EXTRA_CALL_ID, id),
+                Intent(context, TermuxResultReceiver::class.java).setData(callUri(id)).putExtra(EXTRA_CALL_ID, id),
                 flags,
             )
             val intent = Intent(ACTION_RUN_COMMAND)
@@ -105,8 +110,15 @@ class TermuxBridge(private val context: Context) {
 
         private val ids = AtomicInteger(0)
         private val pending = ConcurrentHashMap<Int, CompletableDeferred<Bundle>>()
+        private val process = UUID.randomUUID().toString()
 
-        internal fun deliver(id: Int, result: Bundle) {
+        private fun callUri(id: Int): Uri = Uri.Builder().scheme("galaxysteward").authority("termux").appendPath(process).appendPath(id.toString()).build()
+
+        internal fun deliver(data: Uri?, id: Int, result: Bundle) {
+            if (data != callUri(id)) {
+                StewardLog.i("Termux answered a call from before the app restarted; it is ignored")
+                return
+            }
             pending.remove(id)?.complete(result)
         }
     }
@@ -116,6 +128,6 @@ class TermuxResultReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getIntExtra(TermuxBridge.EXTRA_CALL_ID, -1)
         val result = intent.getBundleExtra("result") ?: Bundle()
-        TermuxBridge.deliver(id, result)
+        TermuxBridge.deliver(intent.data, id, result)
     }
 }

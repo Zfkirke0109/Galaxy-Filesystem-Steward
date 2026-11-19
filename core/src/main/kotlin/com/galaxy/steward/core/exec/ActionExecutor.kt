@@ -3,21 +3,31 @@ package com.galaxy.steward.core.exec
 import com.galaxy.steward.core.SafetyPolicy
 import com.galaxy.steward.core.hash.FileIdentity
 import com.galaxy.steward.core.hash.Hashing
+import com.galaxy.steward.core.junk.ExtractedArchives
 import com.galaxy.steward.core.plan.DeleteDuplicateOp
+import com.galaxy.steward.core.plan.ExtractedCopy
 import com.galaxy.steward.core.plan.MoveDirOp
 import com.galaxy.steward.core.plan.MoveFileOp
 import com.galaxy.steward.core.plan.Operation
+import com.galaxy.steward.core.plan.PackDirOp
 import com.galaxy.steward.core.plan.PlanItem
 import com.galaxy.steward.core.plan.QuarantineOp
 import com.galaxy.steward.core.plan.RemoveEmptyDirOp
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import java.io.BufferedOutputStream
+import java.io.File
 import java.io.IOException
+import java.io.UncheckedIOException
+import java.nio.file.DirectoryIteratorException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.BasicFileAttributes
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 data class ExecutorOptions(
     /** Quarantine verified duplicates instead of deleting them. */
@@ -45,12 +55,34 @@ data class ExecutionSummary(
     val changedPaths: List<String>,
     /** Regenerable files (caches, logs, temp) deleted for good. */
     val cleared: Int = 0,
+    /** Why files were skipped or failed, with how many each: "Source is gone" to 12. Counts files, also inside merges. */
+    val reasons: Map<String, Int> = emptyMap(),
+    /** Folders packed into zips, and the bytes those zips take. */
+    val packed: Int = 0,
+    val bytesPacked: Long = 0,
+    /**
+     * Of [deduped], the files a move found already at its destination, identical: the move removed this copy instead
+     * (the 10-30 Autopilot run's "deduplicated 6" was 5 files of a duplicate folder and 1 of these).
+     */
+    val alreadyFiled: Int = 0,
+    /** Of [deduped], the copies moved to the quarantine instead of deleted (Settings: quarantine duplicates). */
+    val dedupedQuarantined: Int = 0,
 ) {
-    val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs > 0
+    val changedAnything: Boolean get() = moved + deduped + quarantined + removedDirs + packed > 0
 
     /** Something in this run can be reverted from History. */
     val undoable: Boolean get() = changedAnything
 }
+
+/**
+ * The run's journal couldn't be written; the run stopped there, so that everything it changed can still be undone.
+ * [stuck] is an item that couldn't be put back either: where it is now, for the user to move back by hand.
+ */
+class JournalBroken(cause: IOException, stuck: String? = null) : IllegalStateException(
+    "This run's journal couldn't be written (${cause.message ?: cause.javaClass.simpleName}), so it stopped: what it did " +
+        "until then can be undone from History" + (stuck?.let { ". One item couldn't be put back and is at $it" } ?: ""),
+    cause,
+)
 
 fun interface ExecutionListener {
     fun onProgress(done: Int, total: Int, current: String)
@@ -65,16 +97,19 @@ class ActionExecutor(
     rootPath: String,
     private val journals: JournalStore,
     private val options: ExecutorOptions = ExecutorOptions(),
+    /** Opens the run's journal; tests pass one that fails, to check what a run does then. */
+    private val openJournal: (File) -> JournalOutput = ::JournalWriter,
 ) {
     private val guard = PathGuard(rootPath, options.protectedFolders)
     private val quarantine = QuarantineManager(guard, journals)
 
     private enum class Status { DONE, NOOP, SKIPPED, FAILED }
 
-    private class Outcome(val status: Status, val message: String? = null)
+    /** [moved]: the item did go where the step takes it, even when the step is reported as skipped ([REAPPEARED]). */
+    private class Outcome(val status: Status, val message: String? = null, val moved: Boolean = status == Status.DONE)
 
     private lateinit var runId: String
-    private lateinit var journal: JournalWriter
+    private lateinit var journal: JournalOutput
     private var moved = 0
     private var deduped = 0
     private var quarantined = 0
@@ -84,9 +119,20 @@ class ActionExecutor(
     private var bytesFreed = 0L
     private var bytesQuarantined = 0L
     private var bytesMoved = 0L
+    private var packed = 0
+    private var bytesPacked = 0L
+    private var alreadyFiled = 0
+    private var dedupedQuarantined = 0
     private val messages = ArrayList<String>()
+    private val reasons = LinkedHashMap<String, Int>()
     private val changed = LinkedHashSet<String>()
     private val touchedParents = LinkedHashSet<Path>()
+
+    /** The copies this run kept while it removed their duplicates; see [holdsAKeptCopy]. */
+    private val kept = HashSet<String>()
+
+    /** Set once the journal can't be written: nothing more may change, since it couldn't be undone. */
+    private var journalBroken = false
 
     suspend fun execute(
         title: String,
@@ -99,7 +145,7 @@ class ActionExecutor(
         val partial = LinkedHashSet<String>()
         val total = items.sumOf { it.operations.size }
         var done = 0
-        JournalWriter(journals.fileFor(runId)).use { writer ->
+        openJournal(journals.fileFor(runId)).use { writer ->
             journal = writer
             writer.meta("title", title)
             writer.meta("kind", kind)
@@ -114,9 +160,14 @@ class ActionExecutor(
                         val outcome = try {
                             run(op)
                         } catch (e: IOException) {
-                            Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}")
+                            Outcome(Status.FAILED, "I/O error: ${e.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
+                        } catch (e: UncheckedIOException) {
+                            // What Files.walk and directory streams throw for a folder they can't open: this step fails, not the run.
+                            Outcome(Status.FAILED, "I/O error: ${e.cause?.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
+                        } catch (e: DirectoryIteratorException) {
+                            Outcome(Status.FAILED, "I/O error: ${e.cause?.message ?: e.javaClass.simpleName}").also { tally("I/O error") }
                         } catch (e: SecurityException) {
-                            Outcome(Status.FAILED, "Permission denied")
+                            fail("Permission denied")
                         }
                         when (outcome.status) {
                             Status.DONE, Status.NOOP -> Unit
@@ -137,19 +188,28 @@ class ActionExecutor(
                     if (allGood) completed.add(item.id) else partial.add(item.id)
                 }
             } finally {
-                if (options.pruneEmptyParents) pruneEmptyParents()
-                writer.meta("finished", System.currentTimeMillis().toString())
-                writer.meta(
-                    "stats",
-                    "moved=$moved deduped=$deduped quarantined=$quarantined rmdir=$removedDirs skipped=$skipped " +
-                        "failed=$failed freed=$bytesFreed quarantinedBytes=$bytesQuarantined movedBytes=$bytesMoved",
-                )
+                if (options.pruneEmptyParents && !journalBroken) pruneEmptyParents()
+                try {
+                    writer.meta("finished", System.currentTimeMillis().toString())
+                    writer.meta(
+                        "stats",
+                        "moved=$moved deduped=$deduped filed=$alreadyFiled quarantined=$quarantined rmdir=$removedDirs skipped=$skipped " +
+                            "failed=$failed freed=$bytesFreed quarantinedBytes=$bytesQuarantined movedBytes=$bytesMoved",
+                    )
+                } catch (e: IOException) {
+                    if (!journalBroken) throw e
+                }
             }
         }
         listener?.onProgress(total, total, "")
         return ExecutionSummary(
             runId, completed, partial, moved, deduped, quarantined, removedDirs, skipped, failed,
             bytesFreed, bytesQuarantined, bytesMoved, messages.toList(), changed.toList(),
+            reasons = reasons.toMap(),
+            packed = packed,
+            bytesPacked = bytesPacked,
+            alreadyFiled = alreadyFiled,
+            dedupedQuarantined = dedupedQuarantined,
         )
     }
 
@@ -161,6 +221,7 @@ class ActionExecutor(
         is DeleteDuplicateOp -> op.path
         is QuarantineOp -> op.path
         is RemoveEmptyDirOp -> op.path
+        is PackDirOp -> op.path
     }
 
     private fun run(op: Operation): Outcome = when (op) {
@@ -169,13 +230,62 @@ class ActionExecutor(
         is DeleteDuplicateOp -> deleteDuplicate(op)
         is QuarantineOp -> quarantineOp(op)
         is RemoveEmptyDirOp -> removeEmptyDir(op.path)
+        is PackDirOp -> packDir(op)
     }
 
-    private fun skip(message: String) = Outcome(Status.SKIPPED, message)
-    private fun fail(message: String) = Outcome(Status.FAILED, message)
+    private fun skip(message: String) = Outcome(Status.SKIPPED, message).also { tally(message) }
+    private fun movedButSkipped(message: String) = Outcome(Status.SKIPPED, message, moved = true).also { tally(message) }
+    private fun fail(message: String) = Outcome(Status.FAILED, message).also { tally(message) }
 
+    /** Counted by reason, so a run that skips thousands of files says why in one line of the log. */
+    private fun tally(message: String) {
+        reasons[message] = (reasons[message] ?: 0) + 1
+    }
+
+    /**
+     * Journals one change. When that fails the run stops ([JournalBroken]) instead of going on with changes nothing
+     * could undo, and quarantined items left without a journal line would go when the quarantine is emptied.
+     */
     private fun record(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) {
-        journal.entry(JournalEntry(action, a, b, size, mtime, sha))
+        try {
+            journal.entry(JournalEntry(action, a, b, size, mtime, sha))
+        } catch (e: IOException) {
+            journalBroken = true
+            throw JournalBroken(e)
+        }
+    }
+
+    /**
+     * Journals [action] just before making it ([JournalAction.settle]): stopped in between, the run still knows of it.
+     * Nothing has changed yet when this fails.
+     */
+    private fun intend(action: String, a: String, b: String = "", size: Long = -1, mtime: Long = -1, sha: String? = null) =
+        record(JournalAction.pending(action), a, b, size, mtime, sha)
+
+    /**
+     * Makes the change [intend]ed just before. When it throws, the intent is closed with a line of its own
+     * ([JournalAction.abandoned]): left open, a later step could make it read as done ([JournalAction.settle]). A folder
+     * whose move into the quarantine failed gets its place there anyway once a file of it goes to the quarantine.
+     */
+    private inline fun <T> attempt(action: String, a: String, b: String, change: () -> T): T = try {
+        change()
+    } catch (e: IOException) {
+        record(JournalAction.abandoned(action), a, b)
+        throw e
+    }
+
+    /** Journals a move just made; when that fails, the move is put back first, since nothing could undo it. */
+    private fun recordMove(from: Path, to: Path, journal: () -> Unit) {
+        try {
+            journal()
+        } catch (e: JournalBroken) {
+            try {
+                Files.move(to, from)
+            } catch (_: IOException) {
+                throw JournalBroken(e.cause as IOException, stuck = guard.relative(to.toString()))
+            }
+            throw e
+        }
     }
 
     private fun mkdirs(dir: Path): Boolean = guard.ensureDirectories(dir) { created ->
@@ -200,7 +310,7 @@ class ActionExecutor(
                 if (existing.key != null && existing.key == id.key) return Outcome(Status.NOOP)
                 if (Hashing.sha256(dst) == srcSha) {
                     // Identical file already filed at the destination: this copy is a verified duplicate.
-                    return removeVerifiedDuplicate(src, dst, id, srcSha)
+                    return removeVerifiedDuplicate(src, dst, id, srcSha).also { if (it.status == Status.DONE) alreadyFiled++ }
                 }
             }
             dst = guard.uniqueCollisionPath(dst, planSha ?: srcSha)
@@ -208,9 +318,10 @@ class ActionExecutor(
         val dstPath = Paths.get(dst)
         if (!mkdirs(dstPath.parent)) return fail("Cannot create destination folder")
         if (guard.exists(dstPath)) return skip("Destination appeared during the move")
-        Files.move(srcPath, dstPath)
+        intend(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha)
+        attempt(JournalAction.MOVED, src, dst) { Files.move(srcPath, dstPath) }
         val after = FileIdentity.of(dst)
-        if (guard.exists(srcPath) || after == null || after.size != id.size) {
+        if (after == null || after.size != id.size) {
             if (!guard.exists(srcPath) && after != null) {
                 try {
                     Files.move(dstPath, srcPath)
@@ -219,13 +330,15 @@ class ActionExecutor(
             }
             return fail("Post-move verification failed")
         }
-        record(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha)
+        // It did move, so it is journaled even if something new took its old place at once: Undo has to know.
+        recordMove(srcPath, dstPath) { record(JournalAction.MOVED, src, dst, id.size, id.mtime, planSha) }
+        if (kept.remove(src)) kept += dst
         moved++
         bytesMoved += id.size
         changed += src
         changed += dst
         touchedParents.add(srcPath.parent)
-        return Outcome(Status.DONE)
+        return if (guard.exists(srcPath)) skip(REAPPEARED) else Outcome(Status.DONE)
     }
 
     // ------------------------------------------------------------------ move directory
@@ -240,22 +353,30 @@ class ActionExecutor(
         if (!guard.resolvesBeneath(src)) return skip("Unsafe source path")
         if (op.allowRename && !guard.exists(dst)) {
             if (!mkdirs(dst.parent)) return fail("Cannot create destination folder")
-            val renamed = try {
-                if (guard.exists(dst)) false else {
+            val renamed = !guard.exists(dst) && run {
+                intend(JournalAction.MOVED_DIR, op.src, op.dst)
+                try {
                     Files.move(src, dst)
                     true
+                } catch (_: IOException) {
+                    // Merged file by file below instead, each file journaled on its own.
+                    record(JournalAction.abandoned(JournalAction.MOVED_DIR), op.src, op.dst)
+                    false
                 }
-            } catch (_: IOException) {
-                false
             }
             if (renamed) {
-                if (guard.exists(src) || !guard.isRealDirectory(dst)) return fail("Post-move verification failed")
-                record(JournalAction.MOVED_DIR, op.src, op.dst)
+                if (!guard.isRealDirectory(dst)) return fail("Post-move verification failed")
+                recordMove(src, dst) { record(JournalAction.MOVED_DIR, op.src, op.dst) }
+                kept.filter { it.startsWith(op.src + "/") }.forEach { k ->
+                    kept -= k
+                    kept += op.dst + k.removePrefix(op.src)
+                }
                 moved++
+                bytesMoved += op.bytes
                 changed += op.src
                 changed += op.dst
                 touchedParents.add(src.parent)
-                return Outcome(Status.DONE)
+                return if (guard.exists(src)) skip(REAPPEARED) else Outcome(Status.DONE)
             }
         }
         return mergeDir(src, dst)
@@ -305,8 +426,8 @@ class ActionExecutor(
         }
         for (dir in dirs.sortedByDescending { it.nameCount }) removeEmptyDir(dir.toString())
         return when {
-            problems > 0 -> skip("$problems file(s) could not be merged")
-            leftBehind > 0 -> skip("$leftBehind protected item(s) left in place")
+            problems > 0 -> Outcome(Status.SKIPPED, "$problems file(s) could not be merged")
+            leftBehind > 0 -> Outcome(Status.SKIPPED, "$leftBehind protected item(s) left in place").also { tally("Protected items left in place") }
             else -> Outcome(Status.DONE)
         }
     }
@@ -335,21 +456,32 @@ class ActionExecutor(
         val p = Paths.get(path)
         if (options.quarantineDuplicates) {
             val q = quarantineTarget(path) ?: return fail("Quarantine unavailable")
-            Files.move(p, q)
-            if (guard.exists(p)) return fail("Post-quarantine verification failed")
-            record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha)
+            intend(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha)
+            attempt(JournalAction.DEDUPED_QUARANTINED, path, q.toString()) { Files.move(p, q) }
+            if (!guard.exists(q)) return fail("Post-quarantine verification failed")
+            recordMove(p, q) { record(JournalAction.DEDUPED_QUARANTINED, path, q.toString(), id.size, id.mtime, sha) }
             bytesQuarantined += id.size
+            dedupedQuarantined++
         } else {
-            Files.delete(p)
+            intend(JournalAction.DEDUPED, path, canonical, id.size, id.mtime, sha)
+            attempt(JournalAction.DEDUPED, path, canonical) { Files.delete(p) }
             if (guard.exists(p)) return fail("Delete verification failed")
             record(JournalAction.DEDUPED, path, canonical, id.size, id.mtime, sha)
             bytesFreed += id.size
         }
         deduped++
+        kept += canonical
         changed += path
         touchedParents.add(p.parent)
-        return Outcome(Status.DONE)
+        return if (guard.exists(p)) skip(REAPPEARED) else Outcome(Status.DONE)
     }
+
+    /**
+     * A copy this run kept while removing its duplicates, or a folder holding one. Duplicates run before cleanup, and
+     * a near-copy folder or an old installer can be the very copy a duplicate was removed for: quarantining it then
+     * would leave no copy outside the quarantine, and emptying the quarantine none at all.
+     */
+    private fun holdsAKeptCopy(path: String): Boolean = kept.any { it == path || it.startsWith("$path/") }
 
     // ------------------------------------------------------------------ quarantine
 
@@ -362,6 +494,7 @@ class ActionExecutor(
 
     private fun quarantineOp(op: QuarantineOp): Outcome {
         guard.protectionReason(op.path)?.let { return skip("Protected ($it)") }
+        if (holdsAKeptCopy(op.path)) return skip(KEPT_COPY)
         val p = Paths.get(op.path)
         if (!guard.exists(p)) return Outcome(Status.NOOP)
         if (!guard.resolvesBeneath(p)) return skip("Unsafe path")
@@ -373,15 +506,126 @@ class ActionExecutor(
             if (id.size != op.size || id.mtime != op.mtime) return skip("Changed since the scan")
             mtime = id.mtime
         }
+        if (op.extracted != null && !ExtractedArchives.verify(op.path, op.extracted)) {
+            return skip("The unpacked copy no longer matches the zip")
+        }
         val q = quarantineTarget(op.path) ?: return fail("Quarantine unavailable")
-        Files.move(p, q)
-        if (guard.exists(p) || !guard.exists(q)) return fail("Post-quarantine verification failed")
-        record(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime)
+        intend(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime)
+        attempt(JournalAction.QUARANTINED, op.path, q.toString()) { Files.move(p, q) }
+        if (!guard.exists(q)) return fail("Post-quarantine verification failed")
+        // Journaled even if something new took its place at once (an app writing there again): it is in the quarantine,
+        // and only its journal line lets Undo bring it back, or keeps emptying the quarantine from losing track of it.
+        recordMove(p, q) { record(JournalAction.QUARANTINED, op.path, q.toString(), op.size, mtime) }
         quarantined++
         bytesQuarantined += op.size
         changed += op.path
         touchedParents.add(p.parent)
-        return Outcome(Status.DONE)
+        return if (guard.exists(p)) movedButSkipped(REAPPEARED) else Outcome(Status.DONE)
+    }
+
+    // ------------------------------------------------------------------ packing
+
+    private fun packDir(op: PackDirOp): Outcome {
+        guard.protectionReason(op.path)?.let { return skip("Protected ($it)") }
+        if (holdsAKeptCopy(op.path)) return skip(KEPT_COPY)
+        guard.protectionReason(op.zip)?.let { return skip("Protected destination ($it)") }
+        val dir = Paths.get(op.path)
+        val zip = Paths.get(op.zip)
+        if (!guard.isRealDirectory(dir)) return skip("Folder is gone")
+        if (!guard.resolvesBeneath(dir)) return skip("Unsafe source path")
+        if (guard.exists(zip)) return skip("A file with the zip's name is already there")
+        // Only plain files and folders, none changed since the scan, and no keys: those stay where their tools look.
+        val files = ArrayList<Pair<Path, BasicFileAttributes>>()
+        val dirs = ArrayList<Path>()
+        var bytes = 0L
+        Files.walk(dir).use { stream ->
+            for (p in stream) {
+                val attrs = Files.readAttributes(p, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                when {
+                    attrs.isSymbolicLink || attrs.isOther -> return skip("Holds links or special files")
+                    attrs.isDirectory -> dirs.add(p)
+                    SafetyPolicy.isCredentialName(p.fileName.toString()) -> return skip("Holds a key or credential")
+                    attrs.lastModifiedTime().toMillis() > op.newest -> return skip("Changed since the scan")
+                    else -> {
+                        files += p to attrs
+                        bytes += attrs.size()
+                    }
+                }
+            }
+        }
+        val name = dir.fileName.toString()
+        val partial = dir.resolveSibling(".$name$PARTIAL_ZIP")
+        Files.deleteIfExists(partial)
+        try {
+            ZipOutputStream(BufferedOutputStream(Files.newOutputStream(partial), 1 shl 16)).use { out ->
+                out.setLevel(Deflater.BEST_COMPRESSION)
+                // Empty folders too, so unpacking gives back exactly the same tree.
+                for (d in dirs) {
+                    if (d == dir || Files.newDirectoryStream(d).use { it.iterator().hasNext() }) continue
+                    out.putNextEntry(ZipEntry("$name/" + dir.relativize(d).toString() + "/"))
+                    out.closeEntry()
+                }
+                val buffer = ByteArray(1 shl 16)
+                for ((p, attrs) in files) {
+                    val entry = ZipEntry("$name/" + dir.relativize(p).toString())
+                    entry.time = attrs.lastModifiedTime().toMillis()
+                    out.putNextEntry(entry)
+                    Files.newInputStream(p).use { input ->
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                    out.closeEntry()
+                }
+            }
+            val written = ExtractedArchives.entries(partial.toString())
+            if (written == null || written.size != files.size || !ExtractedArchives.verify(partial.toString(), ExtractedCopy(op.path, "$name/"))) {
+                Files.deleteIfExists(partial)
+                return fail("The zip didn't match the folder; nothing changed")
+            }
+            if (guard.exists(zip)) {
+                Files.deleteIfExists(partial)
+                return skip("A file with the zip's name appeared")
+            }
+        } catch (e: IOException) {
+            Files.deleteIfExists(partial)
+            throw e
+        }
+        // What undo checks before it removes the zip again; a rename keeps all three.
+        val zipSize = Files.size(partial)
+        val zipTime = Files.getLastModifiedTime(partial).toMillis()
+        val zipSha = Hashing.sha256(partial.toString())
+        try {
+            intend(JournalAction.PACKED, op.zip, op.path, zipSize, zipTime, zipSha)
+            attempt(JournalAction.PACKED, op.zip, op.path) { Files.move(partial, zip) }
+        } catch (e: IOException) {
+            Files.deleteIfExists(partial)
+            throw e
+        } catch (e: JournalBroken) {
+            Files.deleteIfExists(partial)
+            throw e
+        }
+        try {
+            record(JournalAction.PACKED, op.zip, op.path, zipSize, zipTime, zipSha)
+        } catch (e: JournalBroken) {
+            Files.deleteIfExists(zip)
+            throw e
+        }
+        packed++
+        bytesPacked += zipSize
+        changed += op.zip
+        val moved = quarantineOp(QuarantineOp(op.path, isDirectory = true, size = bytes, mtime = -1))
+        if (!moved.moved) {
+            // The folder stays, so its zip would only be a second copy: remove it (undo finds nothing to remove).
+            // A folder that did go to the quarantine keeps its zip, even when something new took its old place at once:
+            // without the zip, what it held would only be in the quarantine, and go when that is emptied.
+            Files.deleteIfExists(zip)
+            packed--
+            bytesPacked -= zipSize
+        }
+        return if (moved.status == Status.DONE) Outcome(Status.DONE) else moved
     }
 
     // ------------------------------------------------------------------ directories
@@ -392,7 +636,7 @@ class ActionExecutor(
         if (!guard.exists(p)) return Outcome(Status.NOOP)
         if (!guard.isRealDirectory(p)) return skip("Not a folder")
         val rel = guard.relative(path)
-        if (!rel.contains('/') && rel in SafetyPolicy.STANDARD_TOP_DIRS) return skip("Standard Android folder")
+        if (!rel.contains('/') && SafetyPolicy.isKeptTopDir(rel)) return skip("Standard Android folder")
         val empty = Files.newDirectoryStream(p).use { !it.iterator().hasNext() }
         if (!empty) return skip("Folder is not empty")
         val mtime = try {
@@ -425,5 +669,15 @@ class ActionExecutor(
             }
             if (empty && removeEmptyDir(dir.toString()).status == Status.DONE) queue.addLast(dir.parent)
         }
+    }
+
+    companion object {
+        const val KEPT_COPY = "Holds the copy kept for a duplicate removed in this run"
+
+        /** A change made and journaled, after which something new appeared at the old place straight away. */
+        const val REAPPEARED = "Something new took its place right away; both are kept"
+
+        /** End of the name of a zip still being written, beside its folder: ".<folder>.steward-partial.zip". */
+        const val PARTIAL_ZIP = ".steward-partial.zip"
     }
 }

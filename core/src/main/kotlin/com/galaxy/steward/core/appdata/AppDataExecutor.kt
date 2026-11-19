@@ -1,13 +1,16 @@
 package com.galaxy.steward.core.appdata
 
 import com.galaxy.steward.core.SafetyPolicy
+import com.galaxy.steward.core.exec.ActionExecutor
 import com.galaxy.steward.core.exec.ExecutionListener
 import com.galaxy.steward.core.exec.ExecutionSummary
 import com.galaxy.steward.core.exec.JournalAction
+import com.galaxy.steward.core.exec.JournalBroken
 import com.galaxy.steward.core.exec.JournalEntry
 import com.galaxy.steward.core.exec.JournalSink
 import com.galaxy.steward.core.exec.PathGuard
 import com.galaxy.steward.core.exec.QuarantineManager
+import com.galaxy.steward.core.exec.TreeDigest
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.IOException
@@ -49,6 +52,8 @@ class AppDataGuard(rootPath: String, private val ownPackage: String?) {
 /**
  * Cleans app folders. Caches, logs and temp files are deleted for good (apps regenerate them) and journaled as
  * [JournalAction.PURGED]; outdated OBBs and leftovers of removed apps go to the quarantine and stay undoable.
+ * Files and folders picked in the browser are quarantined ([AppJunkKind.PICKED]) or deleted for good
+ * ([AppJunkKind.PICKED_DELETE]); an app's own top folder is never removed.
  */
 class AppDataExecutor(
     rootPath: String,
@@ -70,6 +75,7 @@ class AppDataExecutor(
     private var bytesQuarantined = 0L
     private val messages = ArrayList<String>()
     private val changed = LinkedHashSet<String>()
+    private var journalBroken = false
 
     suspend fun execute(title: String, items: List<AppJunkItem>, listener: ExecutionListener? = null): ExecutionSummary {
         sink.meta("title", title)
@@ -104,12 +110,16 @@ class AppDataExecutor(
                 if (ok) completed += item.id else partial += item.id
             }
         } finally {
-            sink.meta("finished", System.currentTimeMillis().toString())
-            sink.meta(
-                "stats",
-                "cleared=$cleared quarantined=$quarantined rmdir=$removedDirs skipped=$skipped failed=$failed " +
-                    "freed=$bytesFreed quarantinedBytes=$bytesQuarantined",
-            )
+            try {
+                sink.meta("finished", System.currentTimeMillis().toString())
+                sink.meta(
+                    "stats",
+                    "cleared=$cleared quarantined=$quarantined rmdir=$removedDirs skipped=$skipped failed=$failed " +
+                        "freed=$bytesFreed quarantinedBytes=$bytesQuarantined",
+                )
+            } catch (e: IOException) {
+                if (!journalBroken) throw e
+            }
         }
         listener?.onProgress(total, total, "")
         return ExecutionSummary(
@@ -138,7 +148,12 @@ class AppDataExecutor(
         return when (item.kind) {
             AppJunkKind.LEFTOVERS -> quarantineLeftover(item, path)
             AppJunkKind.OBSOLETE_OBB -> quarantineFile(target, path)
-            else -> if (target.isDirectory) clearInside(path, item.cutoff) else deleteFile(target, path)
+            AppJunkKind.PICKED, AppJunkKind.PICKED_DELETE -> removePicked(item, target, path)
+            else -> when {
+                !target.isDirectory -> deleteFile(target, path)
+                attrs(path)?.isDirectory == false -> skip("No longer a folder")
+                else -> clearInside(path, item.cutoff).let { null }
+            }
         }
     }
 
@@ -173,12 +188,30 @@ class AppDataExecutor(
     }
 
     /**
-     * Deletes regular files older than [cutoff] below [dir] without following links, then removes subfolders that
-     * became empty. [dir] itself stays: apps expect their cache and log folders to exist.
+     * A file or folder you picked in the browser. Folders go as a whole; a file must still be the one you saw.
+     * Deleting skips links, key-like names and anything changed after the listing ([AppJunkItem.cutoff]).
      */
-    private fun clearInside(dir: Path, cutoff: Long): String? {
-        val top = attrs(dir) ?: return null
-        if (!top.isDirectory) return skip("No longer a folder")
+    private fun removePicked(item: AppJunkItem, target: AppTarget, path: Path): String? {
+        val location = guard.locate(target.path) ?: return skip("Not an app folder")
+        if (location.rest.isEmpty()) return skip("An app's own folder stays; pick what's inside it")
+        val a = attrs(path) ?: return null
+        if (a.isDirectory != target.isDirectory) return skip("Changed since you picked it")
+        if (item.kind == AppJunkKind.PICKED) {
+            return if (target.isDirectory) quarantineDir(path, target.size, a) else quarantineFile(target, path)
+        }
+        if (!target.isDirectory) return deleteFile(target, path)
+        val kept = clearInside(path, item.cutoff, keepTop = false)
+        return if (kept > 0) skip("$kept recent, linked or key-like item(s) kept") else null
+    }
+
+    /**
+     * Deletes regular files older than [cutoff] below [dir] without following links, then removes subfolders that
+     * became empty. [dir] itself stays unless [keepTop] is false: apps expect their cache and log folders to exist.
+     * Returns how many entries were left in place.
+     */
+    private fun clearInside(dir: Path, cutoff: Long, keepTop: Boolean = true): Int {
+        val top = attrs(dir) ?: return 0
+        if (!top.isDirectory) return 1
         var files = 0
         var bytes = 0L
         var kept = 0
@@ -214,6 +247,7 @@ class AppDataExecutor(
                 }
             }
         }
+        if (!keepTop) dirs.add(dir)
         for (d in dirs.sortedByDescending { it.nameCount }) {
             try {
                 val empty = Files.newDirectoryStream(d).use { !it.iterator().hasNext() }
@@ -221,11 +255,11 @@ class AppDataExecutor(
             } catch (_: IOException) {
             }
         }
-        if (files > 0) {
+        if (files > 0 || !keepTop) {
             purged(dir.toString(), files, bytes)
             changed += dir.toString()
         }
-        return null
+        return kept
     }
 
     // ------------------------------------------------------------------ quarantine (undoable)
@@ -237,21 +271,67 @@ class AppDataExecutor(
         return if (Files.exists(q, LinkOption.NOFOLLOW_LINKS)) null else q
     }
 
+    /**
+     * Journals a move into the quarantine just made. When that fails the item goes back and the run stops, as in
+     * [com.galaxy.steward.core.exec.ActionExecutor]: an item in the quarantine without its journal line couldn't be
+     * undone, and would go when the quarantine is emptied.
+     */
+    /** Journals [entry] just before its move ([JournalAction.settle]); when that fails nothing has moved yet. */
+    private fun intend(entry: JournalEntry) {
+        try {
+            sink.entry(entry.copy(action = JournalAction.pending(entry.action)))
+        } catch (e: IOException) {
+            journalBroken = true
+            throw JournalBroken(e)
+        }
+    }
+
+    /** Closes the intent of a change that threw, as ActionExecutor's `attempt` does. */
+    private fun abandon(entry: JournalEntry) {
+        try {
+            sink.entry(entry.copy(action = JournalAction.abandoned(entry.action)))
+        } catch (e: IOException) {
+            journalBroken = true
+            throw JournalBroken(e)
+        }
+    }
+
+    private fun journalMove(from: Path, to: Path, entry: JournalEntry) {
+        try {
+            sink.entry(entry)
+        } catch (e: IOException) {
+            journalBroken = true
+            try {
+                Files.move(to, from)
+            } catch (_: IOException) {
+            }
+            throw JournalBroken(e)
+        }
+    }
+
     private fun quarantineFile(target: AppTarget, path: Path): String? {
         val a = attrs(path) ?: return null
         if (!a.isRegularFile) return skip("No longer a regular file")
         if (a.size() != target.size || a.lastModifiedTime().toMillis() != target.mtime) return skip("Changed since the scan")
         val q = quarantineTarget(path) ?: return skip("Quarantine unavailable")
-        Files.move(path, q)
-        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) || !Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
+        val entry = JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null)
+        intend(entry)
+        try {
+            Files.move(path, q)
+        } catch (e: IOException) {
+            abandon(entry)
+            throw e
+        }
+        if (!Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
             failed++
             return "Post-quarantine verification failed"
         }
-        sink.entry(JournalEntry(JournalAction.QUARANTINED, target.path, q.toString(), target.size, target.mtime, null))
+        // Journaled even if the app wrote a new one at once: it is in the quarantine, and Undo needs its line.
+        journalMove(path, q, entry)
         quarantined++
         bytesQuarantined += target.size
         changed += target.path
-        return null
+        return if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) skip(ActionExecutor.REAPPEARED) else null
     }
 
     private fun quarantineLeftover(item: AppJunkItem, dir: Path): String? {
@@ -261,23 +341,38 @@ class AppDataExecutor(
         if (loc.rest.isNotEmpty()) return skip("Not an app folder")
         val a = attrs(dir) ?: return null
         if (!a.isDirectory) return skip("No longer a folder")
+        return quarantineDir(dir, item.bytes, a)
+    }
+
+    /** Moves a whole folder to the quarantine in one rename, or file by file when the rename crosses a mount. */
+    private fun quarantineDir(dir: Path, bytes: Long, a: BasicFileAttributes): String? {
         val q = quarantineTarget(dir) ?: return skip("Quarantine unavailable")
+        val entry = JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), bytes, a.lastModifiedTime().toMillis(), null)
+        intend(entry)
         val renamed = try {
             Files.move(dir, q)
             true
         } catch (_: IOException) {
-            false // Android/data sits behind its own mount on some builds: fall back to moving file by file.
+            // Android/data sits behind its own mount on some builds: fall back to moving file by file, each journaled.
+            try {
+                sink.entry(entry.copy(action = JournalAction.abandoned(entry.action)))
+            } catch (e: IOException) {
+                journalBroken = true
+                throw JournalBroken(e)
+            }
+            false
         }
         if (renamed) {
-            if (Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.exists(q, LinkOption.NOFOLLOW_LINKS)) {
                 failed++
                 return "Post-quarantine verification failed"
             }
-            sink.entry(JournalEntry(JournalAction.QUARANTINED, dir.toString(), q.toString(), item.bytes, a.lastModifiedTime().toMillis(), null))
+            // What it holds, for Undo to check before it puts the folder back with the shell's rights (TreeDigest).
+            journalMove(dir, q, entry.copy(sha256 = TreeDigest.of(q)))
             quarantined++
-            bytesQuarantined += item.bytes
+            bytesQuarantined += bytes
             changed += dir.toString()
-            return null
+            return if (Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) skip(ActionExecutor.REAPPEARED) else null
         }
         return quarantineFileByFile(dir)
     }
@@ -308,14 +403,16 @@ class AppDataExecutor(
                             left++
                             continue
                         }
+                        val line = JournalEntry(JournalAction.QUARANTINED, entry.toString(), q.toString(), a.size(), a.lastModifiedTime().toMillis(), null)
+                        intend(line)
                         try {
                             Files.move(entry, q)
                         } catch (_: IOException) {
+                            abandon(line)
                             left++
                             continue
                         }
-                        val mtime = a.lastModifiedTime().toMillis()
-                        sink.entry(JournalEntry(JournalAction.QUARANTINED, entry.toString(), q.toString(), a.size(), mtime, null))
+                        journalMove(entry, q, line)
                         quarantined++
                         bytesQuarantined += a.size()
                     }

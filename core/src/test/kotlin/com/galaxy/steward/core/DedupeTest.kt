@@ -197,4 +197,36 @@ class DedupeTest {
             assertFalse(fs.exists("Download/Trips"))
         }
     }
+    /** With hidden files included, the system trash's copy used to win (DCIM ranks first) and the live photo went. */
+    @Test
+    fun aTrashedCopyIsNeverKept() = runTest {
+        TestFs().use { fs ->
+            val photo = Random(41).nextBytes(200_000)
+            fs.file("DCIM/Camera/.trashed-1799999999-IMG_1.jpg", photo)
+            fs.file("Pictures/Edits/IMG_1.jpg", photo)
+            fs.file("DCIM/Camera/.trashed-1799999999-IMG_2.jpg", photo.copyOf(150_000))
+            fs.file("DCIM/Camera/IMG_2 (1).jpg", photo.copyOf(150_000))
+            fs.ageDirectories()
+            val report = scan(fs, testSettings.copy(includeHiddenInDuplicates = true))
+            report.duplicates.forEach { g -> assertFalse(g.keeper.path, g.keeper.name.startsWith(".trashed-")) }
+            assertTrue(report.duplicates.none { g -> g.copies.any { it.name.startsWith(".trashed-") } })
+        }
+    }
+
+    /** Copies of one album where two have an empty extra folder make two groups: their ids must differ (list keys). */
+    @Test
+    fun folderGroupsWithTheSameFilesHaveDistinctIds() = runTest {
+        TestFs().use { fs ->
+            val files = (0 until 3).map { Random(60 + it).nextBytes(20_000) }
+            for (album in listOf("Pictures/Album A", "Pictures/Album B", "Documents/Album C", "Documents/Album D")) {
+                files.forEachIndexed { i, b -> fs.file("$album/p$i.jpg", b) }
+            }
+            fs.dir("Documents/Album C/edits")
+            fs.dir("Documents/Album D/edits")
+            fs.ageDirectories()
+            val groups = scan(fs).folderDuplicates
+            assertEquals(2, groups.size)
+            assertEquals(groups.map { it.id }.toSet().size, groups.size)
+        }
+    }
 }

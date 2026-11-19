@@ -17,10 +17,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.MergeType
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.automirrored.rounded.MergeType
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -46,13 +46,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.galaxy.steward.core.humanBytes
-import com.galaxy.steward.core.plural
 import com.galaxy.steward.core.model.FileKind
 import com.galaxy.steward.core.model.Zone
 import com.galaxy.steward.core.plan.DuplicateGroup
 import com.galaxy.steward.core.plan.FolderDuplicateGroup
 import com.galaxy.steward.core.plan.FolderMerge
 import com.galaxy.steward.core.plan.PlanItem
+import com.galaxy.steward.core.plural
 import com.galaxy.steward.ui.StewardViewModel
 import com.galaxy.steward.ui.UiState
 import com.galaxy.steward.ui.components.ActionBar
@@ -77,6 +77,8 @@ fun DuplicatesScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
 
     val files = remember(report, state.keepers) { report?.duplicates.orEmpty().map { vm.effective(it, state.keepers) as DuplicateGroup } }
+    // Once per scan, not on every progress update while a run is going (each group's kind is worked out from its name).
+    val kindsPresent = remember(files) { files.map { it.kind }.toSet().let { present -> FileKind.entries.filter { it in present } } }
     val folders = remember(report, state.keepers) { report?.folderDuplicates.orEmpty().map { vm.effective(it, state.keepers) as FolderDuplicateGroup } }
     val merges = report?.folderMerges.orEmpty()
     val selected = remember(files, folders, merges, state.selected) { (files + folders + merges).filter { it.id in state.selected } }
@@ -113,7 +115,7 @@ fun DuplicatesScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 0 -> {
                     Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(kindFilter == null, { kindFilter = null }, label = { Text("All") })
-                        FileKind.entries.filter { k -> files.any { it.kind == k } }.forEach { k ->
+                        kindsPresent.forEach { k ->
                             FilterChip(kindFilter == k.name, { kindFilter = if (kindFilter == k.name) null else k.name }, label = { Text(k.label) })
                         }
                     }
@@ -173,6 +175,7 @@ fun DuplicatesScreen(vm: StewardViewModel, state: UiState, onBack: () -> Unit) {
                 vm.apply("Duplicate cleanup", "dedupe", items)
             },
             onDismiss = { confirm = null },
+            check = { vm.preflight(items) },
         )
     }
 }
@@ -281,12 +284,17 @@ private fun MergeCard(merge: FolderMerge, checked: Boolean, root: String, onTogg
             Column(Modifier.weight(1f).padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(merge.title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
-                    Pill("${merge.overlapPercent}% shared", MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
+                    Pill(
+                        if (merge.sameName) "Same name" else "${merge.overlapPercent}% shared",
+                        MaterialTheme.colorScheme.tertiaryContainer,
+                        MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
                 }
                 Text("From  ${merge.source.relativeTo(root)}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                 Text("Into  ${merge.target.relativeTo(root)}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                 Text(
-                    "Removes ${merge.commonFiles} duplicates (${merge.commonBytes.humanBytes()}) · moves ${merge.uniqueFiles} unique (${merge.uniqueBytes.humanBytes()})",
+                    (if (merge.sameName) "One folder instead of two, keeping its layout: " else "") +
+                        "Removes ${merge.commonFiles} duplicates (${merge.commonBytes.humanBytes()}) · moves ${merge.uniqueFiles} unique (${merge.uniqueBytes.humanBytes()})",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
