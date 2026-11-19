@@ -135,8 +135,14 @@ class TermuxInventoryTest {
         assertEquals(setOf(File(debian, ".l2s/.l2s.tmp_pack_ABC0001.0001").path), items["l2s-orphan"])
         assertEquals(3L * mib / 2, report.items.single { it.targetId == "claude-versions" }.bytes)
 
-        val copies = report.duplicates.single { big.path in it.paths }
-        assertEquals(listOf(big.path, File(home, "models/model-copy.bin").path), copies.paths)
+        // The copy is found, and the hard link is no copy at all. du lists a file with several links once, under the name
+        // it meets first in the folder, and that order is the filesystem's: model.bin on ext4 here, model-link.bin on
+        // tmpfs and on the 11-19 CI runner. So exactly one of the two names is in the group, whichever it is.
+        val copy = File(home, "models/model-copy.bin").path
+        val linkedNames = setOf(big.path, File(home, "downloads/model-link.bin").path)
+        val copies = report.duplicates.single { copy in it.paths }
+        assertEquals(copies.paths.toString(), 2, copies.paths.size)
+        assertEquals(copies.paths.toString(), 1, copies.paths.count { it in linkedNames })
         assertEquals(3L * mib / 2, copies.extraBytes)
 
         assertEquals(then, report.entry(layla.path)!!.mtime)
